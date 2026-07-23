@@ -14,6 +14,7 @@ import { DomainError, requirePermission, type ActorContext, type AuthRole } from
 import { auth } from "./auth";
 import { parseBusinessDate, toBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
+import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -522,6 +523,10 @@ export async function createUserAccount(
   metadata: RequestMetadata,
 ) {
   requirePermission(actor, "user:create");
+  await enforceSensitiveMutationRateLimit(actor, "user.create", {
+    windowSeconds: 300,
+    maxAttempts: 10,
+  });
 
   if (input.staffId) {
     const staff = await prisma.staffMember.findFirst({
@@ -552,6 +557,14 @@ export async function createUserAccount(
   const user = result.user;
   try {
     await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: user.id },
+        data: {
+          mustChangePassword: true,
+          invitedAt: new Date(),
+          passwordChangedAt: null,
+        },
+      });
       await appendAudit(tx, {
         actor,
         action: "user.create",
@@ -565,6 +578,7 @@ export async function createUserAccount(
           role: input.role,
           staffId: input.staffId ?? null,
           active: true,
+          mustChangePassword: true,
         },
         metadata,
       });
@@ -594,6 +608,7 @@ export async function createUserAccount(
     role: input.role,
     staffId: input.staffId ?? null,
     active: true,
+    mustChangePassword: true,
   };
 }
 
@@ -604,6 +619,10 @@ export async function updateUserAccount(
   metadata: RequestMetadata,
 ) {
   requirePermission(actor, "user:update");
+  await enforceSensitiveMutationRateLimit(actor, "user.update", {
+    windowSeconds: 60,
+    maxAttempts: 15,
+  });
   if (id === actor.userId && input.active === false) {
     throw new DomainError("VALIDATION_ERROR", "Không thể tự vô hiệu hóa tài khoản đang dùng.");
   }

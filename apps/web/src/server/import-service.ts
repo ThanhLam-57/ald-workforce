@@ -28,6 +28,7 @@ import {
 } from "./import-parser";
 import { createPrivateUploadUrl, readPrivateObject, verifyPrivateObject } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
+import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
 const IMPORT_BATCH_SIZE = 200;
 const MAX_PERSISTED_ERRORS = 10_000;
@@ -606,6 +607,10 @@ export async function previewImport(
   input: ImportPreviewInput,
   metadata: RequestMetadata,
 ): Promise<ImportJobDto> {
+  await enforceSensitiveMutationRateLimit(actor, "import.commit", {
+    windowSeconds: 300,
+    maxAttempts: 5,
+  });
   const job = await authorizedJob(actor, id);
   if (!["UPLOADED", "VALIDATED", "FAILED"].includes(job.status)) {
     throw new DomainError("CONFLICT", "Import job chưa sẵn sàng để validate.");

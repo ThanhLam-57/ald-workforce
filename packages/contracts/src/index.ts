@@ -65,10 +65,20 @@ export const assignmentUpdateSchema = z
   })
   .refine(() => true);
 
+const strongPasswordSchema = z
+  .string()
+  .min(12, "Mật khẩu phải có ít nhất 12 ký tự.")
+  .max(128)
+  .regex(/[a-z]/, "Mật khẩu phải có chữ thường.")
+  .regex(/[A-Z]/, "Mật khẩu phải có chữ hoa.")
+  .regex(/[0-9]/, "Mật khẩu phải có chữ số.")
+  .regex(/[^A-Za-z0-9]/, "Mật khẩu phải có ký tự đặc biệt.")
+  .refine((value) => !/\s/.test(value), "Mật khẩu không được chứa khoảng trắng.");
+
 export const userCreateSchema = z.object({
   email: z.email(),
   username: trimmedText("Tên đăng nhập", 30).regex(/^[A-Za-z0-9_.]+$/),
-  password: z.string().min(12).max(128),
+  password: strongPasswordSchema,
   name: trimmedText("Tên hiển thị", 120),
   role: z.enum(AUTH_ROLES),
   staffId: idSchema.nullable().optional(),
@@ -86,6 +96,16 @@ export const loginSchema = z.object({
   identifier: trimmedText("Email hoặc tên đăng nhập", 320),
   password: z.string().min(1).max(128),
 });
+
+export const passwordChangeSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(128),
+    newPassword: strongPasswordSchema,
+  })
+  .refine(({ currentPassword, newPassword }) => currentPassword !== newPassword, {
+    message: "Mật khẩu mới phải khác mật khẩu hiện tại.",
+    path: ["newPassword"],
+  });
 
 export const businessMonthSchema = z
   .string()

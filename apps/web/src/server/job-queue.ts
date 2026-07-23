@@ -25,8 +25,11 @@ async function readyQueue(): Promise<PgBoss> {
   globalQueue.aldBossReady = (async () => {
     const boss = queueInstance();
     await boss.start();
-    await boss.createQueue("payroll-export");
-    await boss.createQueue("data-export");
+    await boss.createQueue("export-dead-letter");
+    await boss.createQueue("payroll-export", { deadLetter: "export-dead-letter" });
+    await boss.createQueue("data-export", { deadLetter: "export-dead-letter" });
+    await boss.updateQueue("payroll-export", { deadLetter: "export-dead-letter" });
+    await boss.updateQueue("data-export", { deadLetter: "export-dead-letter" });
     await boss.createQueue("export-cleanup");
     return boss;
   })();
@@ -42,6 +45,8 @@ export async function enqueueDataExport(exportJobId: string): Promise<string> {
       singletonKey: exportJobId,
       retryLimit: 3,
       retryDelay: 30,
+      retryBackoff: true,
+      retryDelayMax: 5 * 60,
       expireInSeconds: 30 * 60,
     },
   );
@@ -58,9 +63,30 @@ export async function enqueuePayrollExport(exportJobId: string): Promise<string>
       singletonKey: exportJobId,
       retryLimit: 3,
       retryDelay: 30,
+      retryBackoff: true,
+      retryDelayMax: 5 * 60,
       expireInSeconds: 30 * 60,
     },
   );
   if (!jobId) throw new Error("Không thể enqueue payroll export job.");
   return jobId;
+}
+
+export async function getJobQueueOverview() {
+  const boss = await readyQueue();
+  const names = ["payroll-export", "data-export", "export-cleanup", "export-dead-letter"];
+  return Promise.all(
+    names.map(async (name) => {
+      const stats = await boss.getQueueStats(name, { force: true });
+      const latest = stats.at(-1);
+      return {
+        name,
+        queued: latest?.queuedCount ?? 0,
+        active: latest?.activeCount ?? 0,
+        failed: latest?.failedCount ?? 0,
+        total: latest?.totalCount ?? 0,
+        capturedAt: latest?.capturedOn.toISOString() ?? null,
+      };
+    }),
+  );
 }

@@ -55,6 +55,8 @@ export async function getOptionalActor(
     staffId: user.staffId ?? null,
     role,
     activeBranchIds,
+    mustChangePassword: user.mustChangePassword,
+    twoFactorEnabled: Boolean(user.twoFactorEnabled),
   };
 }
 
@@ -63,6 +65,22 @@ export async function requireActor(requestHeaders?: Headers): Promise<ActorConte
   if (!actor) {
     throw new DomainError("AUTHENTICATION_REQUIRED", "Vui lòng đăng nhập.");
   }
+  if (actor.mustChangePassword) {
+    throw new DomainError(
+      "PASSWORD_CHANGE_REQUIRED",
+      "Bạn phải đổi mật khẩu tạm thời trước khi tiếp tục.",
+    );
+  }
+  console.info(
+    JSON.stringify({
+      event: "request.authorized",
+      requestId: requestHeaders?.get("x-request-id") ?? null,
+      userId: actor.userId,
+      branchId: actor.activeBranchIds.length === 1 ? actor.activeBranchIds[0] : null,
+      branchScopeCount: actor.activeBranchIds.length,
+      role: actor.role,
+    }),
+  );
 
   return actor;
 }

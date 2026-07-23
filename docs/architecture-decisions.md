@@ -186,3 +186,14 @@
   khi đọc/export dữ liệu lịch sử.
 - Không thêm production dependency: parser/generator dùng ExcelJS, AWS SDK và pg-boss
   đã có từ các phase trước.
+
+# Production hardening (Prompt 8)
+
+- Giữ Better Auth 1.6.24 và pg-boss 12.26.2 hiện có; không thêm production dependency.
+- Bật TOTP từ plugin chính thức của Better Auth, database rate-limit và account lockout.
+- Chưa bật PostgreSQL RLS vì Prisma pooled connections chưa có request-scoped transaction
+  context cho toàn bộ query. Quyết định và điều kiện triển khai lại nằm trong `security.md`.
+- Web image chứa Prisma CLI/migrations để duy nhất web pre-deploy chạy migration; worker
+  không có migration step. Đổi lại image web lớn hơn standalone-only image, nhưng loại bỏ
+  race migration giữa services.
+- Railway Bucket là private storage; signed URL vẫn phải qua application authorization.

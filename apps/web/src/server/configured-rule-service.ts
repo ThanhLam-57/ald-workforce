@@ -38,6 +38,7 @@ import {
 
 import { parseBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
+import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -459,6 +460,10 @@ export async function createConfiguredRuleDraft(
   metadata: RequestMetadata,
 ): Promise<ConfiguredRuleVersionDto> {
   requirePermission(actor, "rule:write");
+  await enforceSensitiveMutationRateLimit(actor, "configured-rule.publish", {
+    windowSeconds: 300,
+    maxAttempts: 10,
+  });
   return prisma.$transaction(async (tx) => {
     const ruleSet = await tx.ruleSet.findFirst({
       where: { id: input.ruleSetId, companyId: actor.companyId, type: { not: "PENALTY" } },
@@ -522,6 +527,10 @@ export async function updateConfiguredRuleDraft(
   metadata: RequestMetadata,
 ): Promise<ConfiguredRuleVersionDto> {
   requirePermission(actor, "rule:write");
+  await enforceSensitiveMutationRateLimit(actor, "configured-rule.retire", {
+    windowSeconds: 300,
+    maxAttempts: 10,
+  });
   validateConfiguration(input.configuration);
   return prisma.$transaction(async (tx) => {
     const before = await tx.ruleVersion.findFirst({

@@ -1,7 +1,8 @@
 generator client {
-  provider     = "prisma-client"
-  output       = "../src/generated/prisma"
-  moduleFormat = "esm"
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
 }
 
 datasource db {
@@ -295,6 +296,10 @@ model User {
   banned                     Boolean                  @default(false)
   banReason                  String?
   banExpires                 DateTime?                @db.Timestamptz(3)
+  mustChangePassword         Boolean                  @default(false)
+  invitedAt                  DateTime?                @db.Timestamptz(3)
+  passwordChangedAt          DateTime?                @db.Timestamptz(3)
+  twoFactorEnabled           Boolean                  @default(false)
   version                    Int                      @default(1)
   createdAt                  DateTime                 @default(now()) @db.Timestamptz(3)
   updatedAt                  DateTime                 @updatedAt @db.Timestamptz(3)
@@ -302,6 +307,7 @@ model User {
   staff                      StaffMember?             @relation(fields: [staffId], references: [id], onDelete: SetNull)
   sessions                   Session[]
   accounts                   Account[]
+  twoFactor                  TwoFactor?
   auditLogs                  AuditLog[]               @relation("AuditActor")
   attendanceCreated          AttendanceDay[]          @relation("AttendanceCreatedBy")
   attendanceUpdated          AttendanceDay[]          @relation("AttendanceUpdatedBy")
@@ -330,6 +336,30 @@ model User {
 
   @@index([companyId, role, active])
   @@map("users")
+}
+
+model TwoFactor {
+  id                      String    @id @default(uuid()) @db.Uuid
+  secret                  String
+  backupCodes             String
+  verified                Boolean   @default(true)
+  failedVerificationCount Int       @default(0)
+  lockedUntil             DateTime? @db.Timestamptz(3)
+  userId                  String    @unique @db.Uuid
+  user                    User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([secret])
+  @@map("two_factors")
+}
+
+model RateLimit {
+  id          String @id @default(uuid()) @db.Uuid
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@index([lastRequest])
+  @@map("rate_limits")
 }
 
 model Session {

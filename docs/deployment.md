@@ -2,8 +2,11 @@
 
 ## 1. Topology
 
-- `web`: public, build từ `apps/web/Dockerfile`.
-- `worker`: private, build từ `apps/worker/Dockerfile`.
+- `web`: public, build từ `Dockerfile.web`.
+- `worker`: private, build từ `Dockerfile.worker`.
+
+Runbook production đầy đủ nằm tại [deployment-railway.md](deployment-railway.md).
+
 - PostgreSQL: private Railway database.
 - Storage bucket: private, S3-compatible.
 - Release/migration job: chạy một lần cho mỗi release, không chạy đồng thời trong web/worker.

@@ -27,6 +27,7 @@ import {
 
 import { parseBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
+import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
 const ENGINE_VERSION = "payroll-v1";
 type Transaction = Prisma.TransactionClient;
@@ -458,6 +459,10 @@ export async function createPayrollPeriod(
   metadata: RequestMetadata,
 ): Promise<PayrollPeriodDto> {
   requirePayrollWrite(actor);
+  await enforceSensitiveMutationRateLimit(actor, "payroll.create", {
+    windowSeconds: 300,
+    maxAttempts: 10,
+  });
   const bounds = periodBounds(input.month);
   const periodId = await prisma.$transaction(async (tx) => {
     const branch = await tx.branch.findFirst({
@@ -911,6 +916,10 @@ async function transitionPayroll(
   transition: "REVIEW" | "LOCK" | "PUBLISH",
 ): Promise<PayrollPeriodDto> {
   requirePayrollWrite(actor);
+  await enforceSensitiveMutationRateLimit(actor, `payroll.${transition.toLowerCase()}`, {
+    windowSeconds: 300,
+    maxAttempts: 10,
+  });
   await prisma.$transaction(async (tx) => {
     const period = await loadPeriodForActor(tx, actor, periodId, true);
     const expected =

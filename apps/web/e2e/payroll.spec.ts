@@ -18,7 +18,7 @@ test("GM mở sample payroll, calculate và xem breakdown", async ({ page }) => 
   const demoBranchId = await payroll
     .getByLabel("Chọn cơ sở payroll")
     .locator("option")
-    .filter({ hasText: "DEMO" })
+    .filter({ hasText: /^DEMO\s/ })
     .getAttribute("value");
   expect(demoBranchId).toBeTruthy();
   await payroll.getByLabel("Chọn cơ sở payroll").selectOption(demoBranchId!);

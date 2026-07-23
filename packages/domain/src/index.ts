@@ -8,6 +8,8 @@ export type ActorContext = Readonly<{
   staffId: string | null;
   role: AuthRole;
   activeBranchIds: readonly string[];
+  mustChangePassword?: boolean;
+  twoFactorEnabled?: boolean;
 }>;
 
 export type ResourceAction =
@@ -116,6 +118,8 @@ export class DomainError extends Error {
     public readonly code:
       | "AUTHENTICATION_REQUIRED"
       | "ACCOUNT_DISABLED"
+      | "PASSWORD_CHANGE_REQUIRED"
+      | "RATE_LIMITED"
       | "FORBIDDEN"
       | "NOT_FOUND"
       | "CONFLICT"

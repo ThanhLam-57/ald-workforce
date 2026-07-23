@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17.7-alpine3.23
+        env:
+          POSTGRES_DB: ald_workforce
+          POSTGRES_USER: ald_ci
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ald_ci -d ald_workforce"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CI: "true"
+      DATABASE_URL: postgresql://ald_ci:ci-only-password@127.0.0.1:5432/ald_workforce
+      BETTER_AUTH_SECRET: ci-only-better-auth-secret-at-least-32-characters
+      BETTER_AUTH_URL: http://localhost:3100
+      NEXT_PUBLIC_APP_URL: http://localhost:3100
+      TRUSTED_ORIGINS: http://localhost:3100
+      ALLOW_DEMO_SEED: "true"
+      SEED_GM_PASSWORD: Ci-GM-Password-123!
+      SEED_MANAGER_PASSWORD: Ci-Manager-Password-123!
+      SEED_EMPLOYEE_PASSWORD: Ci-Employee-Password-123!
+      S3_ENDPOINT: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: ald-ci-private
+      S3_ACCESS_KEY: ald_ci
+      S3_SECRET_KEY: ci-only-minio-password
+      S3_FORCE_PATH_STYLE: "true"
+      S3_AUTO_CREATE_BUCKET: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Start private object storage
+        run: |
+          docker run --detach --name ald-minio \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=ald_ci \
+            --env MINIO_ROOT_PASSWORD=ci-only-minio-password \
+            quay.io/minio/minio:RELEASE.2025-10-15T17-29-55Z \
+            server /data
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:9000/minio/health/live && break
+            sleep 1
+          done
+          curl --fail http://127.0.0.1:9000/minio/health/live
+      - name: Deploy migrations and seed
+        run: |
+          pnpm db:deploy
+          pnpm db:seed
+      - name: Static checks
+        run: |
+          pnpm lint
+          pnpm typecheck
+      - name: Unit tests
+        run: pnpm test
+      - name: Integration tests
+        run: pnpm test:integration
+      - name: Build
+        run: pnpm build
+      - name: Install Playwright Chromium
+        run: pnpm --filter @ald/web exec playwright install --with-deps chromium
+      - name: End-to-end tests
+        run: pnpm test:e2e

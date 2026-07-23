@@ -14,6 +14,7 @@ import { ManagerKpiWorkspace } from "./manager-kpi-workspace";
 import { PenaltyRuleCenter } from "./penalty-rule-center";
 import { PayrollWorkspace } from "./payroll-workspace";
 import { SignOutButton } from "./sign-out-button";
+import { TwoFactorSettings } from "./two-factor-settings";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,9 @@ export default async function DashboardPage() {
   const actor = await getOptionalActor();
   if (!actor) {
     redirect("/login");
+  }
+  if (actor.mustChangePassword) {
+    redirect("/change-password");
   }
 
   const [branches, staff, attendanceStaff] =
@@ -52,6 +56,9 @@ export default async function DashboardPage() {
         </div>
         <SignOutButton />
       </header>
+      {actor.role === "GENERAL_MANAGER" ? (
+        <TwoFactorSettings enabled={Boolean(actor.twoFactorEnabled)} />
+      ) : null}
 
       {actor.role === "LIVE_EMPLOYEE" ? (
         <PayrollWorkspace branches={[]} isGeneralManager={false} />

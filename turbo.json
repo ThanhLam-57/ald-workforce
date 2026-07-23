@@ -5,6 +5,8 @@
     "BETTER_AUTH_SECRET",
     "BETTER_AUTH_URL",
     "NEXT_PUBLIC_APP_URL",
+    "TRUSTED_ORIGINS",
+    "METRICS_TOKEN",
     "PORT",
     "S3_ENDPOINT",
     "S3_REGION",
@@ -12,7 +14,9 @@
     "S3_ACCESS_KEY",
     "S3_SECRET_KEY",
     "S3_FORCE_PATH_STYLE",
-    "S3_AUTO_CREATE_BUCKET"
+    "S3_AUTO_CREATE_BUCKET",
+    "EXPORT_RETENTION_DAYS",
+    "ERROR_TRACKING_DSN"
   ],
   "tasks": {
     "build": {
