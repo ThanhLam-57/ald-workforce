@@ -1,6 +1,6 @@
 # ALD Workforce
 
-Ứng dụng nội bộ quản lý nhiều cơ sở, nhân sự, chấm công, KPI, doanh số và tính lương. Prompt 0 triển khai foundation production-oriented: Better Auth database session, RBAC theo company/branch, branch/staff/account/assignment, audit và health endpoints. Rule/payroll chưa được triển khai ở phase này.
+Ứng dụng nội bộ quản lý nhiều cơ sở, nhân sự, chấm công, KPI, doanh số và tính lương. Foundation gồm Better Auth database session, RBAC theo company/branch, branch/staff/account/assignment và audit. Prompt 1 bổ sung attendance + Live metrics theo tháng, autosave optimistic-lock và export báo lỗi không chứa doanh số. Violation, rule, KPI và payroll chưa được triển khai.
 
 ## Yêu cầu
 
@@ -59,7 +59,7 @@ pnpm db:seed
 
 Development dùng `prisma migrate dev`; release chỉ dùng `prisma migrate deploy` từ một release job duy nhất. Web và worker không tự chạy migration khi start.
 
-## API Phase 1
+## API hiện có
 
 - `GET /api/health/live`
 - `GET /api/health/ready`
@@ -72,8 +72,11 @@ Development dùng `prisma migrate dev`; release chỉ dùng `prisma migrate depl
 - `PATCH /api/assignments/:id`
 - `POST /api/users`
 - `PATCH /api/users/:id`
+- `GET|POST /api/attendance`
+- `PATCH|DELETE /api/attendance/:id` (`DELETE` là archive, không hard-delete)
+- `GET /api/exports/employee-error-report`
 
-Mọi response nghiệp vụ authenticated dùng `private, no-store`. Các mutation GM quan trọng yêu cầu `reason`, optimistic `version` khi update và ghi audit.
+Mọi response nghiệp vụ authenticated dùng `private, no-store`. Mutation attendance yêu cầu `reason`, update/archive dùng optimistic `version` và ghi audit before/after. Doanh số được serialize thành string; ngày nghiệp vụ dùng `Asia/Ho_Chi_Minh`.
 
 ## Tài liệu
 

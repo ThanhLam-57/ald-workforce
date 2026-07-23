@@ -49,6 +49,7 @@ export function toErrorResponse(error: unknown): Response {
         error: {
           code: error.code,
           message: error.message,
+          ...(error.details ? { details: error.details } : {}),
         },
       },
       { status: statusByCode[error.code] },

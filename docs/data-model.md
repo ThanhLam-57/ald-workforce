@@ -103,16 +103,22 @@ Migration bật extension `btree_gist` trước khi tạo exclusion constraint.
 - `import_jobs` có idempotency key unique theo company/type; row results lưu validation status.
 - `export_jobs` lưu loại export, filter snapshot, storage object key và expiry.
 
-## 4. Prisma schema Phase 1
+## 4. Prisma schema đã materialize
 
-Phase 1 chỉ materialize:
+Foundation materialize:
 
 - Company, Branch, StaffMember, User;
 - Better Auth Session, Account, Verification;
 - BranchAssignment;
 - AuditLog.
 
-Attendance, rules, KPI và payroll chỉ có trong mô hình logic/tài liệu ở Prompt 0 và sẽ được thêm bằng migration riêng theo phase.
+Prompt 1 materialize:
+
+- `AttendanceDay`: unique company/staff/business date, timestamp UTC, Decimal work units, phút nguyên, version và archive;
+- `LiveDailyMetric`: extension 1–1, phút Live, revenue BIGINT và snapshot cấu hình đơn vị;
+- company revenue unit/scale.
+
+Violation/evidence, rules, KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration riêng.
 
 ## 5. Migration plan
 
@@ -122,9 +128,10 @@ Attendance, rules, KPI và payroll chỉ có trong mô hình logic/tài liệu �
    - Better Auth tables;
    - company, branch, staff, assignment, audit;
    - unique keys, FK, indexes và assignment exclusion constraint.
-2. `0002_attendance_live`
-   - attendance day, live metric, violation/evidence;
-   - unique attendance day và publish state.
+2. `0002_attendance_live` — đã triển khai
+   - attendance day và live metric 1–1;
+   - unique attendance day, check constraints, optimistic version và archive;
+   - violation/evidence và publish workflow được để ở phase sau.
 3. `0003_versioned_rules`
    - rule set/version;
    - immutable trigger/policy và exclusion interval.

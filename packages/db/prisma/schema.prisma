@@ -27,11 +27,25 @@ enum AssignmentType {
   SECONDARY_MANAGER
 }
 
+enum AttendanceStatus {
+  DRAFT
+  PRESENT
+  ABSENT
+  LEAVE
+}
+
+enum RevenueUnit {
+  VND
+  THOUSAND_VND
+}
+
 model Company {
   id                     String             @id @default(uuid()) @db.Uuid
   name                   String
   slug                   String             @unique
   timezone               String             @default("Asia/Ho_Chi_Minh")
+  revenueUnit            RevenueUnit        @default(VND)
+  revenueScale           Int                @default(1)
   selfServiceEnabled     Boolean            @default(false)
   employeeRevenueVisible Boolean            @default(false)
   version                Int                @default(1)
@@ -41,23 +55,27 @@ model Company {
   staffMembers           StaffMember[]
   users                  User[]
   branchAssignments      BranchAssignment[]
+  attendanceDays         AttendanceDay[]
+  liveDailyMetrics       LiveDailyMetric[]
   auditLogs              AuditLog[]
 
   @@map("companies")
 }
 
 model Branch {
-  id          String             @id @default(uuid()) @db.Uuid
-  companyId   String             @db.Uuid
-  code        String
-  name        String
-  address     String?
-  isActive    Boolean            @default(true)
-  version     Int                @default(1)
-  createdAt   DateTime           @default(now()) @db.Timestamptz(3)
-  updatedAt   DateTime           @updatedAt @db.Timestamptz(3)
-  company     Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  assignments BranchAssignment[]
+  id               String             @id @default(uuid()) @db.Uuid
+  companyId        String             @db.Uuid
+  code             String
+  name             String
+  address          String?
+  isActive         Boolean            @default(true)
+  version          Int                @default(1)
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime           @updatedAt @db.Timestamptz(3)
+  company          Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  assignments      BranchAssignment[]
+  attendanceDays   AttendanceDay[]
+  liveDailyMetrics LiveDailyMetric[]
 
   @@unique([companyId, code])
   @@index([companyId, isActive])
@@ -65,22 +83,23 @@ model Branch {
 }
 
 model StaffMember {
-  id                 String                 @id @default(uuid()) @db.Uuid
-  companyId          String                 @db.Uuid
+  id                 String             @id @default(uuid()) @db.Uuid
+  companyId          String             @db.Uuid
   staffCode          String
   fullName           String
   email              String?
   phone              String?
   jobTitle           String
   employmentCategory EmploymentCategory
-  employmentStatus   EmploymentStatus       @default(ACTIVE)
-  version            Int                    @default(1)
-  archivedAt         DateTime?              @db.Timestamptz(3)
-  createdAt          DateTime               @default(now()) @db.Timestamptz(3)
-  updatedAt          DateTime               @updatedAt @db.Timestamptz(3)
-  company            Company                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  employmentStatus   EmploymentStatus   @default(ACTIVE)
+  version            Int                @default(1)
+  archivedAt         DateTime?          @db.Timestamptz(3)
+  createdAt          DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(3)
+  company            Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
   user               User?
   assignments        BranchAssignment[]
+  attendanceDays     AttendanceDay[]
 
   @@unique([companyId, staffCode])
   @@index([companyId, employmentStatus, archivedAt])
@@ -88,28 +107,30 @@ model StaffMember {
 }
 
 model User {
-  id              String      @id @default(uuid()) @db.Uuid
-  companyId       String      @db.Uuid
-  staffId         String?     @unique @db.Uuid
-  name            String
-  email           String      @unique
-  emailVerified   Boolean     @default(false)
-  image           String?
-  username        String?     @unique
-  displayUsername String?
-  role            String      @default("LIVE_EMPLOYEE")
-  active          Boolean     @default(true)
-  banned          Boolean     @default(false)
-  banReason       String?
-  banExpires      DateTime?   @db.Timestamptz(3)
-  version         Int         @default(1)
-  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
-  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
-  company         Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  staff           StaffMember? @relation(fields: [staffId], references: [id], onDelete: SetNull)
-  sessions        Session[]
-  accounts        Account[]
-  auditLogs       AuditLog[]  @relation("AuditActor")
+  id                String          @id @default(uuid()) @db.Uuid
+  companyId         String          @db.Uuid
+  staffId           String?         @unique @db.Uuid
+  name              String
+  email             String          @unique
+  emailVerified     Boolean         @default(false)
+  image             String?
+  username          String?         @unique
+  displayUsername   String?
+  role              String          @default("LIVE_EMPLOYEE")
+  active            Boolean         @default(true)
+  banned            Boolean         @default(false)
+  banReason         String?
+  banExpires        DateTime?       @db.Timestamptz(3)
+  version           Int             @default(1)
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
+  company           Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff             StaffMember?    @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  sessions          Session[]
+  accounts          Account[]
+  auditLogs         AuditLog[]      @relation("AuditActor")
+  attendanceCreated AttendanceDay[] @relation("AttendanceCreatedBy")
+  attendanceUpdated AttendanceDay[] @relation("AttendanceUpdatedBy")
 
   @@index([companyId, role, active])
   @@map("users")
@@ -152,12 +173,12 @@ model Account {
 }
 
 model Verification {
-  id         String    @id @default(uuid()) @db.Uuid
+  id         String   @id @default(uuid()) @db.Uuid
   identifier String
   value      String
-  expiresAt  DateTime  @db.Timestamptz(3)
-  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
-  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+  expiresAt  DateTime @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
 
   @@index([identifier])
   @@map("verifications")
@@ -182,6 +203,57 @@ model BranchAssignment {
   @@index([companyId, branchId, effectiveFrom, effectiveTo])
   @@index([companyId, staffId, effectiveFrom, effectiveTo])
   @@map("branch_assignments")
+}
+
+model AttendanceDay {
+  id              String           @id @default(uuid()) @db.Uuid
+  companyId       String           @db.Uuid
+  branchId        String           @db.Uuid
+  staffId         String           @db.Uuid
+  businessDate    DateTime         @db.Date
+  checkInAt       DateTime?        @db.Timestamptz(3)
+  checkOutAt      DateTime?        @db.Timestamptz(3)
+  spansNextDay    Boolean          @default(false)
+  workUnits       Decimal          @default(0) @db.Decimal(6, 2)
+  overtimeMinutes Int              @default(0)
+  note            String?
+  status          AttendanceStatus @default(DRAFT)
+  version         Int              @default(1)
+  archivedAt      DateTime?        @db.Timestamptz(3)
+  createdByUserId String           @db.Uuid
+  updatedByUserId String           @db.Uuid
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(3)
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch          Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  staff           StaffMember      @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  createdBy       User             @relation("AttendanceCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  updatedBy       User             @relation("AttendanceUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: Restrict)
+  liveMetric      LiveDailyMetric?
+
+  @@unique([companyId, staffId, businessDate])
+  @@index([companyId, branchId, businessDate])
+  @@index([companyId, staffId, businessDate])
+  @@map("attendance_days")
+}
+
+model LiveDailyMetric {
+  id                String        @id @default(uuid()) @db.Uuid
+  companyId         String        @db.Uuid
+  branchId          String        @db.Uuid
+  attendanceId      String        @unique @db.Uuid
+  actualLiveMinutes Int           @default(0)
+  revenueAmount     BigInt        @default(0)
+  revenueUnit       RevenueUnit
+  revenueScale      Int
+  createdAt         DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime      @updatedAt @db.Timestamptz(3)
+  company           Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch            Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  attendance        AttendanceDay @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId])
+  @@map("live_daily_metrics")
 }
 
 model AuditLog {

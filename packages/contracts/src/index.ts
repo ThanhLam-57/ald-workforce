@@ -86,6 +86,118 @@ export const loginSchema = z.object({
   password: z.string().min(1).max(128),
 });
 
+export const businessMonthSchema = z
+  .string()
+  .regex(/^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/, "Tháng phải có định dạng YYYY-MM.");
+
+const workUnitsSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{1,2}(\.\d{1,2})?$/, "Số công phải là số không âm, tối đa 2 chữ số thập phân.")
+  .refine((value) => Number(value) <= 10, "Số công không được vượt quá 10.");
+
+const revenueAmountSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+$/, "Doanh số phải là số nguyên không âm.")
+  .refine(
+    (value) => BigInt(value) <= 9_223_372_036_854_775_807n,
+    "Doanh số vượt giới hạn lưu trữ.",
+  );
+
+const attendanceValuesSchema = z.object({
+  checkInAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  checkOutAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  spansNextDay: z.boolean().optional(),
+  workUnits: workUnitsSchema.optional(),
+  overtimeMinutes: z.number().int().min(0).max(2_880).optional(),
+  note: z.string().trim().max(2_000).nullable().optional(),
+  status: z.enum(["DRAFT", "PRESENT", "ABSENT", "LEAVE"]).optional(),
+  actualLiveMinutes: z.number().int().min(0).max(2_880).optional(),
+  revenueAmount: revenueAmountSchema.optional(),
+});
+
+export const attendanceCreateSchema = attendanceValuesSchema.extend({
+  staffId: idSchema,
+  businessDate: z.iso.date(),
+  reason: reasonSchema,
+});
+
+export const attendanceUpdateSchema = attendanceValuesSchema.extend({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const attendanceArchiveSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const attendanceMonthQuerySchema = z.object({
+  staffId: idSchema,
+  month: businessMonthSchema,
+});
+
+export type AttendanceRecordDto = Readonly<{
+  id: string;
+  staffId: string;
+  branchId: string;
+  businessDate: string;
+  checkInAt: string | null;
+  checkOutAt: string | null;
+  spansNextDay: boolean;
+  workUnits: string;
+  overtimeMinutes: number;
+  note: string | null;
+  status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+  version: number;
+  archivedAt: string | null;
+  actualLiveMinutes: number;
+  revenueAmount: string;
+  revenueUnit: "VND" | "THOUSAND_VND";
+  revenueScale: number;
+}>;
+
+export type AttendanceMonthDayDto = Readonly<{
+  businessDate: string;
+  dayOfWeek: number;
+  attendance: AttendanceRecordDto | null;
+}>;
+
+export type AttendanceMonthDto = Readonly<{
+  month: string;
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    jobTitle: string;
+  }>;
+  revenueConfig: Readonly<{
+    unit: "VND" | "THOUSAND_VND";
+    scale: number;
+  }>;
+  days: readonly AttendanceMonthDayDto[];
+}>;
+
+export type EmployeeErrorReportDto = Readonly<{
+  reportType: "EMPLOYEE_ERROR_REPORT";
+  month: string;
+  generatedAt: string;
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+  }>;
+  attendance: readonly Readonly<{
+    businessDate: string;
+    status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+    workUnits: string;
+    overtimeMinutes: number;
+    note: string | null;
+  }>[];
+  violations: readonly [];
+}>;
+
 export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
 export type BranchUpdateInput = z.infer<typeof branchUpdateSchema>;
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
@@ -94,3 +206,7 @@ export type AssignmentCreateInput = z.infer<typeof assignmentCreateSchema>;
 export type AssignmentUpdateInput = z.infer<typeof assignmentUpdateSchema>;
 export type UserCreateInput = z.infer<typeof userCreateSchema>;
 export type UserUpdateInput = z.infer<typeof userUpdateSchema>;
+export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
+export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
+export type AttendanceArchiveInput = z.infer<typeof attendanceArchiveSchema>;
+export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;

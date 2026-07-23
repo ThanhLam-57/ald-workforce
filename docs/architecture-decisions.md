@@ -42,3 +42,17 @@
 - Trạng thái: Accepted
 - Quyết định: dùng generator `prisma-client` với output tường minh và PostgreSQL driver adapter.
 - Lý do: phù hợp Prisma 7, tránh phụ thuộc generated code ẩn trong `node_modules` và giúp web/worker import cùng một client package.
+
+## ADR-008 — Attendance duy nhất, branch snapshot và archive
+
+- Trạng thái: Accepted
+- Quyết định: attendance unique theo `(companyId, staffId, businessDate)` kể cả khi archive; branch được resolve từ assignment hiệu lực và snapshot vào record, không nhận từ client.
+- Quyết định: live metric là extension 1–1, snapshot `revenueUnit/revenueScale`; amount dùng BIGINT và API dùng string.
+- Quyết định: `DELETE /api/attendance/:id` chỉ đặt `archivedAt`, tăng version và audit before/after.
+- Lý do: ngăn nhập trùng, giữ lịch sử chuyển cơ sở, tránh diễn giải lại doanh số khi config đổi và tuân thủ no-hard-delete.
+
+## ADR-009 — Autosave optimistic concurrency
+
+- Trạng thái: Accepted
+- Quyết định: update/archive phải gửi version; update dùng compare-and-increment trong transaction. Conflict trả HTTP 409 kèm DTO `current` đã authorize để UI tải lại hoặc ghép thay đổi.
+- Lý do: bảng tháng có nhiều người nhập đồng thời; last-write-wins sẽ làm mất dữ liệu mà không cảnh báo.

@@ -1,8 +1,10 @@
 import { redirect } from "next/navigation";
 
+import { listAttendanceStaff } from "@/server/attendance-service";
 import { getOptionalActor } from "@/server/auth-context";
 import { listBranches, listStaff } from "@/server/services";
 
+import { AttendanceWorkspace } from "./attendance-workspace";
 import { FoundationAdmin } from "./foundation-admin";
 import { SignOutButton } from "./sign-out-button";
 
@@ -20,10 +22,14 @@ export default async function DashboardPage() {
     redirect("/login");
   }
 
-  const [branches, staff] =
+  const [branches, staff, attendanceStaff] =
     actor.role === "LIVE_EMPLOYEE"
-      ? [[], []]
-      : await Promise.all([listBranches(actor), listStaff(actor, new Date())]);
+      ? [[], [], []]
+      : await Promise.all([
+          listBranches(actor),
+          listStaff(actor, new Date()),
+          listAttendanceStaff(actor, new Date()),
+        ]);
 
   return (
     <main className="mx-auto min-h-screen max-w-7xl px-6 py-8">
@@ -84,6 +90,7 @@ export default async function DashboardPage() {
               )}
             </section>
           </div>
+          <AttendanceWorkspace staff={attendanceStaff} />
           {actor.role === "GENERAL_MANAGER" ? (
             <FoundationAdmin
               branches={branches.map((branch) => ({

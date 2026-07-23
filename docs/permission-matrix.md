@@ -60,6 +60,17 @@ Client không được quyết định scope. `branchId`, `companyId`, `staffId`
 - `LIVE_EMPLOYEE`: `staffId = session.user.staffId`, record published, self-service bật và field-level setting cho phép.
 - Dữ liệu tiền lương/doanh số bị loại khỏi DTO ngay tại server nếu role/setting không cho phép.
 
+### Endpoint attendance (Prompt 1)
+
+| Endpoint                                 | GM                          | TM                                                 | Employee                                |
+| ---------------------------------------- | --------------------------- | -------------------------------------------------- | --------------------------------------- | ----- |
+| `GET /api/attendance?staffId&month`      | Staff toàn company          | Chỉ Live staff trong branch hiện tại               | Chưa bật                                |
+| `POST /api/attendance`                   | Live staff và manager       | Chỉ Live staff trong branch, không phải chính mình | Không                                   |
+| `PATCH                                   | DELETE /api/attendance/:id` | Toàn company                                       | Cùng scope như create; version bắt buộc | Không |
+| `GET /api/exports/employee-error-report` | Staff toàn company          | Chỉ Live staff trong branch                        | Không                                   |
+
+`branchId` không xuất hiện trong mutation input. Server resolve assignment tại business date rồi snapshot branch. Export error report dùng allow-list attendance và không select live metric/revenue.
+
 ## 5. Test bắt buộc
 
 - TM branch A gọi branch B bằng ID đoán được → `404` hoặc `403` thống nhất, không rò metadata.

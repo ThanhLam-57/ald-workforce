@@ -29,11 +29,17 @@ Exit:
 
 ## Phase 2 — Attendance và Live metrics
 
-- Attendance day/live metric/violation/evidence schema.
-- Bảng nhân viên/tháng, autosave + version conflict, keyboard/grid behavior.
-- Server-side export báo lỗi không có revenue.
-- Publish workflow và employee DTO.
-- Integration/E2E branch scope và field redaction.
+Đã hoàn thành trong Prompt 1:
+
+- Attendance day/live metric schema, unique staff/date, check constraints và archive.
+- Hồ sơ ngày + lưới tháng dùng chung endpoint, autosave, 409 reload/merge và keyboard navigation.
+- Employee error report skeleton không query/serialize revenue.
+- Integration/E2E branch scope, GM/TM permission, timezone và optimistic concurrency.
+
+Còn lại cho phase có violation/self-service:
+
+- Violation/evidence schema và rule linkage.
+- Publish workflow và DTO employee chỉ đọc dữ liệu đã publish.
 
 ## Phase 3 — Versioned rule center
 

@@ -35,3 +35,35 @@ textarea:focus {
   border-color: #0284c7;
   outline: 2px solid rgb(14 165 233 / 20%);
 }
+
+.attendance-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+}
+
+.attendance-table th,
+.attendance-table td {
+  border-bottom: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+  padding: 0.55rem;
+  vertical-align: top;
+}
+
+.attendance-table thead th {
+  background: #f1f5f9;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.attendance-table input:not([type="checkbox"]),
+.attendance-table select {
+  min-width: 6.5rem;
+  width: 100%;
+}
+
+.attendance-table input[type="checkbox"] {
+  height: 1.1rem;
+  width: 1.1rem;
+}
