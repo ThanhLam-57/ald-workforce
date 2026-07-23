@@ -9,6 +9,7 @@ import { BranchOverviewWorkspace } from "./branch-overview-workspace";
 import { ConfiguredRuleCenter } from "./configured-rule-center";
 import { FoundationAdmin } from "./foundation-admin";
 import { PenaltyRuleCenter } from "./penalty-rule-center";
+import { PayrollWorkspace } from "./payroll-workspace";
 import { SignOutButton } from "./sign-out-button";
 
 export const dynamic = "force-dynamic";
@@ -50,13 +51,7 @@ export default async function DashboardPage() {
       </header>
 
       {actor.role === "LIVE_EMPLOYEE" ? (
-        <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6">
-          <h2 className="text-lg font-semibold">Self-service chưa được bật</h2>
-          <p className="mt-2 text-sm text-slate-600">
-            Phase 1 chỉ thiết lập tài khoản và quyền nền tảng. Dữ liệu nhân viên chỉ hiển thị sau
-            khi luồng publish được triển khai.
-          </p>
-        </section>
+        <PayrollWorkspace branches={[]} isGeneralManager={false} />
       ) : (
         <>
           <div className="mt-8 grid gap-6 lg:grid-cols-2">
@@ -106,6 +101,16 @@ export default async function DashboardPage() {
             isGeneralManager={actor.role === "GENERAL_MANAGER"}
           />
           <ConfiguredRuleCenter isGeneralManager={actor.role === "GENERAL_MANAGER"} />
+          {actor.role === "GENERAL_MANAGER" ? (
+            <PayrollWorkspace
+              branches={branches.map((branch) => ({
+                id: branch.id,
+                code: branch.code,
+                name: branch.name,
+              }))}
+              isGeneralManager
+            />
+          ) : null}
           {actor.role === "GENERAL_MANAGER" ? <PenaltyRuleCenter /> : null}
           {actor.role === "GENERAL_MANAGER" ? (
             <FoundationAdmin

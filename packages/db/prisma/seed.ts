@@ -93,8 +93,13 @@ if (!userId) {
   userId = created.user.id;
 }
 
+if (!userId) {
+  throw new Error("Không thể xác định GM user sau seed.");
+}
+const seededUserId = userId;
+
 await prisma.user.update({
-  where: { id: userId },
+  where: { id: seededUserId },
   data: {
     companyId: company.id,
     staffId: staff.id,
@@ -108,13 +113,234 @@ await prisma.user.update({
   },
 });
 
+const businessMonthParts = new Intl.DateTimeFormat("en-US", {
+  timeZone: "Asia/Ho_Chi_Minh",
+  year: "numeric",
+  month: "2-digit",
+}).formatToParts(new Date());
+const payrollDemoMonth =
+  process.env.SEED_PAYROLL_MONTH ??
+  `${businessMonthParts.find((part) => part.type === "year")?.value}-${businessMonthParts.find((part) => part.type === "month")?.value}`;
+const [demoYearText, demoMonthText] = payrollDemoMonth.split("-");
+const demoYear = Number(demoYearText);
+const demoMonthIndex = Number(demoMonthText) - 1;
+const demoMonthStart = new Date(Date.UTC(demoYear, demoMonthIndex, 1));
+const demoMonthEnd = new Date(Date.UTC(demoYear, demoMonthIndex + 1, 1));
+const demoWorkDate = new Date(Date.UTC(demoYear, demoMonthIndex, 15));
+
+const demoBranch = await prisma.branch.upsert({
+  where: { companyId_code: { companyId: company.id, code: "DEMO" } },
+  update: { name: "Cơ sở Demo Payroll", isActive: true },
+  create: {
+    companyId: company.id,
+    code: "DEMO",
+    name: "Cơ sở Demo Payroll",
+  },
+});
+const demoStaff = await prisma.staffMember.upsert({
+  where: {
+    companyId_staffCode: { companyId: company.id, staffCode: "LIVEDEMO" },
+  },
+  update: {
+    fullName: "Nhân viên Live Demo",
+    streamingAlias: "ald-demo",
+    employmentStatus: "ACTIVE",
+  },
+  create: {
+    companyId: company.id,
+    staffCode: "LIVEDEMO",
+    fullName: "Nhân viên Live Demo",
+    streamingAlias: "ald-demo",
+    jobTitle: "Nhân viên Live",
+    employmentCategory: "OFFICIAL",
+  },
+});
+const demoAssignment = await prisma.branchAssignment.findFirst({
+  where: {
+    companyId: company.id,
+    branchId: demoBranch.id,
+    staffId: demoStaff.id,
+    archivedAt: null,
+  },
+  select: { id: true },
+});
+if (!demoAssignment) {
+  await prisma.branchAssignment.create({
+    data: {
+      companyId: company.id,
+      branchId: demoBranch.id,
+      staffId: demoStaff.id,
+      assignmentType: "MEMBER",
+      effectiveFrom: demoMonthStart,
+    },
+  });
+}
+
+async function ensureDemoRule(
+  type: "SALARY_RULES" | "DAILY_REWARD_TIERS" | "MONTHLY_LEVEL_RULES",
+  name: string,
+  configuration: object,
+): Promise<void> {
+  let set = await prisma.ruleSet.findUnique({
+    where: { companyId_type_name: { companyId: company.id, type, name } },
+    select: { id: true },
+  });
+  set ??= await prisma.ruleSet.create({
+    data: {
+      companyId: company.id,
+      type,
+      name,
+      createdByUserId: seededUserId,
+    },
+    select: { id: true },
+  });
+  const version = await prisma.ruleVersion.findUnique({
+    where: { ruleSetId_versionNo: { ruleSetId: set.id, versionNo: 1 } },
+    select: { id: true },
+  });
+  if (!version) {
+    await prisma.ruleVersion.create({
+      data: {
+        companyId: company.id,
+        ruleSetId: set.id,
+        versionNo: 1,
+        status: "ACTIVE",
+        effectiveFrom: demoMonthStart,
+        effectiveTo: demoMonthEnd,
+        configuration,
+        notes: "Sample seed payroll demo",
+        createdByUserId: seededUserId,
+        publishedByUserId: seededUserId,
+        publishedAt: new Date(),
+      },
+    });
+  }
+}
+
+await ensureDemoRule("SALARY_RULES", `Demo lương ${payrollDemoMonth}`, {
+  kind: "SALARY_RULES",
+  baseSalary: "13000000",
+  standardWorkdays: "26",
+  standardDailyMinutes: 480,
+  overtime: { multiplierBps: 15000, eligibleAfterMinutes: 0 },
+  attendancePolicy: {
+    eligibleStatuses: ["PRESENT"],
+    prorateMode: "WORK_UNITS",
+    minimumWorkUnitsForFullSalary: null,
+    capAtStandardWorkdays: true,
+  },
+  roundingPolicy: { unit: 1000, mode: "HALF_UP", applyAt: "COMPONENT" },
+});
+await ensureDemoRule("DAILY_REWARD_TIERS", `Demo thưởng ngày ${payrollDemoMonth}`, {
+  kind: "DAILY_REWARD_TIERS",
+  gapPolicy: "REQUIRE_CONTIGUOUS",
+  tiers: [
+    {
+      code: "DEMO",
+      name: "Demo",
+      minRevenue: "0",
+      maxRevenue: null,
+      minInclusive: true,
+      maxInclusive: false,
+      rewardAmount: "100000",
+      priority: 0,
+    },
+  ],
+});
+await ensureDemoRule("MONTHLY_LEVEL_RULES", `Demo thưởng tháng ${payrollDemoMonth}`, {
+  kind: "MONTHLY_LEVEL_RULES",
+  gapPolicy: "REQUIRE_CONTIGUOUS",
+  levels: [
+    {
+      code: "DEMO",
+      name: "Level Demo",
+      displayOrder: 1,
+      minRevenue: "0",
+      maxRevenue: null,
+      minInclusive: true,
+      maxInclusive: false,
+      monthlyRevenueBonus: "300000",
+      attendanceBonus: "100000",
+      achievementBonus: "100000",
+      retainLevelBonus: "0",
+      jumpLevelBonus: "0",
+      attendanceMinWorkUnits: "1",
+      achievementMinLiveMinutes: 300,
+      jumpMinLevelSteps: 2,
+    },
+  ],
+});
+
+const demoAttendance = await prisma.attendanceDay.findUnique({
+  where: {
+    companyId_staffId_businessDate: {
+      companyId: company.id,
+      staffId: demoStaff.id,
+      businessDate: demoWorkDate,
+    },
+  },
+  select: { id: true },
+});
+if (!demoAttendance) {
+  await prisma.attendanceDay.create({
+    data: {
+      companyId: company.id,
+      branchId: demoBranch.id,
+      staffId: demoStaff.id,
+      businessDate: demoWorkDate,
+      status: "PRESENT",
+      workUnits: "1",
+      overtimeMinutes: 60,
+      note: "Sample seed payroll demo",
+      createdByUserId: seededUserId,
+      updatedByUserId: seededUserId,
+      liveMetric: {
+        create: {
+          companyId: company.id,
+          branchId: demoBranch.id,
+          actualLiveMinutes: 360,
+          revenueAmount: 2_000_000n,
+          revenueUnit: "VND",
+          revenueScale: 1,
+        },
+      },
+    },
+  });
+}
+const demoPeriod = await prisma.payrollPeriod.findFirst({
+  where: {
+    companyId: company.id,
+    branchId: demoBranch.id,
+    month: demoMonthStart,
+    revision: 1,
+  },
+  select: { id: true },
+});
+if (!demoPeriod) {
+  await prisma.payrollPeriod.create({
+    data: {
+      companyId: company.id,
+      branchId: demoBranch.id,
+      month: demoMonthStart,
+      revision: 1,
+      createdByUserId: seededUserId,
+      creationReason: "Sample seed payroll demo; mở dashboard để Calculate",
+    },
+  });
+}
+
 console.info(
   JSON.stringify({
     event: "seed.complete",
     companyId: company.id,
-    gmUserId: userId,
+    gmUserId: seededUserId,
     gmEmail,
     gmUsername,
+    payrollDemo: {
+      branchId: demoBranch.id,
+      staffId: demoStaff.id,
+      month: payrollDemoMonth,
+    },
   }),
 );
 

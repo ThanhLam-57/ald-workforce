@@ -8,15 +8,24 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run src --passWithNoTests"
   },
   "dependencies": {
+    "@ald/contracts": "workspace:*",
     "@ald/db": "workspace:*",
+    "@ald/domain": "workspace:*",
+    "@aws-sdk/client-s3": "3.1093.0",
+    "@expo-google-fonts/noto-sans": "0.4.2",
+    "archiver": "8.0.0",
     "dotenv": "17.4.2",
+    "exceljs": "4.4.0",
+    "pdfkit": "0.19.1",
     "pg-boss": "12.26.2"
   },
   "devDependencies": {
+    "@types/archiver": "7.0.0",
     "@types/node": "26.1.1",
+    "@types/pdfkit": "0.17.6",
     "tsx": "4.23.1",
     "typescript": "6.0.3",
     "vitest": "4.1.10"

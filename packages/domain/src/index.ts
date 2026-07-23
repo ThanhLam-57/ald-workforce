@@ -34,7 +34,11 @@ export type ResourceAction =
   | "evidence:read"
   | "branch-overview:read"
   | "branch-overview:write"
-  | "branch-overview:export";
+  | "branch-overview:export"
+  | "payroll:read"
+  | "payroll:write"
+  | "payroll:export"
+  | "payslip:read";
 
 const GM_MUTATIONS = new Set<ResourceAction>([
   "branch:create",
@@ -77,7 +81,7 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
   }
 
   if (actor.role === "LIVE_EMPLOYEE") {
-    return action === "rule:read";
+    return action === "rule:read" || action === "payslip:read";
   }
 
   return false;
@@ -674,4 +678,452 @@ export function compareConfigurationPaths(
   return keys.flatMap((key) =>
     compareConfigurationPaths(fromRecord[key], toRecord[key], `${path}.${key}`),
   );
+}
+
+export const PAYROLL_LINE_TYPES = [
+  "BASE_SALARY",
+  "PRORATED_SALARY",
+  "DAILY_REVENUE_BONUS",
+  "MONTHLY_REVENUE_BONUS",
+  "ATTENDANCE_BONUS",
+  "ACHIEVEMENT_BONUS",
+  "LEVEL_BONUS",
+  "OVERTIME_PAY",
+  "OTHER_BONUS",
+  "PENALTY",
+  "ADVANCE",
+  "TOTAL_INCOME",
+] as const;
+
+export type PayrollLineType = (typeof PAYROLL_LINE_TYPES)[number];
+
+export type PayrollAttendanceInput = Readonly<{
+  attendanceId: string;
+  businessDate: string;
+  status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+  workUnits: string;
+  overtimeMinutes: number;
+  actualLiveMinutes: number;
+  revenueAmount: string;
+  dailyRewardRule: Readonly<{
+    ruleVersionId: string;
+    tiers: readonly DailyRewardTier[];
+  }> | null;
+  violations: readonly Readonly<{
+    violationId: string;
+    ruleVersionId: string;
+    amount: string;
+    itemName: string;
+  }>[];
+}>;
+
+export type PayrollAdjustmentInput = Readonly<{
+  adjustmentId: string;
+  type: "OTHER_BONUS" | "ADVANCE" | "CORRECTION";
+  amount: string;
+  reason: string;
+}>;
+
+export type PayrollLine = Readonly<{
+  type: PayrollLineType;
+  amount: string;
+  sourceType: string;
+  sourceId: string;
+  ruleVersionId: string | null;
+  label: string;
+  calculationDetails: Readonly<Record<string, string | number | boolean | null>>;
+  includedInTotal: boolean;
+}>;
+
+export type PayrollCalculationInput = Readonly<{
+  staffId: string;
+  period: Readonly<{
+    month: string;
+    from: string;
+    toExclusive: string;
+    timezone: "Asia/Ho_Chi_Minh";
+  }>;
+  attendance: readonly PayrollAttendanceInput[];
+  salaryRule: Readonly<{
+    ruleVersionId: string;
+    configuration: SalaryRule;
+  }>;
+  monthlyLevelRule: Readonly<{
+    ruleVersionId: string;
+    levels: readonly MonthlyLevelTier[];
+  }> | null;
+  currentLevel: Readonly<{
+    code: string;
+    displayOrder: number;
+  }> | null;
+  adjustments: readonly PayrollAdjustmentInput[];
+}>;
+
+export type PayrollCalculationOutput = Readonly<{
+  aggregates: Readonly<{
+    workUnits: string;
+    overtimeMinutes: number;
+    revenueAmount: string;
+    actualLiveMinutes: number;
+    penalties: string;
+    violationCount: number;
+  }>;
+  components: Readonly<{
+    baseSalary: string;
+    proratedSalary: string;
+    dailyRevenueBonus: string;
+    monthlyRevenueBonus: string;
+    attendanceBonus: string;
+    achievementBonus: string;
+    levelBonus: string;
+    overtimePay: string;
+    otherBonus: string;
+    penalties: string;
+    advance: string;
+    totalIncome: string;
+  }>;
+  suggestedLevelCode: string | null;
+  selectedRuleVersionIds: readonly string[];
+  anomalyFlags: readonly string[];
+  lines: readonly PayrollLine[];
+}>;
+
+function assertUnsignedInteger(value: string, label: string): bigint {
+  if (!/^\d+$/.test(value)) {
+    throw new DomainError("VALIDATION_ERROR", `${label} phải là số nguyên không âm.`);
+  }
+  return BigInt(value);
+}
+
+function compareStableText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Pure payroll calculator. The caller resolves effective-dated rules and snapshots
+ * the returned input/output; this function never reads a clock, database or environment.
+ */
+export function calculatePayroll(input: PayrollCalculationInput): PayrollCalculationOutput {
+  if (
+    !/^\d{4}-\d{2}$/.test(input.period.month) ||
+    input.period.from >= input.period.toExclusive ||
+    input.period.timezone !== "Asia/Ho_Chi_Minh"
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "Kỳ lương không hợp lệ.");
+  }
+
+  const attendance = [...input.attendance].sort((left, right) =>
+    compareStableText(left.attendanceId, right.attendanceId),
+  );
+  const seenAttendance = new Set<string>();
+  const seenViolations = new Set<string>();
+  const seenAdjustments = new Set<string>();
+  for (const row of attendance) {
+    if (seenAttendance.has(row.attendanceId)) {
+      throw new DomainError("VALIDATION_ERROR", `Attendance ${row.attendanceId} bị trùng.`);
+    }
+    seenAttendance.add(row.attendanceId);
+    if (row.businessDate < input.period.from || row.businessDate >= input.period.toExclusive) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        `Attendance ${row.attendanceId} nằm ngoài kỳ lương.`,
+      );
+    }
+    assertUnsignedInteger(row.revenueAmount, "Doanh số");
+    for (const violation of row.violations) {
+      if (seenViolations.has(violation.violationId)) {
+        throw new DomainError("VALIDATION_ERROR", `Violation ${violation.violationId} bị trùng.`);
+      }
+      seenViolations.add(violation.violationId);
+      assertUnsignedInteger(violation.amount, "Tiền phạt");
+    }
+  }
+  for (const adjustment of input.adjustments) {
+    if (seenAdjustments.has(adjustment.adjustmentId)) {
+      throw new DomainError("VALIDATION_ERROR", `Adjustment ${adjustment.adjustmentId} bị trùng.`);
+    }
+    seenAdjustments.add(adjustment.adjustmentId);
+    if (
+      adjustment.type !== "CORRECTION" &&
+      (!/^\d+$/.test(adjustment.amount) || BigInt(adjustment.amount) < 0n)
+    ) {
+      throw new DomainError("VALIDATION_ERROR", `${adjustment.type} phải là số nguyên không âm.`);
+    }
+    if (!/^-?\d+$/.test(adjustment.amount)) {
+      throw new DomainError("VALIDATION_ERROR", "Correction phải là số nguyên VND.");
+    }
+  }
+
+  const aggregate = summarizeMonthlyMetrics(
+    attendance.map((row) => ({
+      revenueAmount: row.revenueAmount,
+      workUnits: row.workUnits,
+      actualLiveMinutes: row.actualLiveMinutes,
+      overtimeMinutes: row.overtimeMinutes,
+      penaltyAmount: row.violations
+        .reduce((total, violation) => total + BigInt(violation.amount), 0n)
+        .toString(),
+    })),
+  );
+  const salary = calculateSalaryProjection(
+    input.salaryRule.configuration,
+    attendance.map((row) => ({
+      status: row.status,
+      workUnits: row.workUnits,
+      overtimeMinutes: row.overtimeMinutes,
+    })),
+  );
+  const salaryTotal = BigInt(salary.totalAmount);
+  const rawProratedSalary = BigInt(salary.baseSalaryAmount);
+  const rawOvertimePay = BigInt(salary.overtimeAmount);
+  const rawSalaryTotal = rawProratedSalary + rawOvertimePay;
+  const proratedSalary =
+    input.salaryRule.configuration.roundingPolicy.applyAt === "TOTAL"
+      ? rawSalaryTotal === 0n
+        ? 0n
+        : roundRational(salaryTotal * rawProratedSalary, rawSalaryTotal)
+      : rawProratedSalary;
+  const overtimePay =
+    input.salaryRule.configuration.roundingPolicy.applyAt === "TOTAL"
+      ? salaryTotal - proratedSalary
+      : rawOvertimePay;
+
+  const lines: PayrollLine[] = [];
+  const pushLine = (line: PayrollLine): void => {
+    lines.push(line);
+  };
+  pushLine({
+    type: "BASE_SALARY",
+    amount: input.salaryRule.configuration.baseSalary,
+    sourceType: "RULE_VERSION",
+    sourceId: input.salaryRule.ruleVersionId,
+    ruleVersionId: input.salaryRule.ruleVersionId,
+    label: "Lương cơ bản tham chiếu",
+    calculationDetails: {
+      standardWorkdays: input.salaryRule.configuration.standardWorkdays,
+      includedInTotal: false,
+    },
+    includedInTotal: false,
+  });
+  pushLine({
+    type: "PRORATED_SALARY",
+    amount: proratedSalary.toString(),
+    sourceType: "RULE_VERSION",
+    sourceId: input.salaryRule.ruleVersionId,
+    ruleVersionId: input.salaryRule.ruleVersionId,
+    label: "Lương theo công",
+    calculationDetails: {
+      workUnits: aggregate.workUnits,
+      standardWorkdays: input.salaryRule.configuration.standardWorkdays,
+      prorateMode: input.salaryRule.configuration.attendancePolicy.prorateMode,
+    },
+    includedInTotal: true,
+  });
+  pushLine({
+    type: "OVERTIME_PAY",
+    amount: overtimePay.toString(),
+    sourceType: "RULE_VERSION",
+    sourceId: input.salaryRule.ruleVersionId,
+    ruleVersionId: input.salaryRule.ruleVersionId,
+    label: "Tiền tăng ca",
+    calculationDetails: {
+      overtimeMinutes: aggregate.overtimeMinutes,
+      multiplierBps: input.salaryRule.configuration.overtime.multiplierBps,
+      roundingApplyAt: input.salaryRule.configuration.roundingPolicy.applyAt,
+    },
+    includedInTotal: true,
+  });
+
+  let dailyRevenueBonus = 0n;
+  for (const row of attendance) {
+    if (!row.dailyRewardRule) continue;
+    const amount = BigInt(calculateDailyReward(row.revenueAmount, row.dailyRewardRule.tiers));
+    if (amount === 0n) continue;
+    dailyRevenueBonus += amount;
+    pushLine({
+      type: "DAILY_REVENUE_BONUS",
+      amount: amount.toString(),
+      sourceType: "ATTENDANCE_DAY",
+      sourceId: row.attendanceId,
+      ruleVersionId: row.dailyRewardRule.ruleVersionId,
+      label: `Thưởng doanh số ngày ${row.businessDate}`,
+      calculationDetails: {
+        businessDate: row.businessDate,
+        revenueAmount: row.revenueAmount,
+      },
+      includedInTotal: true,
+    });
+  }
+
+  let monthlyRevenueBonus = 0n;
+  let attendanceBonus = 0n;
+  let achievementBonus = 0n;
+  let levelBonus = 0n;
+  let suggestedLevelCode: string | null = null;
+  if (input.monthlyLevelRule) {
+    const result = calculateMonthlyLevelResult(
+      {
+        revenueAmount: aggregate.revenueAmount,
+        workUnits: aggregate.workUnits,
+        actualLiveMinutes: aggregate.actualLiveMinutes,
+        currentLevelCode: input.currentLevel?.code ?? null,
+        currentLevelOrder: input.currentLevel?.displayOrder ?? null,
+      },
+      input.monthlyLevelRule.levels,
+    );
+    const level = result.suggestedLevel;
+    if (level) {
+      suggestedLevelCode = level.code;
+      monthlyRevenueBonus = BigInt(level.monthlyRevenueBonus);
+      attendanceBonus = result.attendanceEligible ? BigInt(level.attendanceBonus) : 0n;
+      achievementBonus = result.achievementEligible ? BigInt(level.achievementBonus) : 0n;
+      levelBonus =
+        result.transition === "RETAIN"
+          ? BigInt(level.retainLevelBonus)
+          : result.transition === "JUMP"
+            ? BigInt(level.jumpLevelBonus)
+            : 0n;
+      const monthlyComponents = [
+        ["MONTHLY_REVENUE_BONUS", monthlyRevenueBonus, "Thưởng doanh số tháng"],
+        ["ATTENDANCE_BONUS", attendanceBonus, "Thưởng chuyên cần"],
+        ["ACHIEVEMENT_BONUS", achievementBonus, "Thưởng thành tích"],
+        ["LEVEL_BONUS", levelBonus, "Thưởng level"],
+      ] as const;
+      for (const [type, amount, label] of monthlyComponents) {
+        if (amount === 0n) continue;
+        pushLine({
+          type,
+          amount: amount.toString(),
+          sourceType: "MONTHLY_LEVEL",
+          sourceId: `${input.staffId}:${input.period.month}`,
+          ruleVersionId: input.monthlyLevelRule.ruleVersionId,
+          label,
+          calculationDetails: {
+            levelCode: level.code,
+            transition: result.transition,
+            revenueAmount: aggregate.revenueAmount,
+          },
+          includedInTotal: true,
+        });
+      }
+    }
+  }
+
+  let penalties = 0n;
+  for (const row of attendance) {
+    for (const violation of [...row.violations].sort((left, right) =>
+      compareStableText(left.violationId, right.violationId),
+    )) {
+      const amount = BigInt(violation.amount);
+      penalties += amount;
+      pushLine({
+        type: "PENALTY",
+        amount: amount.toString(),
+        sourceType: "VIOLATION",
+        sourceId: violation.violationId,
+        ruleVersionId: violation.ruleVersionId,
+        label: violation.itemName,
+        calculationDetails: { businessDate: row.businessDate },
+        includedInTotal: true,
+      });
+    }
+  }
+
+  let otherBonus = 0n;
+  let advance = 0n;
+  for (const adjustment of [...input.adjustments].sort((left, right) =>
+    compareStableText(left.adjustmentId, right.adjustmentId),
+  )) {
+    const amount = BigInt(adjustment.amount);
+    if (adjustment.type === "ADVANCE") {
+      advance += amount;
+      pushLine({
+        type: "ADVANCE",
+        amount: amount.toString(),
+        sourceType: "PAYROLL_ADJUSTMENT",
+        sourceId: adjustment.adjustmentId,
+        ruleVersionId: null,
+        label: "Tạm ứng",
+        calculationDetails: { reason: adjustment.reason },
+        includedInTotal: true,
+      });
+    } else {
+      otherBonus += amount;
+      pushLine({
+        type: "OTHER_BONUS",
+        amount: amount.toString(),
+        sourceType: "PAYROLL_ADJUSTMENT",
+        sourceId: adjustment.adjustmentId,
+        ruleVersionId: null,
+        label: adjustment.type === "CORRECTION" ? "Điều chỉnh" : "Thưởng khác",
+        calculationDetails: { reason: adjustment.reason },
+        includedInTotal: true,
+      });
+    }
+  }
+
+  const totalIncome =
+    proratedSalary +
+    overtimePay +
+    dailyRevenueBonus +
+    monthlyRevenueBonus +
+    attendanceBonus +
+    achievementBonus +
+    levelBonus +
+    otherBonus -
+    penalties -
+    advance;
+  pushLine({
+    type: "TOTAL_INCOME",
+    amount: totalIncome.toString(),
+    sourceType: "PAYROLL_PERIOD",
+    sourceId: `${input.staffId}:${input.period.month}`,
+    ruleVersionId: null,
+    label: "Thực nhận",
+    calculationDetails: { reconciled: true },
+    includedInTotal: false,
+  });
+
+  const selectedRuleVersionIds = [
+    input.salaryRule.ruleVersionId,
+    ...(input.monthlyLevelRule ? [input.monthlyLevelRule.ruleVersionId] : []),
+    ...attendance.flatMap((row) =>
+      row.dailyRewardRule ? [row.dailyRewardRule.ruleVersionId] : [],
+    ),
+    ...attendance.flatMap((row) => row.violations.map((item) => item.ruleVersionId)),
+  ].filter((value, index, values) => values.indexOf(value) === index);
+
+  return {
+    aggregates: {
+      workUnits: aggregate.workUnits,
+      overtimeMinutes: aggregate.overtimeMinutes,
+      revenueAmount: aggregate.revenueAmount,
+      actualLiveMinutes: aggregate.actualLiveMinutes,
+      penalties: penalties.toString(),
+      violationCount: seenViolations.size,
+    },
+    components: {
+      baseSalary: input.salaryRule.configuration.baseSalary,
+      proratedSalary: proratedSalary.toString(),
+      dailyRevenueBonus: dailyRevenueBonus.toString(),
+      monthlyRevenueBonus: monthlyRevenueBonus.toString(),
+      attendanceBonus: attendanceBonus.toString(),
+      achievementBonus: achievementBonus.toString(),
+      levelBonus: levelBonus.toString(),
+      overtimePay: overtimePay.toString(),
+      otherBonus: otherBonus.toString(),
+      penalties: penalties.toString(),
+      advance: advance.toString(),
+      totalIncome: totalIncome.toString(),
+    },
+    suggestedLevelCode,
+    selectedRuleVersionIds,
+    anomalyFlags: [
+      ...(attendance.length === 0 ? ["NO_ATTENDANCE"] : []),
+      ...(attendance.some((row) => row.status === "DRAFT") ? ["DRAFT_ATTENDANCE"] : []),
+      ...(input.monthlyLevelRule === null ? ["MISSING_MONTHLY_LEVEL_RULE"] : []),
+      ...(totalIncome < 0n ? ["NEGATIVE_TOTAL"] : []),
+    ],
+    lines,
+  };
 }

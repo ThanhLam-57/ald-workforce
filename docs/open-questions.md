@@ -34,6 +34,21 @@ Không mục nào dưới đây được hardcode vào domain/UI trước khi đ
 | Ngày lễ              | Nguồn và quyền sửa calendar?                              | Calendar company versioned, GM quản trị                                               |
 | Xóa dữ liệu          | Có yêu cầu pháp lý right-to-erasure?                      | Pseudonymize PII theo quy trình đặc biệt, giữ ledger/audit tối thiểu                  |
 
+## Default tạm thời đã áp dụng trong Prompt 5
+
+Các mục sau vẫn là TODO nghiệp vụ nhưng đã được biểu diễn bằng config/snapshot để
+không tạo hardcode ngầm:
+
+- Salary rule phải bao phủ trọn kỳ; thay đổi giữa tháng hiện bị chặn.
+- Tăng ca tính theo phút và `multiplierBps` của salary rule.
+- Daily reward là fixed whole-tier theo business date; monthly level rule và level
+  history được chọn tại ngày cuối tháng.
+- Payroll âm được giữ nguyên và gắn anomaly; chưa tạo debt carry-forward.
+- Không tính thuế/bảo hiểm cho tới khi có rule typed được duyệt.
+- Adjustment sau khóa luôn tạo revision mới; kỳ đã khóa không mutate.
+- PDF dùng `PAYSLIP_V1`, Noto Sans, chưa có watermark/chữ ký. Ảnh tham chiếu hiện
+  chưa có trong `docs/references/`.
+
 ## Quyết định cần có trước Phase 2
 
 1. Quy tắc assignment primary/secondary và chuyển branch trong ngày.

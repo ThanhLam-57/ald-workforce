@@ -133,7 +133,19 @@ Prompt 3 materialize:
 - composite index attendance `(companyId, branchId, businessDate, staffId)` và index filter staff/category/status;
 - overview tháng là query projection, không có bảng aggregate hoặc cột tổng nhập tay.
 
-KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration riêng.
+Prompt 4 materialize:
+
+- rule cấu hình typed tiếp tục dùng `RuleSet`/`RuleVersion.configuration`;
+- `LevelProposal` lưu đề xuất tháng, trạng thái confirm/override, lý do và effective date.
+
+Prompt 5 materialize:
+
+- `PayrollPeriod` versioned theo company/branch/month/revision và state machine;
+- `PayrollEntry`, `CalculationSnapshot`, `PayrollLine`, `PayrollAdjustment` tạo financial ledger với BIGINT, source/rule version và canonical hash;
+- `PayrollExportJob`, `PayrollDownloadLog` cho export worker, private object storage và audit tải file;
+- trigger database chặn hard-delete, giữ snapshot/line append-only và khóa mutation sau `LOCKED`/`PUBLISHED`.
+
+KPI review/score chi tiết vẫn nằm trong phase riêng.
 
 ## 5. Migration plan
 
@@ -155,11 +167,11 @@ KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration r
    - ACC/streaming alias;
    - performance level và lịch sử hiệu lực;
    - indexes cho branch/month projection.
-5. `0005_manager_kpi`
-   - manager attendance, KPI template/version/review.
-6. `0006_payroll`
-   - payroll period/entry/breakdown/source/revision;
-   - immutable guard khi locked/published.
+5. `20260723170000_typed_rules_levels` — đã triển khai
+   - typed rule configuration và level proposal/confirmation.
+6. `20260723124313_payroll_ledger` đến `20260723124600_restore_index_names` — đã triển khai
+   - payroll period/entry/snapshot/line/adjustment/export/download log;
+   - immutable/append-only guard khi locked/published và stable index mapping.
 7. `0007_import_export_jobs`
    - import/export job, row validation và storage metadata.
 
@@ -177,7 +189,8 @@ Mỗi migration production dùng `prisma migrate deploy` từ release job duy nh
 - Branch overview dùng `(companyId, branchId, businessDate, staffId)`; staff filter dùng `(companyId, employmentCategory, employmentStatus, archivedAt)`.
 - Performance level lookup dùng `(companyId, staffId, effectiveFrom, effectiveTo)` và `(companyId, performanceLevelId, effectiveFrom, effectiveTo)`.
 - Rule version `(companyId, status, effectiveFrom, effectiveTo)` và penalty item `(companyId, ruleVersionId, isActive, displayOrder)`.
-- Tương lai: payroll `(companyId, year, month, status)`.
+- Payroll period dùng `(companyId, branchId, month, status)` và unique `(companyId, branchId, month, revision)`;
+  entry dùng `(companyId, staffId, payrollPeriodId)`; snapshot dùng `(companyId, payrollPeriodId, calculationNo)`.
 
 ## 7. Xóa và retention
 

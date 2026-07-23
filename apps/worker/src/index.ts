@@ -2,6 +2,8 @@ import dotenv from "dotenv";
 import { PgBoss } from "pg-boss";
 import path from "node:path";
 
+import { processPayrollExportJob } from "./payroll-export.js";
+
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env"), quiet: true });
 dotenv.config({ quiet: true });
 
@@ -35,4 +37,11 @@ boss.on("error", (error) => {
 });
 
 await boss.start();
+await boss.createQueue("payroll-export");
+await boss.work<{ exportJobId: string }>("payroll-export", async ([job]) => {
+  if (!job?.data.exportJobId) {
+    throw new Error("Payroll export job thiếu exportJobId.");
+  }
+  await processPayrollExportJob(job.data.exportJobId);
+});
 console.info(JSON.stringify({ event: "worker.ready" }));

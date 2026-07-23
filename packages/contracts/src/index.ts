@@ -447,6 +447,185 @@ export const levelProposalConfirmSchema = z.object({
   reason: reasonSchema,
 });
 
+const signedMoneyAmountSchema = z
+  .string()
+  .trim()
+  .regex(/^-?\d+$/, "Số tiền phải là số nguyên VND.")
+  .refine((value) => {
+    const amount = BigInt(value);
+    return amount >= -9_223_372_036_854_775_808n && amount <= 9_223_372_036_854_775_807n;
+  }, "Số tiền vượt giới hạn lưu trữ.");
+
+export const payrollPeriodListQuerySchema = z.object({
+  branchId: idSchema.optional(),
+  month: businessMonthSchema.optional(),
+});
+
+export const payrollPeriodCreateSchema = z.object({
+  branchId: idSchema,
+  month: businessMonthSchema,
+  reason: reasonSchema,
+});
+
+export const payrollPeriodActionSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const payrollRevisionCreateSchema = z.object({
+  reason: reasonSchema,
+});
+
+export const payrollAdjustmentCreateSchema = z
+  .object({
+    staffId: idSchema,
+    type: z.enum(["OTHER_BONUS", "ADVANCE", "CORRECTION"]),
+    amount: signedMoneyAmountSchema,
+    reason: reasonSchema,
+    sourceDocument: z.string().trim().max(500).nullable().optional(),
+    periodVersion: z.number().int().positive(),
+  })
+  .superRefine(({ amount, type }, context) => {
+    if (type !== "CORRECTION" && BigInt(amount) < 0n) {
+      context.addIssue({
+        code: "custom",
+        message: "Thưởng khác và tạm ứng không được âm.",
+        path: ["amount"],
+      });
+    }
+  });
+
+export const payrollExportCreateSchema = z
+  .object({
+    kind: z.enum(["PAYSLIP_XLSX", "PAYSLIP_PDF", "BULK_ZIP"]),
+    staffId: idSchema.nullable().optional(),
+    reason: reasonSchema,
+  })
+  .superRefine(({ kind, staffId }, context) => {
+    if (kind !== "BULK_ZIP" && !staffId) {
+      context.addIssue({
+        code: "custom",
+        message: "Export cá nhân phải chọn nhân viên.",
+        path: ["staffId"],
+      });
+    }
+    if (kind === "BULK_ZIP" && staffId) {
+      context.addIssue({
+        code: "custom",
+        message: "Bulk ZIP không nhận staffId.",
+        path: ["staffId"],
+      });
+    }
+  });
+
+export type PayrollStatus = "DRAFT" | "CALCULATED" | "REVIEWED" | "LOCKED" | "PUBLISHED";
+
+export type PayrollLineDto = Readonly<{
+  id: string;
+  type:
+    | "BASE_SALARY"
+    | "PRORATED_SALARY"
+    | "DAILY_REVENUE_BONUS"
+    | "MONTHLY_REVENUE_BONUS"
+    | "ATTENDANCE_BONUS"
+    | "ACHIEVEMENT_BONUS"
+    | "LEVEL_BONUS"
+    | "OVERTIME_PAY"
+    | "OTHER_BONUS"
+    | "PENALTY"
+    | "ADVANCE"
+    | "TOTAL_INCOME";
+  amount: string;
+  sourceType: string;
+  sourceId: string;
+  ruleVersionId: string | null;
+  label: string;
+  calculationDetails: Readonly<Record<string, unknown>>;
+  includedInTotal: boolean;
+}>;
+
+export type PayrollDailyRowDto = Readonly<{
+  businessDate: string;
+  status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+  workUnits: string;
+  overtimeMinutes: number;
+  actualLiveMinutes: number;
+  revenueAmount?: string;
+  dailyRevenueBonus: string;
+  penalties: string;
+}>;
+
+export type PayrollEntryDto = Readonly<{
+  id: string;
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    streamingAlias: string | null;
+  }>;
+  workUnits: string;
+  overtimeMinutes: number;
+  revenueAmount?: string;
+  actualLiveMinutes: number;
+  baseSalary: string;
+  proratedSalary: string;
+  dailyRevenueBonus: string;
+  monthlyRevenueBonus: string;
+  attendanceBonus: string;
+  achievementBonus: string;
+  levelBonus: string;
+  overtimePay: string;
+  otherBonus: string;
+  penalties: string;
+  advance: string;
+  totalIncome: string;
+  anomalyFlags: readonly string[];
+  calculationHash: string;
+  calculationNo: number;
+  lines: readonly PayrollLineDto[];
+  dailyRows: readonly PayrollDailyRowDto[];
+  previousTotalIncome: string | null;
+  deltaFromPrevious: string | null;
+}>;
+
+export type PayrollPeriodDto = Readonly<{
+  id: string;
+  branch: Readonly<{ id: string; code: string; name: string }>;
+  month: string;
+  revision: number;
+  status: PayrollStatus;
+  version: number;
+  sourcePeriodId: string | null;
+  latestCalculationNo: number;
+  totals: Readonly<{
+    staffCount: number;
+    grossIncome: string;
+    penalties: string;
+    advance: string;
+    totalIncome: string;
+  }>;
+  calculatedAt: string | null;
+  reviewedAt: string | null;
+  lockedAt: string | null;
+  publishedAt: string | null;
+  entries: readonly PayrollEntryDto[];
+}>;
+
+export type PayrollExportJobDto = Readonly<{
+  id: string;
+  periodId: string;
+  staffId: string | null;
+  kind: "PAYSLIP_XLSX" | "PAYSLIP_PDF" | "BULK_ZIP";
+  status: "QUEUED" | "PROCESSING" | "COMPLETED" | "FAILED";
+  progress: number;
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}>;
+
 export const violationCreateSchema = z
   .object({
     attendanceId: idSchema,
@@ -825,3 +1004,9 @@ export type ViolationCreateInput = z.infer<typeof violationCreateSchema>;
 export type ViolationCancelInput = z.infer<typeof violationCancelSchema>;
 export type EvidencePresignInput = z.infer<typeof evidencePresignSchema>;
 export type EvidenceCompleteInput = z.infer<typeof evidenceCompleteSchema>;
+export type PayrollPeriodListQuery = z.infer<typeof payrollPeriodListQuerySchema>;
+export type PayrollPeriodCreateInput = z.infer<typeof payrollPeriodCreateSchema>;
+export type PayrollPeriodActionInput = z.infer<typeof payrollPeriodActionSchema>;
+export type PayrollRevisionCreateInput = z.infer<typeof payrollRevisionCreateSchema>;
+export type PayrollAdjustmentCreateInput = z.infer<typeof payrollAdjustmentCreateSchema>;
+export type PayrollExportCreateInput = z.infer<typeof payrollExportCreateSchema>;

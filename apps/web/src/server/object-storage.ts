@@ -143,3 +143,22 @@ export async function createEvidenceViewUrl(input: {
     expiresInSeconds: 60,
   };
 }
+
+export async function createPrivateDownloadUrl(input: {
+  objectKey: string;
+  fileName: string;
+  mimeType: string;
+}) {
+  const config = getStorageConfig();
+  const safeFileName = input.fileName.replace(/["\r\n]/g, "_");
+  const command = new GetObjectCommand({
+    Bucket: config.bucket,
+    Key: input.objectKey,
+    ResponseContentType: input.mimeType,
+    ResponseContentDisposition: `attachment; filename="${safeFileName}"`,
+  });
+  return {
+    url: await getSignedUrl(config.client, command, { expiresIn: 60 }),
+    expiresInSeconds: 60,
+  };
+}

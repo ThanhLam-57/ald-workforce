@@ -112,3 +112,32 @@
 - Quyết định: web grid ảo hóa cột ngày bằng TanStack Virtual; chart dùng Recharts; export XLSX server-side dùng ExcelJS với dữ liệu đã được authorize/scope trước khi tạo workbook.
 - Supply-chain: workspace override `uuid` 11.1.1, `postcss` 8.5.17 và `sharp` 0.35.0 để loại advisory đã biết trong cây ExcelJS/Next; build/export tests là compatibility gate cho override transitive.
 - Lý do: giữ một source of truth, tránh lệch tổng giữa overview và employee detail, giới hạn DOM cho bảng 28–31 ngày, và tạo workbook typed/frozen có định dạng tiếng Việt.
+
+## ADR-015 — Payroll ledger, immutable revision và snapshot hash
+
+- Trạng thái: Accepted.
+- Quyết định: payroll dùng `PayrollPeriod` revisioned, entry/line chuẩn hóa và
+  `CalculationSnapshot` append-only. Canonical SHA-256 input hash là idempotency
+  key của recalculation; cùng input/config không sinh calculation mới.
+- `LOCKED` và `PUBLISHED` bất biến ở database. Publish chỉ là transition
+  `LOCKED -> PUBLISHED`; correction/adjustment sau khóa tạo DRAFT revision mới
+  với `sourcePeriodId`, reason và diff audit.
+- Rule version IDs, input/output, rounding và engine version nằm trong snapshot.
+  Rule publish sau đó không thể diễn giải lại payroll cũ.
+- Lý do: payroll là financial ledger; revision rõ ràng an toàn hơn cho phép update
+  có điều kiện trên record đã khóa.
+
+## ADR-016 — Payroll export chạy qua worker và private object storage
+
+- Trạng thái: Accepted.
+- Production dependency mới ở web: `pg-boss` 12.26.2 để enqueue vào cùng
+  PostgreSQL job queue mà worker đang sử dụng.
+- Production dependency mới ở worker: PDFKit 0.19.1, Archiver 8.0.0, ExcelJS
+  4.4.0, `@expo-google-fonts/noto-sans` 0.4.2 và AWS SDK S3 hiện có.
+- Quyết định: web chỉ tạo job đã authorize; worker dựng XLSX/PDF/ZIP, upload private
+  storage rồi cập nhật progress. API chỉ cấp signed GET ngắn hạn sau khi authorize
+  lại và ghi `PayrollDownloadLog`.
+- XLSX dùng ô số khi nằm trong safe integer và chuỗi nếu vượt giới hạn; PDF dùng
+  Noto Sans Vietnamese. Mọi file mang template version và snapshot/calculation ID.
+- Lý do: tách workload dài khỏi request, tránh public URL, giữ lịch sử tải và bảo
+  đảm export luôn gắn với snapshot đã tính.

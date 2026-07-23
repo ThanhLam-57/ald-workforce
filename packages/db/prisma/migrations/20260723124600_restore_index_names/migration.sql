@@ -1,0 +1,2 @@
+-- Intentionally empty. Stable names are mapped in schema.prisma and the payroll
+-- migration does not rename indexes owned by earlier or later phases.

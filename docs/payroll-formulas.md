@@ -1,6 +1,7 @@
 # Đặc tả công thức payroll
 
-> Tài liệu này mô tả contract và thứ tự tính, chưa chốt con số nghiệp vụ và chưa được triển khai trong Prompt 0.
+> Tài liệu này là contract của payroll engine triển khai ở Prompt 5. Các mặc định
+> tạm thời bên dưới là cấu hình/version được snapshot, không phải hằng số ẩn.
 
 ## 1. Nguyên tắc
 
@@ -73,7 +74,7 @@ totalIncome =
 
 `baseSalary` là dữ liệu tham chiếu; chỉ `proratedSalary` được cộng vào tổng để tránh double count.
 
-## 4. Công thức cấu hình, chưa chốt
+## 4. Công thức cấu hình và mặc định Prompt 5
 
 ### Lương prorated
 
@@ -81,16 +82,25 @@ totalIncome =
 proratedSalary = round(baseSalary × eligibleWorkUnits / standardWorkUnits)
 ```
 
-Chưa chốt nguồn `standardWorkUnits`, xử lý ngày vào/nghỉ giữa tháng và cap.
+`standardWorkUnits` lấy từ `SALARY_RULES.standardWorkdays`. Kỳ chỉ được tính khi
+một salary rule version bao phủ cả tháng. Nếu salary rule đổi giữa tháng, service
+từ chối tính và yêu cầu GM tách/chốt policy mới.
+
+TODO(BUSINESS): chốt prorate riêng cho nhân viên vào/nghỉ hoặc chuyển branch giữa tháng.
 
 ### Tăng ca
 
-Hai default có thể chọn sau:
+Prompt 5 dùng công thức theo phút đã typed trong `SALARY_RULES`:
 
-- theo phút: `round(hourlyRate × overtimeMinutes / 60 × multiplier)`;
-- theo block cấu hình: map tổng phút vào tier.
+```text
+overtimePay =
+  round(baseSalary / standardWorkdays / standardDailyMinutes
+        × eligibleOvertimeMinutes × multiplierBps / 10.000)
+```
 
-Không chọn mặc định bằng code cho tới khi nghiệp vụ xác nhận.
+`eligibleAfterMinutes` được trừ trên từng attendance day, không trên tổng tháng.
+
+TODO(BUSINESS): bổ sung lịch ngày thường/cuối tuần/lễ hoặc block tier nếu cần.
 
 ### Thưởng doanh số
 
@@ -105,7 +115,11 @@ type Tier = {
 };
 ```
 
-Cần xác nhận tier là bracket toàn phần hay marginal. Boundary test bắt buộc tại `lower - 1`, `lower`, `upper - 1`, `upper`.
+Tier hiện là fixed, whole-tier; biên inclusive/exclusive nằm trong config. Boundary
+test bắt buộc tại `lower - 1`, `lower`, `upper - 1`, `upper`.
+
+Daily rule được chọn theo từng business date. Monthly level rule được chọn tại
+ngày cuối tháng; level hiện tại cũng là level hiệu lực tại ngày cuối tháng.
 
 ### Phạt
 
@@ -120,9 +134,29 @@ Rounding policy phải versioned và định nghĩa:
 - thời điểm: từng dòng, từng ngày, từng component hay chỉ tổng;
 - xử lý rate/decimal trung gian.
 
-Default đề xuất để thảo luận: integer VND, half-up ở từng breakdown line; chưa đưa vào implementation.
+Không có default trong calculator. Engine dùng chính `roundingPolicy` của salary
+rule version (`unit`, `mode`, `applyAt`) và snapshot policy này cùng output.
 
-## 6. Validation và invariant
+## 6. Quyết định lifecycle Prompt 5
+
+- Một kỳ khóa/publish không được sửa period, entry, line, snapshot hoặc adjustment.
+- Adjustment sau khóa tạo một revision DRAFT mới, copy snapshot input/adjustment
+  được duyệt và lưu diff với revision nguồn; revision cũ không đổi.
+- Recalculate dùng canonical input hash. Hash không đổi thì trả lại calculation
+  hiện tại, không sinh snapshot/line trùng.
+- `CORRECTION` được phép âm hoặc dương; `OTHER_BONUS`, `ADVANCE`, penalty luôn
+  không âm. Advance và penalty bị trừ ở reconcile.
+- `totalIncome` âm không bị floor. UI gắn anomaly `NEGATIVE_TOTAL`.
+  TODO(BUSINESS): chốt gross/net/debt/carry-forward riêng.
+- Payroll không bao gồm thuế/bảo hiểm vì chưa có rule/config đã xác nhận.
+  TODO(BUSINESS): bổ sung rule typed và breakdown khi chính sách được duyệt.
+- Payslip PDF dùng template `PAYSLIP_V1`, Noto Sans và không watermark/chữ ký.
+  TODO(DESIGN): đối chiếu ảnh tham chiếu khi `docs/references/` được cung cấp.
+- `pnpm db:seed` tạo cơ sở `DEMO`, staff `LIVEDEMO`, source attendance/rules và
+  PayrollPeriod DRAFT cho tháng `SEED_PAYROLL_MONTH` (mặc định tháng hiện tại);
+  GM mở dashboard và bấm Calculate để tạo snapshot bằng đúng production engine.
+
+## 7. Validation và invariant
 
 - Khoảng rule không overlap và cover đủ ngày có source.
 - Source ID không lặp trong cùng component.
@@ -133,7 +167,7 @@ Default đề xuất để thảo luận: integer VND, half-up ở từng breakd
 - Calculator không phụ thuộc thứ tự input.
 - Serialize bigint thành string tại DTO boundary.
 
-## 7. Golden tests cần có ở phase payroll
+## 8. Golden tests cần có ở phase payroll
 
 - Không có ngày công.
 - 0.5/1.0 work unit và tổng decimal.
