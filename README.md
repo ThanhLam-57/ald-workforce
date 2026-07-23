@@ -1,6 +1,6 @@
 # ALD Workforce
 
-Ứng dụng nội bộ quản lý nhiều cơ sở, nhân sự, chấm công, KPI, doanh số và tính lương. Hiện hệ thống có Better Auth database session, RBAC theo company/branch, attendance + Live metrics theo tháng, rule phạt có version, violation snapshot, evidence private và export báo lỗi không chứa doanh số. KPI và payroll chưa được triển khai.
+Ứng dụng nội bộ quản lý nhiều cơ sở, nhân sự, chấm công, KPI, doanh số và tính lương. Hiện hệ thống có Better Auth database session, RBAC theo company/branch, attendance + Live metrics theo tháng, rule phạt có version, violation snapshot, evidence private, branch monthly overview có biểu đồ/inline edit và các export XLSX an toàn theo scope. KPI và payroll chưa được triển khai.
 
 ## Yêu cầu
 
@@ -86,8 +86,10 @@ Development dùng `prisma migrate dev`; release chỉ dùng `prisma migrate depl
 - `POST /api/evidence/:id/complete`
 - `GET /api/evidence/:id/view`
 - `GET /api/exports/employee-error-report`
+- `GET|PATCH /api/branch-overview`
+- `GET /api/exports/branch-monthly-overview`
 
-Mọi response nghiệp vụ authenticated dùng `private, no-store`. Mutation nhạy cảm yêu cầu `reason`, bản ghi mutable dùng optimistic version và ghi audit before/after. Tiền/doanh số được serialize thành string; ngày nghiệp vụ dùng `Asia/Ho_Chi_Minh`. Rule đã publish là bất biến, khoảng hiệu lực là `[effectiveFrom, effectiveTo)`. Evidence chỉ vào bucket private qua presigned PUT 5 phút, được `HEAD` xác minh MIME/kích thước/SHA-256 và chỉ cấp signed GET 60 giây sau authorization.
+Mọi response nghiệp vụ authenticated dùng `private, no-store`. Mutation nhạy cảm yêu cầu `reason`, bản ghi mutable dùng optimistic version và ghi audit before/after. Tiền/doanh số được serialize thành string; ngày nghiệp vụ dùng `Asia/Ho_Chi_Minh`. Rule đã publish là bất biến, khoảng hiệu lực là `[effectiveFrom, effectiveTo)`. Evidence chỉ vào bucket private qua presigned PUT 5 phút, được `HEAD` xác minh MIME/kích thước/SHA-256 và chỉ cấp signed GET 60 giây sau authorization. Branch overview không có bảng tổng nhập liệu riêng: mọi edit ghi trực tiếp về attendance/live metric nguồn và export chỉ dùng projection đã authorize.
 
 ## Tài liệu
 

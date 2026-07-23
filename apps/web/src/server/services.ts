@@ -32,6 +32,7 @@ const staffSelect = {
   id: true,
   staffCode: true,
   fullName: true,
+  streamingAlias: true,
   email: true,
   phone: true,
   jobTitle: true,
@@ -95,6 +96,7 @@ function branchAuditShape(branch: {
 function staffAuditShape(staff: {
   staffCode: string;
   fullName: string;
+  streamingAlias: string | null;
   email: string | null;
   phone: string | null;
   jobTitle: string;
@@ -105,6 +107,7 @@ function staffAuditShape(staff: {
   return {
     staffCode: staff.staffCode,
     fullName: staff.fullName,
+    streamingAlias: staff.streamingAlias,
     email: staff.email,
     phone: staff.phone,
     jobTitle: staff.jobTitle,
@@ -258,6 +261,7 @@ export async function createStaff(
         companyId: actor.companyId,
         staffCode: input.staffCode.toUpperCase(),
         fullName: input.fullName,
+        streamingAlias: input.streamingAlias || null,
         email: input.email?.toLowerCase() ?? null,
         phone: input.phone || null,
         jobTitle: input.jobTitle,
@@ -298,6 +302,9 @@ export async function updateStaff(
       version: { increment: 1 },
     };
     if (input.fullName !== undefined) data.fullName = input.fullName;
+    if (input.streamingAlias !== undefined) {
+      data.streamingAlias = input.streamingAlias || null;
+    }
     if (input.email !== undefined) data.email = input.email.toLowerCase();
     if (input.phone !== undefined) data.phone = input.phone;
     if (input.jobTitle !== undefined) data.jobTitle = input.jobTitle;

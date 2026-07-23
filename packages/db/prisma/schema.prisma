@@ -85,6 +85,8 @@ model Company {
   penaltyItems           PenaltyItem[]
   violations             Violation[]
   evidenceObjects        EvidenceObject[]
+  performanceLevels      PerformanceLevel[]
+  levelHistories         LevelHistory[]
   auditLogs              AuditLog[]
 
   @@map("companies")
@@ -117,6 +119,7 @@ model StaffMember {
   companyId          String             @db.Uuid
   staffCode          String
   fullName           String
+  streamingAlias     String?
   email              String?
   phone              String?
   jobTitle           String
@@ -131,9 +134,11 @@ model StaffMember {
   assignments        BranchAssignment[]
   attendanceDays     AttendanceDay[]
   violations         Violation[]
+  levelHistories     LevelHistory[]
 
   @@unique([companyId, staffCode])
   @@index([companyId, employmentStatus, archivedAt])
+  @@index([companyId, employmentCategory, employmentStatus, archivedAt])
   @@map("staff_members")
 }
 
@@ -168,6 +173,7 @@ model User {
   violationsCreated     Violation[]      @relation("ViolationCreatedBy")
   violationsCancelled   Violation[]      @relation("ViolationCancelledBy")
   evidenceCreated       EvidenceObject[] @relation("EvidenceCreatedBy")
+  levelHistoriesCreated LevelHistory[]   @relation("LevelHistoryCreatedBy")
 
   @@index([companyId, role, active])
   @@map("users")
@@ -242,6 +248,44 @@ model BranchAssignment {
   @@map("branch_assignments")
 }
 
+model PerformanceLevel {
+  id           String         @id @default(uuid()) @db.Uuid
+  companyId    String         @db.Uuid
+  code         String
+  name         String
+  displayOrder Int            @default(0)
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime       @updatedAt @db.Timestamptz(3)
+  company      Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  histories    LevelHistory[]
+
+  @@unique([companyId, code])
+  @@index([companyId, isActive, displayOrder])
+  @@map("performance_levels")
+}
+
+model LevelHistory {
+  id                 String           @id @default(uuid()) @db.Uuid
+  companyId          String           @db.Uuid
+  staffId            String           @db.Uuid
+  performanceLevelId String           @db.Uuid
+  effectiveFrom      DateTime         @db.Date
+  effectiveTo        DateTime?        @db.Date
+  version            Int              @default(1)
+  createdByUserId    String           @db.Uuid
+  createdAt          DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime         @updatedAt @db.Timestamptz(3)
+  company            Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff              StaffMember      @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  performanceLevel   PerformanceLevel @relation(fields: [performanceLevelId], references: [id], onDelete: Restrict)
+  createdBy          User             @relation("LevelHistoryCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, staffId, effectiveFrom, effectiveTo])
+  @@index([companyId, performanceLevelId, effectiveFrom, effectiveTo])
+  @@map("level_history")
+}
+
 model AttendanceDay {
   id              String           @id @default(uuid()) @db.Uuid
   companyId       String           @db.Uuid
@@ -271,6 +315,7 @@ model AttendanceDay {
 
   @@unique([companyId, staffId, businessDate])
   @@index([companyId, branchId, businessDate])
+  @@index([companyId, branchId, businessDate, staffId])
   @@index([companyId, staffId, businessDate])
   @@map("attendance_days")
 }
@@ -290,7 +335,7 @@ model LiveDailyMetric {
   branch            Branch        @relation(fields: [branchId], references: [id], onDelete: Restrict)
   attendance        AttendanceDay @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
 
-  @@index([companyId, branchId])
+  @@index([companyId, branchId, attendanceId])
   @@map("live_daily_metrics")
 }
 

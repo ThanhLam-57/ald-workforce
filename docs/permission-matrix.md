@@ -83,6 +83,16 @@ Client không được quyết định scope. `branchId`, `companyId`, `staffId`
 
 Server tự lấy company/branch scope từ actor context. Penalty item phải thuộc version hiệu lực tại business date. Chỉ GM được override amount và bắt buộc có `overrideReason`; violation luôn snapshot amount/rule/item. Signed GET chỉ được tạo sau khi authorize evidence qua attendance/branch.
 
+### Endpoint branch overview (Prompt 3)
+
+| Endpoint/action                                   | GM                              | TM                                                | Employee |
+| ------------------------------------------------- | ------------------------------- | ------------------------------------------------- | -------- |
+| `GET /api/branch-overview?branchId&month&filters` | Chọn mọi branch trong company   | Chỉ branch nằm trong `activeBranchIds`            | Không    |
+| `PATCH /api/branch-overview`                      | Edit Live staff toàn company    | Edit Live staff trong branch, không phải bản thân | Không    |
+| `GET /api/exports/branch-monthly-overview`        | Export mọi branch trong company | Export branch trong scope                         | Không    |
+
+`branchId` trong query/body chỉ là target cần authorize. Server giao company/branch/staff scope vào projection và attendance source service; workbook chỉ nhận DTO đã scope. Cell edit dùng version của attendance nguồn, không cập nhật một bảng tổng riêng.
+
 ## 5. Test bắt buộc
 
 - TM branch A gọi branch B bằng ID đoán được → `404` hoặc `403` thống nhất, không rò metadata.

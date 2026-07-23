@@ -92,6 +92,13 @@ Audit append-only. Dữ liệu nhạy cảm như password hash, secret, session 
 - Nếu thêm cache sau này, key phải chứa company/branch/user và version quyền.
 - Dashboard Phase 1 dùng Server Components động; mutation qua route handlers.
 
+Branch monthly overview là read projection, không phải aggregate table:
+
+- query staff/assignment + level history và attendance/live/violation theo tập staff, không query từng row;
+- client chỉ giữ edit state; mutation ghi ngược attendance/live source qua application service hiện có;
+- tổng dùng BIGINT/Decimal-safe domain function; API vẫn serialize tiền thành string;
+- grid ảo hóa cột ngày, trong khi mobile dùng projection read-only rút gọn.
+
 ## 7. Jobs và storage
 
 - pg-boss dùng cùng PostgreSQL, schema riêng; v1 không có Redis.
@@ -130,4 +137,4 @@ Web bind `0.0.0.0:$PORT`. Docker image build từ lockfile với Corepack/pnpm f
 - Không cài Redis, event bus hoặc microservice ở v1.
 - Không triển khai rule expression runtime bằng JavaScript.
 - Không tạo bảng aggregate tháng làm source of truth; dùng query/materialized view có refresh strategy khi cần.
-- Chưa chốt PDF engine, chart/data-grid production dependency cho tới phase UI tương ứng.
+- PDF engine chưa chốt; chart/virtualized grid/XLSX đã chốt tại ADR-012.

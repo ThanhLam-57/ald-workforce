@@ -49,14 +49,25 @@ Exit:
 
 Rule thưởng/lương và employee self-service tiếp tục ở phase tương ứng.
 
-## Phase 4 — KPI quản lý
+## Phase 4 — Branch monthly overview
+
+Đã hoàn thành trong Prompt 3:
+
+- Projection trực tiếp từ attendance/live metric/active violations và level history, không lưu aggregate trùng.
+- Grid 28–31 ngày với cột identity/totals sticky, horizontal virtualization, keyboard navigation và mobile read-only.
+- Filters branch/month/status/category/level/search; chart doanh số theo nhân viên.
+- Inline autosave, optimistic conflict, reload, batch paste TSV validate toàn vùng và audit reason.
+- XLSX tiếng Việt với two-level header, typed numbers, frozen panes và export scope theo branch.
+- Unit/integration/E2E cho totals, source write-through, IDOR, index và export không rò branch.
+
+## Phase 5 — KPI quản lý
 
 - Manager attendance.
 - KPI template/version/criteria và weighted scoring pure functions.
 - Draft/published review.
 - GM/TM self-read permissions và audit.
 
-## Phase 5 — Payroll
+## Phase 6 — Payroll
 
 - Payroll schema/state machine.
 - Pure config-driven calculator và golden tests.
@@ -64,14 +75,14 @@ Rule thưởng/lương và employee self-service tiếp tục ở phase tương 
 - Snapshot/reconciliation và employee payslip read-only.
 - XLSX/PDF export jobs.
 
-## Phase 6 — Báo cáo, import/export và self-service
+## Phase 7 — Báo cáo, import/export và self-service
 
 - Branch/company reports, weekly/monthly views và charts.
 - Import preview/row validation/idempotent commit.
 - Export center, signed URL.
 - Employee self-service setting và field-level revenue permission.
 
-## Phase 7 — Production hardening
+## Phase 8 — Production hardening
 
 - Load/performance test bảng tháng và report.
 - Backup/restore drill, rollback drill.

@@ -5,6 +5,7 @@ import { getOptionalActor } from "@/server/auth-context";
 import { listBranches, listStaff } from "@/server/services";
 
 import { AttendanceWorkspace } from "./attendance-workspace";
+import { BranchOverviewWorkspace } from "./branch-overview-workspace";
 import { FoundationAdmin } from "./foundation-admin";
 import { PenaltyRuleCenter } from "./penalty-rule-center";
 import { SignOutButton } from "./sign-out-button";
@@ -94,6 +95,14 @@ export default async function DashboardPage() {
           <AttendanceWorkspace
             canOverridePenalty={actor.role === "GENERAL_MANAGER"}
             staff={attendanceStaff}
+          />
+          <BranchOverviewWorkspace
+            branches={branches.map((branch) => ({
+              id: branch.id,
+              code: branch.code,
+              name: branch.name,
+            }))}
+            isGeneralManager={actor.role === "GENERAL_MANAGER"}
           />
           {actor.role === "GENERAL_MANAGER" ? <PenaltyRuleCenter /> : null}
           {actor.role === "GENERAL_MANAGER" ? (

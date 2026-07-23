@@ -31,7 +31,10 @@ export type ResourceAction =
   | "violation:write"
   | "violation:cancel"
   | "evidence:upload"
-  | "evidence:read";
+  | "evidence:read"
+  | "branch-overview:read"
+  | "branch-overview:write"
+  | "branch-overview:export";
 
 const GM_MUTATIONS = new Set<ResourceAction>([
   "branch:create",
@@ -66,7 +69,10 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
       action === "violation:write" ||
       action === "violation:cancel" ||
       action === "evidence:upload" ||
-      action === "evidence:read"
+      action === "evidence:read" ||
+      action === "branch-overview:read" ||
+      action === "branch-overview:write" ||
+      action === "branch-overview:export"
     );
   }
 
@@ -268,6 +274,54 @@ export function effectiveIntervalsOverlap(
 
 export function sumPenaltyAmounts(amounts: readonly string[]): string {
   return amounts.reduce((total, amount) => total + BigInt(amount), 0n).toString();
+}
+
+export type MonthlyMetricValues = Readonly<{
+  revenueAmount: string;
+  workUnits: string;
+  actualLiveMinutes: number;
+  overtimeMinutes: number;
+  penaltyAmount: string;
+}>;
+
+function decimalHundredths(value: string): bigint {
+  if (!/^\d+(\.\d{1,2})?$/.test(value)) {
+    throw new DomainError("VALIDATION_ERROR", "Số công phải có tối đa 2 chữ số thập phân.");
+  }
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(whole!) * 100n + BigInt(fraction.padEnd(2, "0"));
+}
+
+function hundredthsDecimal(value: bigint): string {
+  const whole = value / 100n;
+  const fraction = (value % 100n).toString().padStart(2, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole.toString();
+}
+
+export function summarizeMonthlyMetrics(
+  values: readonly MonthlyMetricValues[],
+): MonthlyMetricValues {
+  return {
+    revenueAmount: values
+      .reduce((total, value) => total + BigInt(value.revenueAmount), 0n)
+      .toString(),
+    workUnits: hundredthsDecimal(
+      values.reduce((total, value) => total + decimalHundredths(value.workUnits), 0n),
+    ),
+    actualLiveMinutes: values.reduce((total, value) => total + value.actualLiveMinutes, 0),
+    overtimeMinutes: values.reduce((total, value) => total + value.overtimeMinutes, 0),
+    penaltyAmount: values
+      .reduce((total, value) => total + BigInt(value.penaltyAmount), 0n)
+      .toString(),
+  };
+}
+
+export function weekOfMonth(businessDate: string): number {
+  const day = Number(businessDate.slice(8, 10));
+  if (!Number.isInteger(day) || day < 1 || day > 31) {
+    throw new DomainError("VALIDATION_ERROR", "Ngày nghiệp vụ không hợp lệ.");
+  }
+  return Math.ceil(day / 7);
 }
 
 export type ComparablePenaltyItem = Readonly<{

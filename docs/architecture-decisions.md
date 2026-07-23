@@ -72,3 +72,14 @@
 - Quyết định: effective interval dùng `[effectiveFrom, effectiveTo)` và exclusion constraint chặn overlap theo rule set.
 - Quyết định: violation snapshot item name, amount và rule/item IDs; publish version mới không hồi tố record cũ.
 - Lý do: rule phải tái hiện đúng tại ngày vi phạm và payroll/report tương lai không được đổi theo cấu hình mới.
+
+## ADR-012 — Branch monthly overview là projection, không phải aggregate nhập liệu
+
+- Trạng thái: Accepted
+- Production dependency mới: `@tanstack/react-virtual` 3.14.6, Recharts 3.9.2, ExcelJS 4.4.0 và peer `react-is` 19.2.8.
+- Quyết định: overview tháng được dựng trực tiếp từ staff/assignment, level history và một query attendance có include live metric/active violations; không tạo bảng monthly aggregate.
+- Quyết định: inline edit gọi lại attendance application service, dùng source record version và audit transaction hiện có. Batch paste gom tối đa một edit cho mỗi staff/date và trả kết quả từng cell.
+- Quyết định: level tại overview là level hiệu lực vào ngày cuối tháng theo khoảng `[effectiveFrom, effectiveTo)`; lịch sử level không hard-delete.
+- Quyết định: web grid ảo hóa cột ngày bằng TanStack Virtual; chart dùng Recharts; export XLSX server-side dùng ExcelJS với dữ liệu đã được authorize/scope trước khi tạo workbook.
+- Supply-chain: workspace override `uuid` 11.1.1, `postcss` 8.5.17 và `sharp` 0.35.0 để loại advisory đã biết trong cây ExcelJS/Next; build/export tests là compatibility gate cho override transitive.
+- Lý do: giữ một source of truth, tránh lệch tổng giữa overview và employee detail, giới hạn DOM cho bảng 28–31 ngày, và tạo workbook typed/frozen có định dạng tiếng Việt.

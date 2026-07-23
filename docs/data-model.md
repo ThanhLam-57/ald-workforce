@@ -126,6 +126,13 @@ Prompt 2 materialize:
 - `EvidenceObject` lưu object key private, MIME, size, checksum và trạng thái verify;
 - index theo company/branch/staff/date và audit cho toàn bộ mutation.
 
+Prompt 3 materialize:
+
+- `StaffMember.streamingAlias` cho ACC/alias hiển thị và tìm kiếm;
+- `PerformanceLevel` và `LevelHistory` với effective interval `[from,to)`, exclusion constraint chống overlap và trigger chặn hard-delete;
+- composite index attendance `(companyId, branchId, businessDate, staffId)` và index filter staff/category/status;
+- overview tháng là query projection, không có bảng aggregate hoặc cột tổng nhập tay.
+
 KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration riêng.
 
 ## 5. Migration plan
@@ -144,12 +151,16 @@ KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration r
    - rule set/version/penalty item;
    - immutable trigger/policy và exclusion interval;
    - violation snapshot, cancel-only và private evidence metadata.
-4. `0004_manager_kpi`
+4. `20260723143000_branch_monthly_overview` — đã triển khai
+   - ACC/streaming alias;
+   - performance level và lịch sử hiệu lực;
+   - indexes cho branch/month projection.
+5. `0005_manager_kpi`
    - manager attendance, KPI template/version/review.
-5. `0005_payroll`
+6. `0006_payroll`
    - payroll period/entry/breakdown/source/revision;
    - immutable guard khi locked/published.
-6. `0006_import_export_jobs`
+7. `0007_import_export_jobs`
    - import/export job, row validation và storage metadata.
 
 Mỗi migration production dùng `prisma migrate deploy` từ release job duy nhất. Web và worker không tự migrate khi khởi động.
@@ -163,6 +174,8 @@ Mỗi migration production dùng `prisma migrate deploy` từ release job duy nh
 - `branch_assignments(companyId, staffId, effectiveFrom, effectiveTo)`.
 - `audit_logs(companyId, occurredAt desc)` và `(companyId, entityType, entityId)`.
 - Attendance `(companyId, branchId, businessDate)`; violation `(companyId, branchId|staffId, businessDate, status)`.
+- Branch overview dùng `(companyId, branchId, businessDate, staffId)`; staff filter dùng `(companyId, employmentCategory, employmentStatus, archivedAt)`.
+- Performance level lookup dùng `(companyId, staffId, effectiveFrom, effectiveTo)` và `(companyId, performanceLevelId, effectiveFrom, effectiveTo)`.
 - Rule version `(companyId, status, effectiveFrom, effectiveTo)` và penalty item `(companyId, ruleVersionId, isActive, displayOrder)`.
 - Tương lai: payroll `(companyId, year, month, status)`.
 

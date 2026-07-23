@@ -9,6 +9,7 @@ async function signInAsGm(page: Page) {
 }
 
 test("GM đăng nhập bằng username và thấy dashboard quản trị", async ({ page }) => {
+  await page.context().clearCookies();
   await signInAsGm(page);
   await expect(page.getByText("Tổng quan nền tảng")).toBeVisible();
   await expect(page.getByText("Quản trị nền tảng")).toBeVisible();
@@ -27,7 +28,7 @@ test("không cho tự đăng ký tài khoản", async ({ request }) => {
 });
 
 test("GM nhập attendance Live và autosave từ hồ sơ tháng", async ({ page }) => {
-  await signInAsGm(page);
+  await page.goto("/dashboard");
   const suffix = Date.now().toString(36);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -110,7 +111,7 @@ test("GM nhập attendance Live và autosave từ hồ sơ tháng", async ({ pag
 });
 
 test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({ page }) => {
-  await signInAsGm(page);
+  await page.goto("/dashboard");
   const suffix = Date.now().toString(36);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -224,4 +225,110 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
 
   await expect(row.getByText(`Đi muộn E2E ${suffix}`, { exact: true })).toBeVisible();
   await expect(row.getByText(/^50\.000/)).toBeVisible();
+});
+
+test("GM sửa branch overview và dữ liệu phản ánh về employee sheet", async ({ page }) => {
+  await page.goto("/dashboard");
+  const suffix = Date.now().toString(36);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(new Date());
+  const values = new Map(parts.map((part) => [part.type, part.value]));
+  const month = `${values.get("year")}-${values.get("month")}`;
+  const businessDate = `${month}-01`;
+
+  const branchResponse = await page.request.post("/api/branches", {
+    data: {
+      code: `OV${suffix}`,
+      name: `Overview E2E ${suffix}`,
+      reason: "E2E tạo branch overview",
+    },
+  });
+  expect(branchResponse.ok()).toBe(true);
+  const branch = (await branchResponse.json()) as { data: { id: string } };
+
+  const staffResponse = await page.request.post("/api/staff", {
+    data: {
+      staffCode: `OV${suffix}`,
+      fullName: `Live Overview ${suffix}`,
+      streamingAlias: `ACC-${suffix}`,
+      jobTitle: "Nhân viên Live",
+      employmentCategory: "OFFICIAL",
+      reason: "E2E tạo staff overview",
+    },
+  });
+  expect(staffResponse.ok()).toBe(true);
+  const staff = (await staffResponse.json()) as { data: { id: string } };
+
+  const assignmentResponse = await page.request.post("/api/assignments", {
+    data: {
+      staffId: staff.data.id,
+      branchId: branch.data.id,
+      assignmentType: "MEMBER",
+      effectiveFrom: businessDate,
+      effectiveTo: null,
+      reason: "E2E phân công overview",
+    },
+  });
+  expect(assignmentResponse.ok()).toBe(true);
+
+  const attendanceResponse = await page.request.post("/api/attendance", {
+    data: {
+      staffId: staff.data.id,
+      businessDate,
+      status: "PRESENT",
+      revenueAmount: "100000",
+      actualLiveMinutes: 30,
+      reason: "E2E fixture overview",
+    },
+  });
+  expect(attendanceResponse.ok()).toBe(true);
+
+  await page.reload();
+  await page.getByLabel("Cơ sở tổng quan").selectOption(branch.data.id);
+  await page.getByLabel("Lý do chỉnh sửa tổng quan").fill("E2E inline edit overview");
+
+  const revenue = page.getByLabel(`Doanh số OV${suffix} ${businessDate}`);
+  const live = page.getByLabel(`Live phút OV${suffix} ${businessDate}`);
+  await expect(revenue).toHaveValue("100000");
+  await revenue.fill("700000");
+  await revenue.press("ArrowRight");
+  await expect(live).toBeFocused();
+  await live.fill("210");
+
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(
+        `/api/attendance?staffId=${staff.data.id}&month=${month}`,
+      );
+      const payload = (await response.json()) as {
+        data: {
+          days: Array<{
+            businessDate: string;
+            attendance: null | {
+              actualLiveMinutes: number;
+              revenueAmount: string;
+            };
+          }>;
+        };
+      };
+      return payload.data.days.find((day) => day.businessDate === businessDate)?.attendance;
+    })
+    .toMatchObject({
+      revenueAmount: "700000",
+      actualLiveMinutes: 210,
+    });
+
+  await expect(page.getByText("Doanh số theo nhân viên")).toBeVisible();
+  await expect(page.getByText("700.000 ₫", { exact: true })).toBeVisible();
+
+  const exportResponse = await page.request.get(
+    `/api/exports/branch-monthly-overview?branchId=${branch.data.id}&month=${month}`,
+  );
+  expect(exportResponse.ok()).toBe(true);
+  expect(exportResponse.headers()["content-type"]).toContain(
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
 });

@@ -26,6 +26,7 @@ export const branchUpdateSchema = branchCreateSchema
 export const staffCreateSchema = z.object({
   staffCode: trimmedText("Mã nhân viên", 30).regex(/^[A-Za-z0-9_-]+$/),
   fullName: trimmedText("Họ tên", 120),
+  streamingAlias: z.string().trim().max(120).nullable().optional(),
   email: z.email().optional(),
   phone: z.string().trim().max(30).optional(),
   jobTitle: trimmedText("Vị trí công việc", 120),
@@ -147,6 +148,41 @@ export const attendanceArchiveSchema = z.object({
 export const attendanceMonthQuerySchema = z.object({
   staffId: idSchema,
   month: businessMonthSchema,
+});
+
+export const branchOverviewQuerySchema = z.object({
+  branchId: idSchema,
+  month: businessMonthSchema,
+  employmentStatus: z.enum(["ACTIVE", "ON_LEAVE", "TERMINATED"]).optional(),
+  employmentCategory: z.enum(["OFFICIAL", "PROBATION", "CONTRACTOR", "INTERN"]).optional(),
+  levelId: idSchema.optional(),
+  search: z.string().trim().max(120).optional(),
+});
+
+export const branchOverviewCellEditSchema = z
+  .object({
+    clientId: trimmedText("Mã ô", 80),
+    staffId: idSchema,
+    businessDate: z.iso.date(),
+    version: z.number().int().positive().nullable(),
+    revenueAmount: revenueAmountSchema.optional(),
+    actualLiveMinutes: z.number().int().min(0).max(2_880).optional(),
+    workUnits: workUnitsSchema.optional(),
+    overtimeMinutes: z.number().int().min(0).max(2_880).optional(),
+  })
+  .refine(
+    ({ revenueAmount, actualLiveMinutes, workUnits, overtimeMinutes }) =>
+      revenueAmount !== undefined ||
+      actualLiveMinutes !== undefined ||
+      workUnits !== undefined ||
+      overtimeMinutes !== undefined,
+    "Mỗi ô cập nhật phải có ít nhất một giá trị.",
+  );
+
+export const branchOverviewBatchUpdateSchema = z.object({
+  branchId: idSchema,
+  reason: reasonSchema,
+  edits: z.array(branchOverviewCellEditSchema).min(1).max(200),
 });
 
 export const penaltyRuleSetCreateSchema = z.object({
@@ -386,6 +422,75 @@ export type AttendanceMonthDto = Readonly<{
   days: readonly AttendanceMonthDayDto[];
 }>;
 
+export type BranchOverviewDayDto = Readonly<{
+  businessDate: string;
+  dayOfWeek: number;
+  weekOfMonth: number;
+  attendanceId: string | null;
+  version: number | null;
+  archivedAt: string | null;
+  status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE" | null;
+  revenueAmount: string;
+  actualLiveMinutes: number;
+  workUnits: string;
+  overtimeMinutes: number;
+  penaltyAmount: string;
+}>;
+
+export type BranchOverviewTotalsDto = Readonly<{
+  revenueAmount: string;
+  workUnits: string;
+  actualLiveMinutes: number;
+  overtimeMinutes: number;
+  penaltyAmount: string;
+}>;
+
+export type BranchOverviewRowDto = Readonly<{
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    streamingAlias: string | null;
+    employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+    employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+    performanceLevel: Readonly<{
+      id: string;
+      code: string;
+      name: string;
+    }> | null;
+  }>;
+  days: readonly BranchOverviewDayDto[];
+  totals: BranchOverviewTotalsDto;
+}>;
+
+export type BranchMonthlyOverviewDto = Readonly<{
+  month: string;
+  branch: Readonly<{ id: string; code: string; name: string }>;
+  revenueConfig: Readonly<{
+    unit: "VND" | "THOUSAND_VND";
+    scale: number;
+  }>;
+  calendar: readonly Readonly<{
+    businessDate: string;
+    dayOfWeek: number;
+    weekOfMonth: number;
+  }>[];
+  levels: readonly Readonly<{
+    id: string;
+    code: string;
+    name: string;
+  }>[];
+  rows: readonly BranchOverviewRowDto[];
+  totals: BranchOverviewTotalsDto;
+}>;
+
+export type BranchOverviewCellResultDto = Readonly<{
+  clientId: string;
+  status: "SAVED" | "CONFLICT" | "ERROR";
+  attendance: AttendanceRecordDto | null;
+  message: string | null;
+}>;
+
 export type EmployeeErrorReportDto = Readonly<{
   reportType: "EMPLOYEE_ERROR_REPORT";
   month: string;
@@ -434,6 +539,9 @@ export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
 export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
 export type AttendanceArchiveInput = z.infer<typeof attendanceArchiveSchema>;
 export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;
+export type BranchOverviewQuery = z.infer<typeof branchOverviewQuerySchema>;
+export type BranchOverviewCellEditInput = z.infer<typeof branchOverviewCellEditSchema>;
+export type BranchOverviewBatchUpdateInput = z.infer<typeof branchOverviewBatchUpdateSchema>;
 export type PenaltyRuleSetCreateInput = z.infer<typeof penaltyRuleSetCreateSchema>;
 export type PenaltyRuleDraftCreateInput = z.infer<typeof penaltyRuleDraftCreateSchema>;
 export type PenaltyRuleDraftUpdateInput = z.infer<typeof penaltyRuleDraftUpdateSchema>;

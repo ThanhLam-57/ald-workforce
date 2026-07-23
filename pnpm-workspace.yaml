@@ -9,6 +9,11 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 
+overrides:
+  postcss: 8.5.17
+  sharp: 0.35.0
+  uuid: 11.1.1
+
 minimumReleaseAgeExclude:
   - "@better-auth/core@1.6.24"
   - "@better-auth/drizzle-adapter@1.6.24"

@@ -142,6 +142,7 @@ async function resolveTarget(
   staffId: string,
   businessDate: string,
   mutation: boolean,
+  expectedBranchId?: string,
 ) {
   const date = parseBusinessDate(businessDate);
   const staff = await prisma.staffMember.findFirst({
@@ -180,13 +181,23 @@ async function resolveTarget(
   if (!staff) {
     throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
   }
+  if (
+    expectedBranchId &&
+    actor.role === "TRAINING_MANAGER" &&
+    !actor.activeBranchIds.includes(expectedBranchId)
+  ) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
+  }
+  const branchAssignments = expectedBranchId
+    ? staff.assignments.filter((assignment) => assignment.branchId === expectedBranchId)
+    : staff.assignments;
 
   if (actor.role === "TRAINING_MANAGER") {
     const isLiveEmployee = !staff.user || staff.user.role === "LIVE_EMPLOYEE";
     if (
       !isLiveEmployee ||
       (mutation && actor.staffId === staff.id) ||
-      !staff.assignments.some(
+      !branchAssignments.some(
         (assignment) =>
           assignment.assignmentType === "MEMBER" &&
           actor.activeBranchIds.includes(assignment.branchId),
@@ -198,12 +209,12 @@ async function resolveTarget(
 
   const assignments =
     actor.role === "TRAINING_MANAGER"
-      ? staff.assignments.filter(
+      ? branchAssignments.filter(
           (assignment) =>
             assignment.assignmentType === "MEMBER" &&
             actor.activeBranchIds.includes(assignment.branchId),
         )
-      : [...staff.assignments].sort(
+      : [...branchAssignments].sort(
           (left, right) =>
             assignmentPriority[left.assignmentType] - assignmentPriority[right.assignmentType],
         );
@@ -235,6 +246,7 @@ async function assertExistingRecordAccess(
     record.staffId,
     record.businessDate.toISOString().slice(0, 10),
     mutation,
+    record.branchId,
   );
   if (target.branchId !== record.branchId) {
     throw new DomainError("NOT_FOUND", "Không tìm thấy attendance trong phạm vi.");
@@ -426,9 +438,16 @@ export async function createAttendance(
   actor: ActorContext,
   input: AttendanceCreateInput,
   metadata: RequestMetadata,
+  expectedBranchId?: string,
 ): Promise<AttendanceRecordDto> {
   requirePermission(actor, "attendance:write");
-  const target = await resolveTarget(actor, input.staffId, input.businessDate, true);
+  const target = await resolveTarget(
+    actor,
+    input.staffId,
+    input.businessDate,
+    true,
+    expectedBranchId,
+  );
   const values = {
     businessDate: input.businessDate,
     checkInAt: input.checkInAt ?? null,

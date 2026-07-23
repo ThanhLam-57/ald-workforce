@@ -108,6 +108,7 @@ export function FoundationAdmin({ branches, staff }: FoundationAdminProps) {
               post(event, "/api/staff", (form) => ({
                 staffCode: field(form, "staffCode"),
                 fullName: field(form, "fullName"),
+                streamingAlias: field(form, "streamingAlias") || null,
                 email: field(form, "email") || undefined,
                 jobTitle: field(form, "jobTitle"),
                 employmentCategory: field(form, "employmentCategory"),
@@ -117,6 +118,7 @@ export function FoundationAdmin({ branches, staff }: FoundationAdminProps) {
           >
             <input name="staffCode" placeholder="Mã nhân viên" required />
             <input name="fullName" placeholder="Họ và tên" required />
+            <input name="streamingAlias" placeholder="ACC / alias Live" />
             <input name="email" placeholder="Email (không bắt buộc)" type="email" />
             <input name="jobTitle" placeholder="Vị trí công việc" required />
             <select defaultValue="OFFICIAL" name="employmentCategory">
