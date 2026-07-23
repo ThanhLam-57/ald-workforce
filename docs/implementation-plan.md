@@ -1,0 +1,94 @@
+# Kế hoạch triển khai
+
+## Phase 0 — Đặc tả và scaffold
+
+- Chốt product requirements, permission matrix, data model/ERD, payroll contract, câu hỏi mở và architecture.
+- Tạo pnpm/Turborepo, strict TypeScript, lint, Vitest, Playwright skeleton.
+- Tạo Dockerfile web/worker, Compose PostgreSQL/MinIO.
+- Exit: workspace scripts và build scaffold pass.
+
+## Phase 1 — Foundation (phạm vi Prompt 0)
+
+1. Prisma foundation migration và generated client.
+2. Better Auth database session, email/username + password, không self-registration.
+3. Actor context và RBAC/domain policy.
+4. Application services/repositories cho branch, staff, user, assignment.
+5. Audit skeleton cùng transaction và required reason.
+6. GM/manager dashboard tối thiểu và API scoped.
+7. Seed company + GM idempotent.
+8. Liveness/readiness.
+9. Unit test policy và integration test cross-company/cross-branch IDOR.
+10. README local setup và Railway operations.
+
+Exit:
+
+- GM tạo/sửa branch, staff, user, assignment.
+- TM chỉ liệt kê/xem branch và staff thuộc assignment hiệu lực.
+- Test IDOR pass; audit create/update có before/after đã redaction.
+- lint, typecheck, tests, build pass.
+
+## Phase 2 — Attendance và Live metrics
+
+- Attendance day/live metric/violation/evidence schema.
+- Bảng nhân viên/tháng, autosave + version conflict, keyboard/grid behavior.
+- Server-side export báo lỗi không có revenue.
+- Publish workflow và employee DTO.
+- Integration/E2E branch scope và field redaction.
+
+## Phase 3 — Versioned rule center
+
+- Typed rule schemas cho daily/monthly reward, penalty, salary.
+- Draft/preview/schedule/publish state machine.
+- PostgreSQL no-overlap constraint và immutable published guard.
+- Dropdown penalty theo effective date và violation snapshot.
+- Golden boundary tests.
+
+## Phase 4 — KPI quản lý
+
+- Manager attendance.
+- KPI template/version/criteria và weighted scoring pure functions.
+- Draft/published review.
+- GM/TM self-read permissions và audit.
+
+## Phase 5 — Payroll
+
+- Payroll schema/state machine.
+- Pure config-driven calculator và golden tests.
+- Calculate/review/adjust/lock/publish/revision.
+- Snapshot/reconciliation và employee payslip read-only.
+- XLSX/PDF export jobs.
+
+## Phase 6 — Báo cáo, import/export và self-service
+
+- Branch/company reports, weekly/monthly views và charts.
+- Import preview/row validation/idempotent commit.
+- Export center, signed URL.
+- Employee self-service setting và field-level revenue permission.
+
+## Phase 7 — Production hardening
+
+- Load/performance test bảng tháng và report.
+- Backup/restore drill, rollback drill.
+- Observability/alerts, security review, dependency/secret scanning.
+- Data retention, object scan/lifecycle và incident runbook.
+
+## Chiến lược test
+
+- Unit: authorization policy, interval logic, state machine, formula.
+- Integration: PostgreSQL constraints, repository tenant scope, transaction/audit, auth session.
+- E2E: login và các luồng chính theo role bằng Playwright.
+- Golden: payroll/rule boundaries và rounding.
+- Build gate mỗi phase: `pnpm lint`, `pnpm typecheck`, `pnpm test`, integration liên quan, `pnpm build`.
+
+## Rủi ro và biện pháp
+
+| Rủi ro                          | Biện pháp                                                                   |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| IDOR chéo cơ sở                 | Actor scope từ DB; company/branch filter trong repository; integration test |
+| Rule overlap/sai effective date | `[from,to)`, transaction lock + DB exclusion constraint                     |
+| Sai số tiền                     | BIGINT, decimal policy, no floating point, reconciliation/golden tests      |
+| Rò revenue/payroll              | Server DTO allow-list, endpoint/export test                                 |
+| Audit thiếu hoặc lộ secret      | Audit cùng transaction, redaction central                                   |
+| Web/worker tranh migration      | Release job duy nhất chạy `migrate deploy`                                  |
+| Aggregate lệch source           | Không lưu bảng tháng trùng; trace source IDs                                |
+| Import lặp                      | Idempotency key và per-row stable key                                       |

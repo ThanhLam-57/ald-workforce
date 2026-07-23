@@ -1,0 +1,71 @@
+# Ma trận quyền
+
+## 1. Nguyên tắc
+
+Quyền hiệu lực là giao của:
+
+1. role trong session;
+2. `companyId` của session;
+3. branch assignment đang hiệu lực tại ngày truy cập;
+4. quan hệ sở hữu đối với employee self-service;
+5. trạng thái publish và company setting;
+6. trạng thái bản ghi (ví dụ payroll đã khóa).
+
+Client không được quyết định scope. `branchId`, `companyId`, `staffId` từ request chỉ là đối tượng cần kiểm tra, không phải bằng chứng quyền.
+
+## 2. Ma trận chức năng đích
+
+| Tài nguyên / hành động    | GENERAL_MANAGER                           | TRAINING_MANAGER                                           | LIVE_EMPLOYEE                              |
+| ------------------------- | ----------------------------------------- | ---------------------------------------------------------- | ------------------------------------------ |
+| Company settings          | Đọc/sửa, có audit + lý do                 | Không                                                      | Không                                      |
+| Branch                    | CRUD/archive toàn công ty, có audit       | Đọc branch được phân công                                  | Không                                      |
+| Staff                     | CRUD toàn công ty                         | Đọc staff trong branch; cập nhật trường nghiệp vụ được cấp | Chỉ đọc hồ sơ bản thân được phép           |
+| User/account              | CRUD/disable/reset toàn công ty, có audit | Không                                                      | Đổi thông tin cá nhân/mật khẩu theo policy |
+| Branch assignment         | CRUD toàn công ty, có audit               | Đọc assignment của mình và staff trong scope               | Không                                      |
+| Level history             | CRUD toàn công ty                         | Đọc trong scope                                            | Đọc level bản thân đã publish              |
+| Attendance nhân viên Live | CRUD trong công ty                        | CRUD trong branch scope                                    | Đọc bản thân đã publish                    |
+| Violation/evidence        | CRUD/archive trong công ty                | CRUD trong branch scope                                    | Đọc bản thân đã publish                    |
+| Attendance TM             | CRUD                                      | Không                                                      | Không                                      |
+| KPI TM                    | CRUD/publish                              | Chỉ đọc KPI bản thân đã publish                            | Không                                      |
+| Active rules              | CRUD/version/publish                      | Chỉ đọc rule hiệu lực                                      | Không                                      |
+| Payroll                   | Calculate/review/lock/publish/export      | Không                                                      | Chỉ payslip bản thân đã publish            |
+| Báo cáo công ty           | Đọc/export                                | Không                                                      | Không                                      |
+| Báo cáo branch            | Đọc/export                                | Đọc/export branch scope                                    | Không                                      |
+| Audit                     | Đọc toàn công ty                          | Không mặc định                                             | Không                                      |
+| Import/export center      | Toàn công ty                              | Chỉ loại job được cấp và branch scope                      | Không                                      |
+
+`CRUD` không đồng nghĩa hard-delete. Dữ liệu lịch sử/tài chính chỉ được archive, đóng khoảng hiệu lực hoặc tạo revision.
+
+## 3. Ma trận endpoint Phase 1
+
+| Endpoint                     | GM             | TM                                 | Employee                 | Quy tắc server                                    |
+| ---------------------------- | -------------- | ---------------------------------- | ------------------------ | ------------------------------------------------- |
+| `GET /api/me`                | Có             | Có                                 | Có                       | Session hợp lệ, DTO tối thiểu                     |
+| `GET /api/branches`          | Tất cả company | Branch đang phân công              | Không                    | Scope lấy từ session/DB                           |
+| `POST /api/branches`         | Có             | Không                              | Không                    | Audit + reason                                    |
+| `PATCH /api/branches/:id`    | Có             | Không                              | Không                    | Company match, optimistic version, audit + reason |
+| `GET /api/staff`             | Tất cả company | Staff có assignment giao với scope | Bản thân (giai đoạn sau) | Không tin branch scope từ client                  |
+| `POST /api/staff`            | Có             | Không                              | Không                    | Transaction + audit                               |
+| `PATCH /api/staff/:id`       | Có             | Không                              | Không                    | Company match, audit + reason                     |
+| `POST /api/users`            | Có             | Không                              | Không                    | Không self-registration; staff cùng company       |
+| `PATCH /api/users/:id`       | Có             | Không                              | Không                    | Không cho tự nâng quyền; audit + reason           |
+| `POST /api/assignments`      | Có             | Không                              | Không                    | Không overlap; branch/staff cùng company; audit   |
+| `PATCH /api/assignments/:id` | Có             | Không                              | Không                    | Đóng/sửa khoảng hợp lệ; audit                     |
+
+## 4. Quy tắc query scope
+
+- `GENERAL_MANAGER`: mọi query phải có `companyId = session.user.companyId`.
+- `TRAINING_MANAGER`: query phải có `companyId` và `branchId ∈ activeBranchIds(session.user.staffId, now)`.
+- Staff thuộc scope TM khi có assignment giao với branch scope tại ngày truy vấn. Không dựa vào “branch hiện tại” do client gửi.
+- `LIVE_EMPLOYEE`: `staffId = session.user.staffId`, record published, self-service bật và field-level setting cho phép.
+- Dữ liệu tiền lương/doanh số bị loại khỏi DTO ngay tại server nếu role/setting không cho phép.
+
+## 5. Test bắt buộc
+
+- TM branch A gọi branch B bằng ID đoán được → `404` hoặc `403` thống nhất, không rò metadata.
+- TM branch A liệt kê staff → không có staff chỉ thuộc branch B.
+- TM có assignment hết hạn → không còn scope.
+- User company A dùng ID company B → bị chặn.
+- Employee dùng staff ID người khác → bị chặn.
+- API export báo lỗi → response không có key/cột doanh số.
+- GM mutation nhạy cảm thiếu `reason` → validation error.
