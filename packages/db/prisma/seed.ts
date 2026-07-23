@@ -155,6 +155,81 @@ const demoStaff = await prisma.staffMember.upsert({
     employmentCategory: "OFFICIAL",
   },
 });
+const demoManager = await prisma.staffMember.upsert({
+  where: {
+    companyId_staffCode: { companyId: company.id, staffCode: "TMDEMO" },
+  },
+  update: {
+    fullName: "Quản lý đào tạo Demo",
+    email: "manager.demo@ald.local",
+    employmentStatus: "ACTIVE",
+  },
+  create: {
+    companyId: company.id,
+    staffCode: "TMDEMO",
+    fullName: "Quản lý đào tạo Demo",
+    email: "manager.demo@ald.local",
+    jobTitle: "Quản lý đào tạo",
+    employmentCategory: "OFFICIAL",
+  },
+});
+await prisma.user.upsert({
+  where: { email: "manager.demo@ald.local" },
+  update: {
+    companyId: company.id,
+    staffId: demoManager.id,
+    name: demoManager.fullName,
+    role: "TRAINING_MANAGER",
+    active: true,
+  },
+  create: {
+    companyId: company.id,
+    staffId: demoManager.id,
+    name: demoManager.fullName,
+    email: "manager.demo@ald.local",
+    emailVerified: true,
+    username: "manager-demo",
+    displayUsername: "manager-demo",
+    role: "TRAINING_MANAGER",
+    active: true,
+  },
+});
+
+async function ensureEmploymentHistory(
+  staffId: string,
+  employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED",
+  employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN",
+): Promise<void> {
+  const existing = await prisma.staffEmploymentHistory.findFirst({
+    where: { companyId: company.id, staffId },
+    orderBy: { effectiveFrom: "asc" },
+    select: { id: true },
+  });
+  if (existing) {
+    await prisma.staffEmploymentHistory.update({
+      where: { id: existing.id },
+      data: { employmentStatus, employmentCategory, effectiveTo: null },
+    });
+  } else {
+    await prisma.staffEmploymentHistory.create({
+      data: {
+        companyId: company.id,
+        staffId,
+        employmentStatus,
+        employmentCategory,
+        effectiveFrom: demoMonthStart,
+        createdByUserId: seededUserId,
+      },
+    });
+  }
+}
+
+await Promise.all([
+  ensureEmploymentHistory(staff.id, "ACTIVE", "OFFICIAL"),
+  ensureEmploymentHistory(demoStaff.id, "ACTIVE", "OFFICIAL"),
+  ensureEmploymentHistory(demoManager.id, "ACTIVE", "OFFICIAL"),
+]);
+
 const demoAssignment = await prisma.branchAssignment.findFirst({
   where: {
     companyId: company.id,
@@ -175,9 +250,30 @@ if (!demoAssignment) {
     },
   });
 }
+const demoManagerAssignment = await prisma.branchAssignment.findFirst({
+  where: {
+    companyId: company.id,
+    branchId: demoBranch.id,
+    staffId: demoManager.id,
+    assignmentType: "PRIMARY_MANAGER",
+    archivedAt: null,
+  },
+  select: { id: true },
+});
+if (!demoManagerAssignment) {
+  await prisma.branchAssignment.create({
+    data: {
+      companyId: company.id,
+      branchId: demoBranch.id,
+      staffId: demoManager.id,
+      assignmentType: "PRIMARY_MANAGER",
+      effectiveFrom: demoMonthStart,
+    },
+  });
+}
 
 async function ensureDemoRule(
-  type: "SALARY_RULES" | "DAILY_REWARD_TIERS" | "MONTHLY_LEVEL_RULES",
+  type: "SALARY_RULES" | "DAILY_REWARD_TIERS" | "MONTHLY_LEVEL_RULES" | "KPI_TEMPLATE",
   name: string,
   configuration: object,
 ): Promise<void> {
@@ -270,6 +366,31 @@ await ensureDemoRule("MONTHLY_LEVEL_RULES", `Demo thưởng tháng ${payrollDemo
     },
   ],
 });
+await ensureDemoRule("KPI_TEMPLATE", `Demo KPI quản lý ${payrollDemoMonth}`, {
+  kind: "KPI_TEMPLATE",
+  criteria: [
+    {
+      code: "ATTENDANCE",
+      name: "Chấm công và kỷ luật",
+      description: "Duy trì hiện diện, đúng giờ và tuân thủ quy trình.",
+      weightBps: 4_000,
+      maxScore: 100,
+      requiredEvidence: false,
+      requiredNote: true,
+      displayOrder: 1,
+    },
+    {
+      code: "TEAM_RESULT",
+      name: "Kết quả đội ngũ",
+      description: "Theo dõi và cải thiện hiệu quả nhân viên Live tại cơ sở.",
+      weightBps: 6_000,
+      maxScore: 100,
+      requiredEvidence: true,
+      requiredNote: true,
+      displayOrder: 2,
+    },
+  ],
+});
 
 const demoAttendance = await prisma.attendanceDay.findUnique({
   where: {
@@ -304,6 +425,31 @@ if (!demoAttendance) {
           revenueScale: 1,
         },
       },
+    },
+  });
+}
+const demoManagerAttendance = await prisma.attendanceDay.findUnique({
+  where: {
+    companyId_staffId_businessDate: {
+      companyId: company.id,
+      staffId: demoManager.id,
+      businessDate: demoWorkDate,
+    },
+  },
+  select: { id: true },
+});
+if (!demoManagerAttendance) {
+  await prisma.attendanceDay.create({
+    data: {
+      companyId: company.id,
+      branchId: demoBranch.id,
+      staffId: demoManager.id,
+      businessDate: demoWorkDate,
+      status: "PRESENT",
+      workUnits: "1",
+      note: "Sample seed KPI quản lý",
+      createdByUserId: seededUserId,
+      updatedByUserId: seededUserId,
     },
   });
 }

@@ -36,6 +36,11 @@ Client không được quyết định scope. `branchId`, `companyId`, `staffId`
 
 `CRUD` không đồng nghĩa hard-delete. Dữ liệu lịch sử/tài chính chỉ được archive, đóng khoảng hiệu lực hoặc tạo revision.
 
+Company dashboard/report và export XLSX/PDF luôn kiểm tra GM ở server; không có
+branch query parameter nào mở rộng quyền. KPI manager chỉ trả bản thân +
+`PUBLISHED` khi `managerKpiSelfServiceEnabled` đang bật; draft không bao giờ được
+trả cho manager.
+
 ## 3. Ma trận endpoint Phase 1
 
 | Endpoint                     | GM             | TM                                 | Employee                 | Quy tắc server                                    |

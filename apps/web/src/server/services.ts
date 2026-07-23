@@ -269,6 +269,16 @@ export async function createStaff(
       },
       select: staffSelect,
     });
+    await tx.staffEmploymentHistory.create({
+      data: {
+        companyId: actor.companyId,
+        staffId: staff.id,
+        employmentStatus: staff.employmentStatus,
+        employmentCategory: staff.employmentCategory,
+        effectiveFrom: toBusinessDate(new Date()),
+        createdByUserId: actor.userId,
+      },
+    });
     await appendAudit(tx, {
       actor,
       action: "staff.create",
@@ -322,6 +332,48 @@ export async function updateStaff(
     }
 
     const after = await tx.staffMember.findUniqueOrThrow({ where: { id }, select: staffSelect });
+    if (
+      before.employmentStatus !== after.employmentStatus ||
+      before.employmentCategory !== after.employmentCategory
+    ) {
+      const effectiveFrom = toBusinessDate(new Date());
+      const current = await tx.staffEmploymentHistory.findFirst({
+        where: {
+          companyId: actor.companyId,
+          staffId: id,
+          effectiveFrom: { lte: effectiveFrom },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveFrom } }],
+        },
+        orderBy: { effectiveFrom: "desc" },
+      });
+      if (current?.effectiveFrom.getTime() === effectiveFrom.getTime()) {
+        await tx.staffEmploymentHistory.update({
+          where: { id: current.id },
+          data: {
+            employmentStatus: after.employmentStatus,
+            employmentCategory: after.employmentCategory,
+            version: { increment: 1 },
+          },
+        });
+      } else {
+        if (current) {
+          await tx.staffEmploymentHistory.update({
+            where: { id: current.id },
+            data: { effectiveTo: effectiveFrom, version: { increment: 1 } },
+          });
+        }
+        await tx.staffEmploymentHistory.create({
+          data: {
+            companyId: actor.companyId,
+            staffId: id,
+            employmentStatus: after.employmentStatus,
+            employmentCategory: after.employmentCategory,
+            effectiveFrom,
+            createdByUserId: actor.userId,
+          },
+        });
+      }
+    }
     await appendAudit(tx, {
       actor,
       action: "staff.update",

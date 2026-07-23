@@ -159,6 +159,68 @@ export const branchOverviewQuerySchema = z.object({
   search: z.string().trim().max(120).optional(),
 });
 
+export const companyReportQuerySchema = z.object({
+  month: businessMonthSchema,
+  branchId: idSchema.optional(),
+  employmentStatus: z.enum(["ACTIVE", "ON_LEAVE", "TERMINATED"]).optional(),
+  employmentCategory: z.enum(["OFFICIAL", "PROBATION", "CONTRACTOR", "INTERN"]).optional(),
+  levelId: idSchema.optional(),
+});
+
+export const companyReportExportQuerySchema = companyReportQuerySchema.extend({
+  format: z.enum(["xlsx", "pdf"]),
+});
+
+export const companyDashboardQuerySchema = z.object({
+  month: businessMonthSchema,
+  branchId: idSchema.optional(),
+});
+
+const kpiScoreSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{1,5}(\.\d{1,2})?$/, "Điểm KPI phải là số không âm, tối đa 2 số lẻ.");
+
+export const managerKpiListQuerySchema = z.object({
+  month: businessMonthSchema.optional(),
+  managerStaffId: idSchema.optional(),
+});
+
+export const managerKpiCreateSchema = z.object({
+  managerStaffId: idSchema,
+  month: businessMonthSchema,
+  notes: z.string().trim().max(2_000).nullable().optional(),
+  reason: reasonSchema,
+});
+
+export const managerKpiUpdateSchema = z.object({
+  version: z.number().int().positive(),
+  notes: z.string().trim().max(2_000).nullable(),
+  criteria: z
+    .array(
+      z.object({
+        code: trimmedText("Mã tiêu chí", 40),
+        score: kpiScoreSchema,
+        note: z.string().trim().max(2_000).nullable(),
+        evidence: z.string().trim().max(4_000).nullable(),
+      }),
+    )
+    .min(1)
+    .max(200),
+  reason: reasonSchema,
+});
+
+export const managerKpiPublishSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const managerKpiSettingUpdateSchema = z.object({
+  enabled: z.boolean(),
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
 export const branchOverviewCellEditSchema = z
   .object({
     clientId: trimmedText("Mã ô", 80),
@@ -974,6 +1036,139 @@ export type EmployeeErrorReportDto = Readonly<{
   }>[];
 }>;
 
+export type CompanyReportTotalsDto = Readonly<{
+  revenueAmount: string;
+  revenueBonus: string;
+  monthlyBonus: string;
+  baseSalary: string;
+  totalIncome: string;
+  workUnits: string;
+  penalties: string;
+}>;
+
+export type CompanyReportStaffRowDto = Readonly<{
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+    employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+    performanceLevel: Readonly<{ id: string; code: string; name: string }> | null;
+  }>;
+  weeks: readonly Readonly<{ weekNo: number; revenueAmount: string }>[];
+  payrollStatus: PayrollStatus | null;
+  payrollRevision: number | null;
+  totals: CompanyReportTotalsDto;
+}>;
+
+export type CompanyMonthlyReportDto = Readonly<{
+  month: string;
+  generatedAt: string;
+  weeks: readonly Readonly<{ weekNo: number; from: string; to: string }>[];
+  branches: readonly Readonly<{
+    branch: Readonly<{ id: string; code: string; name: string }>;
+    payrollStatus: PayrollStatus | null;
+    payrollRevision: number | null;
+    staff: readonly CompanyReportStaffRowDto[];
+    totals: CompanyReportTotalsDto;
+  }>[];
+  totals: CompanyReportTotalsDto;
+  charts: Readonly<{
+    revenueByBranch: readonly Readonly<{ id: string; label: string; value: string }>[];
+    revenueByEmployee: readonly Readonly<{ id: string; label: string; value: string }>[];
+    revenueTrend: readonly Readonly<{ businessDate: string; value: string }>[];
+    bonusPenalty: readonly Readonly<{
+      label: string;
+      bonus: string;
+      penalty: string;
+    }>[];
+  }>;
+}>;
+
+export type CompanyDashboardDto = Readonly<{
+  month: string;
+  totals: Readonly<{
+    revenueAmount: string;
+    workUnits: string;
+    penalties: string;
+    payrollTotal: string;
+    missingAttendance: number;
+    unreviewedPayroll: number;
+  }>;
+  branches: readonly Readonly<{
+    id: string;
+    code: string;
+    name: string;
+    revenueAmount: string;
+    workUnits: string;
+    penalties: string;
+    payrollTotal: string;
+    missingAttendance: number;
+    payrollStatus: PayrollStatus | null;
+  }>[];
+  upcomingRules: readonly Readonly<{
+    id: string;
+    type:
+      | "PENALTY"
+      | "DAILY_REWARD_TIERS"
+      | "MONTHLY_LEVEL_RULES"
+      | "SALARY_RULES"
+      | "KPI_TEMPLATE";
+    ruleSetName: string;
+    versionNo: number;
+    effectiveFrom: string;
+  }>[];
+}>;
+
+export type ManagerKpiCriterionLineDto = Readonly<{
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  weightBps: number;
+  maxScore: number;
+  requiredEvidence: boolean;
+  requiredNote: boolean;
+  displayOrder: number;
+  score: string;
+  weightedScore: string;
+  note: string | null;
+  evidence: string | null;
+}>;
+
+export type ManagerKpiEvaluationDto = Readonly<{
+  id: string;
+  month: string;
+  status: "DRAFT" | "PUBLISHED";
+  version: number;
+  totalScore: string;
+  maximumScore: string;
+  notes: string | null;
+  manager: Readonly<{ id: string; staffCode: string; fullName: string }>;
+  branch: Readonly<{ id: string; code: string; name: string }>;
+  template: Readonly<{ id: string; ruleSetName: string; versionNo: number }>;
+  attendance: Readonly<{
+    workUnits: string;
+    presentDays: number;
+    absentDays: number;
+    leaveDays: number;
+  }>;
+  criteria: readonly ManagerKpiCriterionLineDto[];
+  publishedAt: string | null;
+}>;
+
+export type ManagerKpiCandidateDto = Readonly<{
+  id: string;
+  staffCode: string;
+  fullName: string;
+  branch: Readonly<{ id: string; code: string; name: string }>;
+}>;
+
+export type ManagerKpiSettingDto = Readonly<{
+  enabled: boolean;
+  version: number;
+}>;
+
 export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
 export type BranchUpdateInput = z.infer<typeof branchUpdateSchema>;
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
@@ -989,6 +1184,14 @@ export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;
 export type BranchOverviewQuery = z.infer<typeof branchOverviewQuerySchema>;
 export type BranchOverviewCellEditInput = z.infer<typeof branchOverviewCellEditSchema>;
 export type BranchOverviewBatchUpdateInput = z.infer<typeof branchOverviewBatchUpdateSchema>;
+export type CompanyReportQuery = z.infer<typeof companyReportQuerySchema>;
+export type CompanyReportExportQuery = z.infer<typeof companyReportExportQuerySchema>;
+export type CompanyDashboardQuery = z.infer<typeof companyDashboardQuerySchema>;
+export type ManagerKpiListQuery = z.infer<typeof managerKpiListQuerySchema>;
+export type ManagerKpiCreateInput = z.infer<typeof managerKpiCreateSchema>;
+export type ManagerKpiUpdateInput = z.infer<typeof managerKpiUpdateSchema>;
+export type ManagerKpiPublishInput = z.infer<typeof managerKpiPublishSchema>;
+export type ManagerKpiSettingUpdateInput = z.infer<typeof managerKpiSettingUpdateSchema>;
 export type PenaltyRuleSetCreateInput = z.infer<typeof penaltyRuleSetCreateSchema>;
 export type PenaltyRuleDraftCreateInput = z.infer<typeof penaltyRuleDraftCreateSchema>;
 export type PenaltyRuleDraftUpdateInput = z.infer<typeof penaltyRuleDraftUpdateSchema>;

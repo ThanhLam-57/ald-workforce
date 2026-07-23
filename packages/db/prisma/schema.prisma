@@ -114,67 +114,77 @@ enum PayrollExportStatus {
   FAILED
 }
 
+enum ManagerKpiEvaluationStatus {
+  DRAFT
+  PUBLISHED
+}
+
 model Company {
-  id                     String                @id @default(uuid()) @db.Uuid
-  name                   String
-  slug                   String                @unique
-  timezone               String                @default("Asia/Ho_Chi_Minh")
-  revenueUnit            RevenueUnit           @default(VND)
-  revenueScale           Int                   @default(1)
-  selfServiceEnabled     Boolean               @default(false)
-  employeeRevenueVisible Boolean               @default(false)
-  version                Int                   @default(1)
-  createdAt              DateTime              @default(now()) @db.Timestamptz(3)
-  updatedAt              DateTime              @updatedAt @db.Timestamptz(3)
-  branches               Branch[]
-  staffMembers           StaffMember[]
-  users                  User[]
-  branchAssignments      BranchAssignment[]
-  attendanceDays         AttendanceDay[]
-  liveDailyMetrics       LiveDailyMetric[]
-  ruleSets               RuleSet[]
-  ruleVersions           RuleVersion[]
-  penaltyItems           PenaltyItem[]
-  violations             Violation[]
-  evidenceObjects        EvidenceObject[]
-  performanceLevels      PerformanceLevel[]
-  levelHistories         LevelHistory[]
-  levelProposals         LevelProposal[]
-  payrollPeriods         PayrollPeriod[]
-  payrollEntries         PayrollEntry[]
-  payrollLines           PayrollLine[]
-  payrollAdjustments     PayrollAdjustment[]
-  calculationSnapshots   CalculationSnapshot[]
-  payrollExportJobs      PayrollExportJob[]
-  payrollDownloadLogs    PayrollDownloadLog[]
-  auditLogs              AuditLog[]
+  id                           String                    @id @default(uuid()) @db.Uuid
+  name                         String
+  slug                         String                    @unique
+  timezone                     String                    @default("Asia/Ho_Chi_Minh")
+  revenueUnit                  RevenueUnit               @default(VND)
+  revenueScale                 Int                       @default(1)
+  selfServiceEnabled           Boolean                   @default(false)
+  employeeRevenueVisible       Boolean                   @default(false)
+  managerKpiSelfServiceEnabled Boolean                   @default(false)
+  version                      Int                       @default(1)
+  createdAt                    DateTime                  @default(now()) @db.Timestamptz(3)
+  updatedAt                    DateTime                  @updatedAt @db.Timestamptz(3)
+  branches                     Branch[]
+  staffMembers                 StaffMember[]
+  users                        User[]
+  branchAssignments            BranchAssignment[]
+  attendanceDays               AttendanceDay[]
+  liveDailyMetrics             LiveDailyMetric[]
+  ruleSets                     RuleSet[]
+  ruleVersions                 RuleVersion[]
+  penaltyItems                 PenaltyItem[]
+  violations                   Violation[]
+  evidenceObjects              EvidenceObject[]
+  performanceLevels            PerformanceLevel[]
+  levelHistories               LevelHistory[]
+  levelProposals               LevelProposal[]
+  payrollPeriods               PayrollPeriod[]
+  payrollEntries               PayrollEntry[]
+  payrollLines                 PayrollLine[]
+  payrollAdjustments           PayrollAdjustment[]
+  calculationSnapshots         CalculationSnapshot[]
+  payrollExportJobs            PayrollExportJob[]
+  payrollDownloadLogs          PayrollDownloadLog[]
+  staffEmploymentHistories     StaffEmploymentHistory[]
+  managerKpiEvaluations        ManagerKpiEvaluation[]
+  managerKpiLines              ManagerKpiCriterionLine[]
+  auditLogs                    AuditLog[]
 
   @@map("companies")
 }
 
 model Branch {
-  id                   String                @id @default(uuid()) @db.Uuid
-  companyId            String                @db.Uuid
-  code                 String
-  name                 String
-  address              String?
-  isActive             Boolean               @default(true)
-  version              Int                   @default(1)
-  createdAt            DateTime              @default(now()) @db.Timestamptz(3)
-  updatedAt            DateTime              @updatedAt @db.Timestamptz(3)
-  company              Company               @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  assignments          BranchAssignment[]
-  attendanceDays       AttendanceDay[]
-  liveDailyMetrics     LiveDailyMetric[]
-  violations           Violation[]
-  evidenceObjects      EvidenceObject[]
-  payrollPeriods       PayrollPeriod[]
-  payrollEntries       PayrollEntry[]
-  payrollLines         PayrollLine[]
-  payrollAdjustments   PayrollAdjustment[]
-  calculationSnapshots CalculationSnapshot[]
-  payrollExportJobs    PayrollExportJob[]
-  payrollDownloadLogs  PayrollDownloadLog[]
+  id                    String                 @id @default(uuid()) @db.Uuid
+  companyId             String                 @db.Uuid
+  code                  String
+  name                  String
+  address               String?
+  isActive              Boolean                @default(true)
+  version               Int                    @default(1)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(3)
+  company               Company                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  assignments           BranchAssignment[]
+  attendanceDays        AttendanceDay[]
+  liveDailyMetrics      LiveDailyMetric[]
+  violations            Violation[]
+  evidenceObjects       EvidenceObject[]
+  payrollPeriods        PayrollPeriod[]
+  payrollEntries        PayrollEntry[]
+  payrollLines          PayrollLine[]
+  payrollAdjustments    PayrollAdjustment[]
+  calculationSnapshots  CalculationSnapshot[]
+  payrollExportJobs     PayrollExportJob[]
+  payrollDownloadLogs   PayrollDownloadLog[]
+  managerKpiEvaluations ManagerKpiEvaluation[]
 
   @@unique([companyId, code])
   @@index([companyId, isActive])
@@ -182,31 +192,33 @@ model Branch {
 }
 
 model StaffMember {
-  id                  String               @id @default(uuid()) @db.Uuid
-  companyId           String               @db.Uuid
-  staffCode           String
-  fullName            String
-  streamingAlias      String?
-  email               String?
-  phone               String?
-  jobTitle            String
-  employmentCategory  EmploymentCategory
-  employmentStatus    EmploymentStatus     @default(ACTIVE)
-  version             Int                  @default(1)
-  archivedAt          DateTime?            @db.Timestamptz(3)
-  createdAt           DateTime             @default(now()) @db.Timestamptz(3)
-  updatedAt           DateTime             @updatedAt @db.Timestamptz(3)
-  company             Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  user                User?
-  assignments         BranchAssignment[]
-  attendanceDays      AttendanceDay[]
-  violations          Violation[]
-  levelHistories      LevelHistory[]
-  levelProposals      LevelProposal[]
-  payrollEntries      PayrollEntry[]
-  payrollAdjustments  PayrollAdjustment[]
-  payrollExportJobs   PayrollExportJob[]
-  payrollDownloadLogs PayrollDownloadLog[]
+  id                    String                   @id @default(uuid()) @db.Uuid
+  companyId             String                   @db.Uuid
+  staffCode             String
+  fullName              String
+  streamingAlias        String?
+  email                 String?
+  phone                 String?
+  jobTitle              String
+  employmentCategory    EmploymentCategory
+  employmentStatus      EmploymentStatus         @default(ACTIVE)
+  version               Int                      @default(1)
+  archivedAt            DateTime?                @db.Timestamptz(3)
+  createdAt             DateTime                 @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime                 @updatedAt @db.Timestamptz(3)
+  company               Company                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  user                  User?
+  assignments           BranchAssignment[]
+  attendanceDays        AttendanceDay[]
+  violations            Violation[]
+  levelHistories        LevelHistory[]
+  levelProposals        LevelProposal[]
+  payrollEntries        PayrollEntry[]
+  payrollAdjustments    PayrollAdjustment[]
+  payrollExportJobs     PayrollExportJob[]
+  payrollDownloadLogs   PayrollDownloadLog[]
+  employmentHistories   StaffEmploymentHistory[]
+  managerKpiEvaluations ManagerKpiEvaluation[]   @relation("ManagerKpiTarget")
 
   @@unique([companyId, staffCode])
   @@index([companyId, employmentStatus, archivedAt])
@@ -215,47 +227,50 @@ model StaffMember {
 }
 
 model User {
-  id                         String                @id @default(uuid()) @db.Uuid
-  companyId                  String                @db.Uuid
-  staffId                    String?               @unique @db.Uuid
+  id                         String                   @id @default(uuid()) @db.Uuid
+  companyId                  String                   @db.Uuid
+  staffId                    String?                  @unique @db.Uuid
   name                       String
-  email                      String                @unique
-  emailVerified              Boolean               @default(false)
+  email                      String                   @unique
+  emailVerified              Boolean                  @default(false)
   image                      String?
-  username                   String?               @unique
+  username                   String?                  @unique
   displayUsername            String?
-  role                       String                @default("LIVE_EMPLOYEE")
-  active                     Boolean               @default(true)
-  banned                     Boolean               @default(false)
+  role                       String                   @default("LIVE_EMPLOYEE")
+  active                     Boolean                  @default(true)
+  banned                     Boolean                  @default(false)
   banReason                  String?
-  banExpires                 DateTime?             @db.Timestamptz(3)
-  version                    Int                   @default(1)
-  createdAt                  DateTime              @default(now()) @db.Timestamptz(3)
-  updatedAt                  DateTime              @updatedAt @db.Timestamptz(3)
-  company                    Company               @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  staff                      StaffMember?          @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  banExpires                 DateTime?                @db.Timestamptz(3)
+  version                    Int                      @default(1)
+  createdAt                  DateTime                 @default(now()) @db.Timestamptz(3)
+  updatedAt                  DateTime                 @updatedAt @db.Timestamptz(3)
+  company                    Company                  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff                      StaffMember?             @relation(fields: [staffId], references: [id], onDelete: SetNull)
   sessions                   Session[]
   accounts                   Account[]
-  auditLogs                  AuditLog[]            @relation("AuditActor")
-  attendanceCreated          AttendanceDay[]       @relation("AttendanceCreatedBy")
-  attendanceUpdated          AttendanceDay[]       @relation("AttendanceUpdatedBy")
-  ruleSetsCreated            RuleSet[]             @relation("RuleSetCreatedBy")
-  ruleVersionsCreated        RuleVersion[]         @relation("RuleVersionCreatedBy")
-  ruleVersionsPublished      RuleVersion[]         @relation("RuleVersionPublishedBy")
-  violationsCreated          Violation[]           @relation("ViolationCreatedBy")
-  violationsCancelled        Violation[]           @relation("ViolationCancelledBy")
-  evidenceCreated            EvidenceObject[]      @relation("EvidenceCreatedBy")
-  levelHistoriesCreated      LevelHistory[]        @relation("LevelHistoryCreatedBy")
-  levelProposalsDecided      LevelProposal[]       @relation("LevelProposalDecidedBy")
-  payrollPeriodsCreated      PayrollPeriod[]       @relation("PayrollPeriodCreatedBy")
-  payrollPeriodsReviewed     PayrollPeriod[]       @relation("PayrollPeriodReviewedBy")
-  payrollPeriodsLocked       PayrollPeriod[]       @relation("PayrollPeriodLockedBy")
-  payrollPeriodsPublished    PayrollPeriod[]       @relation("PayrollPeriodPublishedBy")
-  payrollAdjustmentsCreated  PayrollAdjustment[]   @relation("PayrollAdjustmentCreatedBy")
-  payrollAdjustmentsApproved PayrollAdjustment[]   @relation("PayrollAdjustmentApprovedBy")
-  payrollSnapshotsCalculated CalculationSnapshot[] @relation("PayrollSnapshotCalculatedBy")
-  payrollExportsRequested    PayrollExportJob[]    @relation("PayrollExportRequestedBy")
-  payrollDownloads           PayrollDownloadLog[]  @relation("PayrollDownloadUser")
+  auditLogs                  AuditLog[]               @relation("AuditActor")
+  attendanceCreated          AttendanceDay[]          @relation("AttendanceCreatedBy")
+  attendanceUpdated          AttendanceDay[]          @relation("AttendanceUpdatedBy")
+  ruleSetsCreated            RuleSet[]                @relation("RuleSetCreatedBy")
+  ruleVersionsCreated        RuleVersion[]            @relation("RuleVersionCreatedBy")
+  ruleVersionsPublished      RuleVersion[]            @relation("RuleVersionPublishedBy")
+  violationsCreated          Violation[]              @relation("ViolationCreatedBy")
+  violationsCancelled        Violation[]              @relation("ViolationCancelledBy")
+  evidenceCreated            EvidenceObject[]         @relation("EvidenceCreatedBy")
+  levelHistoriesCreated      LevelHistory[]           @relation("LevelHistoryCreatedBy")
+  levelProposalsDecided      LevelProposal[]          @relation("LevelProposalDecidedBy")
+  payrollPeriodsCreated      PayrollPeriod[]          @relation("PayrollPeriodCreatedBy")
+  payrollPeriodsReviewed     PayrollPeriod[]          @relation("PayrollPeriodReviewedBy")
+  payrollPeriodsLocked       PayrollPeriod[]          @relation("PayrollPeriodLockedBy")
+  payrollPeriodsPublished    PayrollPeriod[]          @relation("PayrollPeriodPublishedBy")
+  payrollAdjustmentsCreated  PayrollAdjustment[]      @relation("PayrollAdjustmentCreatedBy")
+  payrollAdjustmentsApproved PayrollAdjustment[]      @relation("PayrollAdjustmentApprovedBy")
+  payrollSnapshotsCalculated CalculationSnapshot[]    @relation("PayrollSnapshotCalculatedBy")
+  payrollExportsRequested    PayrollExportJob[]       @relation("PayrollExportRequestedBy")
+  payrollDownloads           PayrollDownloadLog[]     @relation("PayrollDownloadUser")
+  employmentHistoriesCreated StaffEmploymentHistory[] @relation("EmploymentHistoryCreatedBy")
+  managerKpiCreated          ManagerKpiEvaluation[]   @relation("ManagerKpiCreatedBy")
+  managerKpiPublished        ManagerKpiEvaluation[]   @relation("ManagerKpiPublishedBy")
 
   @@index([companyId, role, active])
   @@map("users")
@@ -472,32 +487,33 @@ model RuleSet {
 }
 
 model RuleVersion {
-  id                  String            @id @default(uuid()) @db.Uuid
-  companyId           String            @db.Uuid
-  ruleSetId           String            @db.Uuid
-  versionNo           Int
-  status              RuleVersionStatus @default(DRAFT)
-  effectiveFrom       DateTime?         @db.Date
-  effectiveTo         DateTime?         @db.Date
-  notes               String?
-  configuration       Json?
-  rowVersion          Int               @default(1)
-  clonedFromVersionId String?           @db.Uuid
-  createdByUserId     String            @db.Uuid
-  publishedByUserId   String?           @db.Uuid
-  publishedAt         DateTime?         @db.Timestamptz(3)
-  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
-  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
-  company             Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  ruleSet             RuleSet           @relation(fields: [ruleSetId], references: [id], onDelete: Restrict)
-  clonedFrom          RuleVersion?      @relation("RuleVersionClone", fields: [clonedFromVersionId], references: [id], onDelete: Restrict)
-  clones              RuleVersion[]     @relation("RuleVersionClone")
-  createdBy           User              @relation("RuleVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
-  publishedBy         User?             @relation("RuleVersionPublishedBy", fields: [publishedByUserId], references: [id], onDelete: Restrict)
-  items               PenaltyItem[]
-  violations          Violation[]
-  levelProposals      LevelProposal[]
-  payrollLines        PayrollLine[]
+  id                    String                 @id @default(uuid()) @db.Uuid
+  companyId             String                 @db.Uuid
+  ruleSetId             String                 @db.Uuid
+  versionNo             Int
+  status                RuleVersionStatus      @default(DRAFT)
+  effectiveFrom         DateTime?              @db.Date
+  effectiveTo           DateTime?              @db.Date
+  notes                 String?
+  configuration         Json?
+  rowVersion            Int                    @default(1)
+  clonedFromVersionId   String?                @db.Uuid
+  createdByUserId       String                 @db.Uuid
+  publishedByUserId     String?                @db.Uuid
+  publishedAt           DateTime?              @db.Timestamptz(3)
+  createdAt             DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime               @updatedAt @db.Timestamptz(3)
+  company               Company                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  ruleSet               RuleSet                @relation(fields: [ruleSetId], references: [id], onDelete: Restrict)
+  clonedFrom            RuleVersion?           @relation("RuleVersionClone", fields: [clonedFromVersionId], references: [id], onDelete: Restrict)
+  clones                RuleVersion[]          @relation("RuleVersionClone")
+  createdBy             User                   @relation("RuleVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  publishedBy           User?                  @relation("RuleVersionPublishedBy", fields: [publishedByUserId], references: [id], onDelete: Restrict)
+  items                 PenaltyItem[]
+  violations            Violation[]
+  levelProposals        LevelProposal[]
+  payrollLines          PayrollLine[]
+  managerKpiEvaluations ManagerKpiEvaluation[]
 
   @@unique([ruleSetId, versionNo], map: "rule_versions_set_version_key")
   @@index([companyId, status, effectiveFrom, effectiveTo], map: "rule_versions_company_status_interval_idx")
@@ -819,6 +835,85 @@ model PayrollDownloadLog {
   @@index([companyId, payrollPeriodId, downloadedAt(sort: Desc)])
   @@index([companyId, downloadedByUserId, downloadedAt(sort: Desc)])
   @@map("payroll_download_logs")
+}
+
+model StaffEmploymentHistory {
+  id                 String             @id @default(uuid()) @db.Uuid
+  companyId          String             @db.Uuid
+  staffId            String             @db.Uuid
+  employmentStatus   EmploymentStatus
+  employmentCategory EmploymentCategory
+  effectiveFrom      DateTime           @db.Date
+  effectiveTo        DateTime?          @db.Date
+  version            Int                @default(1)
+  createdByUserId    String?            @db.Uuid
+  createdAt          DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(3)
+  company            Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff              StaffMember        @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  createdBy          User?              @relation("EmploymentHistoryCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, staffId, effectiveFrom])
+  @@index([companyId, staffId, effectiveFrom, effectiveTo])
+  @@index([companyId, employmentStatus, employmentCategory, effectiveFrom])
+  @@map("staff_employment_history")
+}
+
+model ManagerKpiEvaluation {
+  id                    String                     @id @default(uuid()) @db.Uuid
+  companyId             String                     @db.Uuid
+  branchId              String                     @db.Uuid
+  managerStaffId        String                     @db.Uuid
+  month                 DateTime                   @db.Date
+  templateRuleVersionId String                     @db.Uuid
+  status                ManagerKpiEvaluationStatus @default(DRAFT)
+  version               Int                        @default(1)
+  totalScore            Decimal                    @default(0) @db.Decimal(10, 2)
+  maximumScore          Decimal                    @db.Decimal(10, 2)
+  notes                 String?
+  createdByUserId       String                     @db.Uuid
+  publishedByUserId     String?                    @db.Uuid
+  publishedAt           DateTime?                  @db.Timestamptz(3)
+  createdAt             DateTime                   @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime                   @updatedAt @db.Timestamptz(3)
+  company               Company                    @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch                Branch                     @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  manager               StaffMember                @relation("ManagerKpiTarget", fields: [managerStaffId], references: [id], onDelete: Restrict)
+  templateRuleVersion   RuleVersion                @relation(fields: [templateRuleVersionId], references: [id], onDelete: Restrict)
+  createdBy             User                       @relation("ManagerKpiCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  publishedBy           User?                      @relation("ManagerKpiPublishedBy", fields: [publishedByUserId], references: [id], onDelete: Restrict)
+  criteria              ManagerKpiCriterionLine[]
+
+  @@unique([companyId, managerStaffId, month])
+  @@index([companyId, month, status])
+  @@index([companyId, branchId, month])
+  @@map("manager_kpi_evaluations")
+}
+
+model ManagerKpiCriterionLine {
+  id                   String               @id @default(uuid()) @db.Uuid
+  companyId            String               @db.Uuid
+  evaluationId         String               @db.Uuid
+  criterionCode        String
+  criterionName        String
+  criterionDescription String
+  weightBps            Int
+  maxScore             Int
+  requiredEvidence     Boolean
+  requiredNote         Boolean
+  displayOrder         Int
+  score                Decimal              @default(0) @db.Decimal(10, 2)
+  weightedScore        Decimal              @default(0) @db.Decimal(10, 2)
+  note                 String?
+  evidence             String?
+  createdAt            DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime             @updatedAt @db.Timestamptz(3)
+  company              Company              @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  evaluation           ManagerKpiEvaluation @relation(fields: [evaluationId], references: [id], onDelete: Restrict)
+
+  @@unique([evaluationId, criterionCode])
+  @@index([companyId, evaluationId, displayOrder])
+  @@map("manager_kpi_criterion_lines")
 }
 
 model AuditLog {

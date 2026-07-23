@@ -6,8 +6,10 @@ import { listBranches, listStaff } from "@/server/services";
 
 import { AttendanceWorkspace } from "./attendance-workspace";
 import { BranchOverviewWorkspace } from "./branch-overview-workspace";
+import { CompanyIntelligenceWorkspace } from "./company-intelligence-workspace";
 import { ConfiguredRuleCenter } from "./configured-rule-center";
 import { FoundationAdmin } from "./foundation-admin";
+import { ManagerKpiWorkspace } from "./manager-kpi-workspace";
 import { PenaltyRuleCenter } from "./penalty-rule-center";
 import { PayrollWorkspace } from "./payroll-workspace";
 import { SignOutButton } from "./sign-out-button";
@@ -92,6 +94,16 @@ export default async function DashboardPage() {
             canOverridePenalty={actor.role === "GENERAL_MANAGER"}
             staff={attendanceStaff}
           />
+          {actor.role === "GENERAL_MANAGER" ? (
+            <CompanyIntelligenceWorkspace
+              branches={branches.map((branch) => ({
+                id: branch.id,
+                code: branch.code,
+                name: branch.name,
+              }))}
+            />
+          ) : null}
+          <ManagerKpiWorkspace isGeneralManager={actor.role === "GENERAL_MANAGER"} />
           <BranchOverviewWorkspace
             branches={branches.map((branch) => ({
               id: branch.id,

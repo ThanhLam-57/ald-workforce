@@ -38,7 +38,13 @@ export type ResourceAction =
   | "payroll:read"
   | "payroll:write"
   | "payroll:export"
-  | "payslip:read";
+  | "payslip:read"
+  | "company-report:read"
+  | "company-report:export"
+  | "company-dashboard:read"
+  | "manager-kpi:read"
+  | "manager-kpi:write"
+  | "company-settings:update";
 
 const GM_MUTATIONS = new Set<ResourceAction>([
   "branch:create",
@@ -76,7 +82,8 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
       action === "evidence:read" ||
       action === "branch-overview:read" ||
       action === "branch-overview:write" ||
-      action === "branch-overview:export"
+      action === "branch-overview:export" ||
+      action === "manager-kpi:read"
     );
   }
 
@@ -326,6 +333,119 @@ export function weekOfMonth(businessDate: string): number {
     throw new DomainError("VALIDATION_ERROR", "Ngày nghiệp vụ không hợp lệ.");
   }
   return Math.ceil(day / 7);
+}
+
+export type BusinessCalendarWeek = Readonly<{
+  weekNo: number;
+  from: string;
+  to: string;
+  dates: readonly string[];
+}>;
+
+/**
+ * Calendar/business weeks start on Monday and are clipped to the selected
+ * month. The first and last week may therefore be partial.
+ */
+export function enumerateBusinessWeeks(month: string): readonly BusinessCalendarWeek[] {
+  const days = enumerateBusinessMonth(month);
+  const first = days[0];
+  if (!first) return [];
+  const mondayOffset = (first.dayOfWeek + 6) % 7;
+  const buckets = new Map<number, string[]>();
+  for (const [index, day] of days.entries()) {
+    const weekNo = Math.floor((mondayOffset + index) / 7) + 1;
+    const bucket = buckets.get(weekNo) ?? [];
+    bucket.push(day.businessDate);
+    buckets.set(weekNo, bucket);
+  }
+  return [...buckets.entries()].map(([weekNo, dates]) => ({
+    weekNo,
+    from: dates[0]!,
+    to: dates.at(-1)!,
+    dates,
+  }));
+}
+
+export function businessWeekOfMonth(businessDate: string): number {
+  if (!/^(19|20|21)\d{2}-(0[1-9]|1[0-2])-\d{2}$/.test(businessDate)) {
+    throw new DomainError("VALIDATION_ERROR", "Ngày nghiệp vụ không hợp lệ.");
+  }
+  const month = businessDate.slice(0, 7);
+  const week = enumerateBusinessWeeks(month).find((item) => item.dates.includes(businessDate));
+  if (!week) {
+    throw new DomainError("VALIDATION_ERROR", "Ngày nghiệp vụ không hợp lệ.");
+  }
+  return week.weekNo;
+}
+
+export type KpiEvaluationCriterionInput = Readonly<{
+  code: string;
+  weightBps: number;
+  maxScore: number;
+  score: string;
+}>;
+
+export type KpiEvaluationScore = Readonly<{
+  totalScore: string;
+  maximumScore: string;
+  lines: readonly Readonly<{
+    code: string;
+    score: string;
+    weightedScore: string;
+  }>[];
+}>;
+
+export function calculateKpiEvaluationScore(
+  criteria: readonly KpiEvaluationCriterionInput[],
+): KpiEvaluationScore {
+  if (criteria.length === 0) {
+    throw new DomainError("VALIDATION_ERROR", "KPI phải có ít nhất một tiêu chí.");
+  }
+  const seen = new Set<string>();
+  let totalWeight = 0;
+  let totalHundredths = 0n;
+  let maximumHundredths = 0n;
+  const lines = criteria.map((criterion) => {
+    if (seen.has(criterion.code)) {
+      throw new DomainError("VALIDATION_ERROR", `Mã KPI ${criterion.code} bị trùng.`);
+    }
+    seen.add(criterion.code);
+    if (
+      !Number.isInteger(criterion.weightBps) ||
+      criterion.weightBps <= 0 ||
+      criterion.weightBps > 10_000 ||
+      !Number.isInteger(criterion.maxScore) ||
+      criterion.maxScore <= 0
+    ) {
+      throw new DomainError("VALIDATION_ERROR", `Cấu hình KPI ${criterion.code} không hợp lệ.`);
+    }
+    const score = decimalHundredths(criterion.score);
+    const maximum = BigInt(criterion.maxScore) * 100n;
+    if (score > maximum) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        `Điểm KPI ${criterion.code} không được vượt ${criterion.maxScore}.`,
+      );
+    }
+    totalWeight += criterion.weightBps;
+    const weightedScore = roundRational(score * BigInt(criterion.weightBps), 10_000n);
+    const weightedMaximum = roundRational(maximum * BigInt(criterion.weightBps), 10_000n);
+    totalHundredths += weightedScore;
+    maximumHundredths += weightedMaximum;
+    return {
+      code: criterion.code,
+      score: hundredthsDecimal(score),
+      weightedScore: hundredthsDecimal(weightedScore),
+    };
+  });
+  if (totalWeight !== 10_000) {
+    throw new DomainError("VALIDATION_ERROR", "Tổng trọng số KPI phải bằng 100%.");
+  }
+  return {
+    totalScore: hundredthsDecimal(totalHundredths),
+    maximumScore: hundredthsDecimal(maximumHundredths),
+    lines,
+  };
 }
 
 export type ComparablePenaltyItem = Readonly<{

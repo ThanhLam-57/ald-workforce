@@ -141,3 +141,26 @@
   Noto Sans Vietnamese. Mọi file mang template version và snapshot/calculation ID.
 - Lý do: tách workload dài khỏi request, tránh public URL, giữ lịch sử tải và bảo
   đảm export luôn gắn với snapshot đã tính.
+
+## ADR-017 — Company intelligence là projection và KPI quản lý là snapshot theo template
+
+- Trạng thái: Accepted.
+- Quyết định: báo cáo công ty và dashboard GM được dựng từ assignment/employment
+  history, attendance/live metric, active violation và payroll revision phù hợp;
+  không tạo bảng tổng hợp nhập liệu. Tổng company luôn được cộng lại từ branch và
+  có reconciliation test.
+- Tuần báo cáo là thứ Hai–Chủ nhật, cắt tại biên tháng. Vì vậy tháng có thể có
+  4–6 bucket tuần; nhãn luôn kèm khoảng ngày thực tế để không nhập nhằng.
+- `StaffEmploymentHistory` lưu status/category theo khoảng
+  `[effectiveFrom, effectiveTo)` để báo cáo lịch sử vẫn giữ người đã nghỉ.
+  `ManagerKpiEvaluation` snapshot tiêu chí từ đúng `KPI_TEMPLATE` hiệu lực tại
+  tháng đánh giá. Bản publish và các dòng điểm bị database trigger khóa.
+- KPI tự xem là deny-by-default qua setting công ty; manager chỉ nhận DTO của
+  chính mình khi evaluation đã publish. Mọi endpoint báo cáo công ty và export
+  chỉ dành cho GM.
+- Production dependency mới ở web: PDFKit 0.19.1. Hai font Noto Sans cần cho PDF
+  tiếng Việt được vendored trong `apps/web/assets/fonts` cùng giấy phép OFL để
+  standalone build không phụ thuộc đường dẫn `node_modules`. XLSX tiếp tục dùng
+  ExcelJS hiện có; export chạy từ projection đã authorize và được ghi audit.
+- Lý do: một source of truth giữ report khớp employee/branch/payroll, còn snapshot
+  template bảo đảm KPI lịch sử không đổi khi publish template mới.

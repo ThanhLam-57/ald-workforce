@@ -62,10 +62,12 @@ Rule thưởng/lương và employee self-service tiếp tục ở phase tương 
 
 ## Phase 5 — KPI quản lý
 
-- Manager attendance.
+Đã hoàn thành trong Prompt 6:
+
+- GM chấm attendance quản lý bằng nguồn attendance chung.
 - KPI template/version/criteria và weighted scoring pure functions.
-- Draft/published review.
-- GM/TM self-read permissions và audit.
+- Draft/edit/publish với optimistic lock, audit và immutable database guard.
+- Manager tự xem bản publish khi company setting bật; deny-by-default.
 
 ## Phase 6 — Payroll
 
@@ -77,7 +79,15 @@ Rule thưởng/lương và employee self-service tiếp tục ở phase tương 
 
 ## Phase 7 — Báo cáo, import/export và self-service
 
-- Branch/company reports, weekly/monthly views và charts.
+Đã hoàn thành phần company intelligence trong Prompt 6:
+
+- Company report theo branch/staff với tuần Monday–Sunday động, payroll snapshot và reconciliation.
+- Dashboard GM, 4 nhóm biểu đồ, anomaly cards và branch drill-down.
+- Employment history giúp tháng cũ giữ nhân viên đã nghỉ.
+- Export XLSX/PDF tiếng Việt, audit và quyền GM-only.
+
+Phần còn lại:
+
 - Import preview/row validation/idempotent commit.
 - Export center, signed URL.
 - Employee self-service setting và field-level revenue permission.

@@ -30,7 +30,7 @@ Không mục nào dưới đây được hardcode vào domain/UI trước khi đ
 | Import idempotency   | Khóa theo file hash hay external row ID?                  | Company + import type + file hash; row dùng stable source key nếu có                  |
 | Evidence             | Loại file, dung lượng, retention, antivirus?              | Allow-list MIME, size limit cấu hình, quarantine/scan trước publish                   |
 | Export PDF           | Layout/chữ ký/watermark cụ thể?                           | Server-rendered PDF, version template và audit mỗi job                                |
-| Tuần doanh số        | Tuần 1..n là ngày 1–7 hay ISO week?                       | Bucket ngày 1–7, 8–14... trong tháng; cần xác nhận                                    |
+| Tuần doanh số        | Tuần 1..n là ngày 1–7 hay ISO week?                       | Đã chọn thứ Hai–Chủ nhật, cắt tại biên tháng; cần business xác nhận                   |
 | Ngày lễ              | Nguồn và quyền sửa calendar?                              | Calendar company versioned, GM quản trị                                               |
 | Xóa dữ liệu          | Có yêu cầu pháp lý right-to-erasure?                      | Pseudonymize PII theo quy trình đặc biệt, giữ ledger/audit tối thiểu                  |
 
@@ -48,6 +48,18 @@ không tạo hardcode ngầm:
 - Adjustment sau khóa luôn tạo revision mới; kỳ đã khóa không mutate.
 - PDF dùng `PAYSLIP_V1`, Noto Sans, chưa có watermark/chữ ký. Ảnh tham chiếu hiện
   chưa có trong `docs/references/`.
+
+## Default tạm thời đã áp dụng trong Prompt 6
+
+- Tuần báo cáo là thứ Hai–Chủ nhật và cắt tại biên tháng; tháng có thể có 4–6 tuần.
+- Status/category lịch sử mặc định bắt đầu từ ngày tạo staff; migration hiện tại
+  backfill record cũ từ `createdAt` theo timezone `Asia/Ho_Chi_Minh`.
+- KPI template được chọn tại ngày cuối tháng và phải có đúng một version hiệu lực.
+  Nếu có nhiều version/template cùng hiệu lực, hệ thống chặn tạo evaluation.
+- Evidence KPI hiện là ghi chú hoặc mã/link tài liệu nội bộ đã được bảo vệ; chưa
+  tự cấp signed URL riêng cho KPI.
+- Manager KPI self-service mặc định tắt; GM bật ở company setting và manager chỉ
+  xem bản publish của chính mình.
 
 ## Quyết định cần có trước Phase 2
 

@@ -145,7 +145,13 @@ Prompt 5 materialize:
 - `PayrollExportJob`, `PayrollDownloadLog` cho export worker, private object storage và audit tải file;
 - trigger database chặn hard-delete, giữ snapshot/line append-only và khóa mutation sau `LOCKED`/`PUBLISHED`.
 
-KPI review/score chi tiết vẫn nằm trong phase riêng.
+Prompt 6 materialize:
+
+- `StaffEmploymentHistory` lưu employment status/category có effective interval để tái dựng nhân sự lịch sử;
+- `ManagerKpiEvaluation` unique theo company/manager/tháng, snapshot template version, trạng thái DRAFT/PUBLISHED và optimistic version;
+- `ManagerKpiCriterionLine` snapshot code/tên/trọng số/max score/yêu cầu note-evidence cùng điểm weighted;
+- company report/dashboard là read projection, không có bảng aggregate nhập trùng;
+- trigger chặn sửa/xóa KPI đã publish và chặn hard-delete evaluation/criterion.
 
 ## 5. Migration plan
 
@@ -172,7 +178,10 @@ KPI review/score chi tiết vẫn nằm trong phase riêng.
 6. `20260723124313_payroll_ledger` đến `20260723124600_restore_index_names` — đã triển khai
    - payroll period/entry/snapshot/line/adjustment/export/download log;
    - immutable/append-only guard khi locked/published và stable index mapping.
-7. `0007_import_export_jobs`
+7. `20260723213000_company_reports_manager_kpi` — đã triển khai
+   - employment history backfill và exclusion constraint chống overlap;
+   - manager KPI evaluation/criterion, company self-service setting và immutable trigger.
+8. `0008_import_export_jobs`
    - import/export job, row validation và storage metadata.
 
 Mỗi migration production dùng `prisma migrate deploy` từ release job duy nhất. Web và worker không tự migrate khi khởi động.
@@ -191,6 +200,9 @@ Mỗi migration production dùng `prisma migrate deploy` từ release job duy nh
 - Rule version `(companyId, status, effectiveFrom, effectiveTo)` và penalty item `(companyId, ruleVersionId, isActive, displayOrder)`.
 - Payroll period dùng `(companyId, branchId, month, status)` và unique `(companyId, branchId, month, revision)`;
   entry dùng `(companyId, staffId, payrollPeriodId)`; snapshot dùng `(companyId, payrollPeriodId, calculationNo)`.
+- Employment history dùng `(companyId, staffId, effectiveFrom, effectiveTo)` và filter
+  `(companyId, employmentStatus, employmentCategory, effectiveFrom)`;
+  manager KPI unique `(companyId, managerStaffId, month)` và index branch/month/status.
 
 ## 7. Xóa và retention
 
