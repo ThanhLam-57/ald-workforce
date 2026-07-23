@@ -200,7 +200,7 @@ export async function listPenaltyRuleSets(
     .map((ruleSet) => ({
       id: ruleSet.id,
       name: ruleSet.name,
-      type: ruleSet.type,
+      type: "PENALTY" as const,
       version: ruleSet.version,
       versions: ruleSet.versions.map((version) => versionDto(version, businessDate)),
     }));
@@ -267,7 +267,7 @@ export async function createPenaltyRuleSet(
     return {
       id: ruleSet.id,
       name: ruleSet.name,
-      type: ruleSet.type,
+      type: "PENALTY" as const,
       version: ruleSet.version,
       versions: [versionDto(version, toBusinessDateString(new Date()))],
     };

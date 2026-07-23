@@ -41,6 +41,10 @@ enum RevenueUnit {
 
 enum RuleSetType {
   PENALTY
+  DAILY_REWARD_TIERS
+  MONTHLY_LEVEL_RULES
+  SALARY_RULES
+  KPI_TEMPLATE
 }
 
 enum RuleVersionStatus {
@@ -60,6 +64,12 @@ enum EvidenceStatus {
   READY
   REJECTED
   CANCELLED
+}
+
+enum LevelProposalStatus {
+  PENDING
+  CONFIRMED
+  OVERRIDDEN
 }
 
 model Company {
@@ -87,6 +97,7 @@ model Company {
   evidenceObjects        EvidenceObject[]
   performanceLevels      PerformanceLevel[]
   levelHistories         LevelHistory[]
+  levelProposals         LevelProposal[]
   auditLogs              AuditLog[]
 
   @@map("companies")
@@ -135,6 +146,7 @@ model StaffMember {
   attendanceDays     AttendanceDay[]
   violations         Violation[]
   levelHistories     LevelHistory[]
+  levelProposals     LevelProposal[]
 
   @@unique([companyId, staffCode])
   @@index([companyId, employmentStatus, archivedAt])
@@ -174,6 +186,7 @@ model User {
   violationsCancelled   Violation[]      @relation("ViolationCancelledBy")
   evidenceCreated       EvidenceObject[] @relation("EvidenceCreatedBy")
   levelHistoriesCreated LevelHistory[]   @relation("LevelHistoryCreatedBy")
+  levelProposalsDecided LevelProposal[]  @relation("LevelProposalDecidedBy")
 
   @@index([companyId, role, active])
   @@map("users")
@@ -249,16 +262,18 @@ model BranchAssignment {
 }
 
 model PerformanceLevel {
-  id           String         @id @default(uuid()) @db.Uuid
-  companyId    String         @db.Uuid
-  code         String
-  name         String
-  displayOrder Int            @default(0)
-  isActive     Boolean        @default(true)
-  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime       @updatedAt @db.Timestamptz(3)
-  company      Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  histories    LevelHistory[]
+  id                 String          @id @default(uuid()) @db.Uuid
+  companyId          String          @db.Uuid
+  code               String
+  name               String
+  displayOrder       Int             @default(0)
+  isActive           Boolean         @default(true)
+  createdAt          DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime        @updatedAt @db.Timestamptz(3)
+  company            Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  histories          LevelHistory[]
+  suggestedProposals LevelProposal[] @relation("SuggestedPerformanceLevel")
+  confirmedProposals LevelProposal[] @relation("ConfirmedPerformanceLevel")
 
   @@unique([companyId, code])
   @@index([companyId, isActive, displayOrder])
@@ -284,6 +299,36 @@ model LevelHistory {
   @@index([companyId, staffId, effectiveFrom, effectiveTo])
   @@index([companyId, performanceLevelId, effectiveFrom, effectiveTo])
   @@map("level_history")
+}
+
+model LevelProposal {
+  id                          String              @id @default(uuid()) @db.Uuid
+  companyId                   String              @db.Uuid
+  staffId                     String              @db.Uuid
+  sourceMonth                 DateTime            @db.Date
+  effectiveFrom               DateTime            @db.Date
+  ruleVersionId               String              @db.Uuid
+  suggestedPerformanceLevelId String              @db.Uuid
+  confirmedPerformanceLevelId String?             @db.Uuid
+  monthlyRevenue              BigInt
+  status                      LevelProposalStatus @default(PENDING)
+  version                     Int                 @default(1)
+  decisionReason              String?
+  decidedByUserId             String?             @db.Uuid
+  decidedAt                   DateTime?           @db.Timestamptz(3)
+  createdAt                   DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt                   DateTime            @updatedAt @db.Timestamptz(3)
+  company                     Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff                       StaffMember         @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  ruleVersion                 RuleVersion         @relation(fields: [ruleVersionId], references: [id], onDelete: Restrict)
+  suggestedPerformanceLevel   PerformanceLevel    @relation("SuggestedPerformanceLevel", fields: [suggestedPerformanceLevelId], references: [id], onDelete: Restrict)
+  confirmedPerformanceLevel   PerformanceLevel?   @relation("ConfirmedPerformanceLevel", fields: [confirmedPerformanceLevelId], references: [id], onDelete: Restrict)
+  decidedBy                   User?               @relation("LevelProposalDecidedBy", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, staffId, sourceMonth])
+  @@index([companyId, sourceMonth, status])
+  @@index([companyId, effectiveFrom, status])
+  @@map("level_proposals")
 }
 
 model AttendanceDay {
@@ -366,6 +411,7 @@ model RuleVersion {
   effectiveFrom       DateTime?         @db.Date
   effectiveTo         DateTime?         @db.Date
   notes               String?
+  configuration       Json?
   rowVersion          Int               @default(1)
   clonedFromVersionId String?           @db.Uuid
   createdByUserId     String            @db.Uuid
@@ -381,6 +427,7 @@ model RuleVersion {
   publishedBy         User?             @relation("RuleVersionPublishedBy", fields: [publishedByUserId], references: [id], onDelete: Restrict)
   items               PenaltyItem[]
   violations          Violation[]
+  levelProposals      LevelProposal[]
 
   @@unique([ruleSetId, versionNo])
   @@index([companyId, status, effectiveFrom, effectiveTo])

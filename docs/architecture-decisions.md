@@ -1,5 +1,34 @@
 # Architecture Decision Records
 
+## ADR-013 — Typed JSON cho các rule cấu hình
+
+- Trạng thái: Accepted.
+- Quyết định: `DAILY_REWARD_TIERS`, `MONTHLY_LEVEL_RULES`, `SALARY_RULES` và
+  `KPI_TEMPLATE` dùng chung `RuleSet`/`RuleVersion`; nội dung nghiệp vụ được lưu
+  trong `RuleVersion.configuration` dạng JSONB và bắt buộc parse qua Zod schema
+  phân biệt bằng `kind`.
+- Mỗi schema chỉ chứa dữ liệu có kiểu: số tiền nguyên dạng string, số phút nguyên,
+  basis points, enum policy và danh sách tiêu chí/bậc. Không có expression,
+  JavaScript hoặc tên hàm có thể thực thi.
+- Draft được phép sửa bằng optimistic lock. PostgreSQL trigger hiện có bảo vệ toàn
+  bộ hàng `RuleVersion`, gồm cả `configuration`, sau khi publish. Exclusion
+  constraint tiếp tục bảo vệ khoảng hiệu lực `[effectiveFrom, effectiveTo)`.
+- Lý do: bốn nhóm rule có cùng lifecycle/audit/effective-date nhưng cấu trúc khác
+  nhau. JSONB có validation nghiêm giữ một engine versioning duy nhất mà không tạo
+  bốn bộ bảng lifecycle trùng lặp.
+
+## ADR-014 — Đề xuất level là bản ghi quyết định, không ghi thẳng lịch sử
+
+- Trạng thái: Accepted.
+- Quyết định: kết quả đề xuất level lưu `sourceMonth`, doanh số snapshot,
+  `ruleVersionId`, level đề xuất và `effectiveFrom` là ngày đầu tháng kế tiếp.
+  GM xác nhận hoặc override bằng optimistic lock và lý do bắt buộc; sau đó
+  application service mới đóng/mở khoảng `LevelHistory` trong cùng transaction.
+- `LevelProposal` và `LevelHistory` không hard-delete; database bảo vệ interval
+  level không overlap.
+- Lý do: giữ được dấu vết giữa kết quả máy đề xuất và quyết định cuối của GM,
+  đồng thời không làm thay đổi level của tháng dữ liệu nguồn.
+
 ## ADR-001 — Modular monolith trong pnpm/Turborepo
 
 - Trạng thái: Accepted

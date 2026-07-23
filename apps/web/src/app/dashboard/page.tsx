@@ -6,6 +6,7 @@ import { listBranches, listStaff } from "@/server/services";
 
 import { AttendanceWorkspace } from "./attendance-workspace";
 import { BranchOverviewWorkspace } from "./branch-overview-workspace";
+import { ConfiguredRuleCenter } from "./configured-rule-center";
 import { FoundationAdmin } from "./foundation-admin";
 import { PenaltyRuleCenter } from "./penalty-rule-center";
 import { SignOutButton } from "./sign-out-button";
@@ -104,6 +105,7 @@ export default async function DashboardPage() {
             }))}
             isGeneralManager={actor.role === "GENERAL_MANAGER"}
           />
+          <ConfiguredRuleCenter isGeneralManager={actor.role === "GENERAL_MANAGER"} />
           {actor.role === "GENERAL_MANAGER" ? <PenaltyRuleCenter /> : null}
           {actor.role === "GENERAL_MANAGER" ? (
             <FoundationAdmin

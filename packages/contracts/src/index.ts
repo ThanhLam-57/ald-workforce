@@ -262,6 +262,191 @@ export const penaltyRuleCompareQuerySchema = z.object({
   toVersionId: idSchema,
 });
 
+export const CONFIGURED_RULE_TYPES = [
+  "DAILY_REWARD_TIERS",
+  "MONTHLY_LEVEL_RULES",
+  "SALARY_RULES",
+  "KPI_TEMPLATE",
+] as const;
+
+export const configuredRuleTypeSchema = z.enum(CONFIGURED_RULE_TYPES);
+
+const moneyAmountSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+$/, "Số tiền phải là số nguyên không âm.")
+  .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n, "Số tiền vượt giới hạn lưu trữ.");
+
+const positiveDecimalSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+(\.\d{1,2})?$/, "Giá trị phải là số không âm, tối đa 2 chữ số thập phân.");
+
+const ruleCodeSchema = trimmedText("Mã rule", 40)
+  .regex(/^[A-Za-z0-9_-]+$/, "Mã chỉ gồm chữ, số, gạch ngang hoặc gạch dưới.")
+  .transform((value) => value.toUpperCase());
+
+const gapPolicySchema = z.enum(["REQUIRE_CONTIGUOUS", "ALLOW_GAPS"]);
+
+export const revenueTierSchema = z
+  .object({
+    code: ruleCodeSchema,
+    name: trimmedText("Tên bậc", 160),
+    minRevenue: moneyAmountSchema,
+    maxRevenue: moneyAmountSchema.nullable(),
+    minInclusive: z.boolean(),
+    maxInclusive: z.boolean(),
+    rewardAmount: moneyAmountSchema,
+    priority: z.number().int().min(0).max(10_000),
+  })
+  .strict();
+
+export const dailyRewardConfigSchema = z
+  .object({
+    kind: z.literal("DAILY_REWARD_TIERS"),
+    gapPolicy: gapPolicySchema,
+    tiers: z.array(revenueTierSchema).min(1).max(200),
+  })
+  .strict();
+
+export const monthlyLevelTierSchema = z
+  .object({
+    code: ruleCodeSchema,
+    name: trimmedText("Tên level", 160),
+    displayOrder: z.number().int().min(0).max(10_000),
+    minRevenue: moneyAmountSchema,
+    maxRevenue: moneyAmountSchema.nullable(),
+    minInclusive: z.boolean(),
+    maxInclusive: z.boolean(),
+    monthlyRevenueBonus: moneyAmountSchema,
+    attendanceBonus: moneyAmountSchema,
+    achievementBonus: moneyAmountSchema,
+    retainLevelBonus: moneyAmountSchema,
+    jumpLevelBonus: moneyAmountSchema,
+    attendanceMinWorkUnits: positiveDecimalSchema.nullable(),
+    achievementMinLiveMinutes: z.number().int().min(0).max(100_000).nullable(),
+    jumpMinLevelSteps: z.number().int().min(1).max(100),
+  })
+  .strict();
+
+export const monthlyLevelConfigSchema = z
+  .object({
+    kind: z.literal("MONTHLY_LEVEL_RULES"),
+    gapPolicy: gapPolicySchema,
+    levels: z.array(monthlyLevelTierSchema).min(1).max(100),
+  })
+  .strict();
+
+export const salaryConfigSchema = z
+  .object({
+    kind: z.literal("SALARY_RULES"),
+    baseSalary: moneyAmountSchema,
+    standardWorkdays: positiveDecimalSchema,
+    standardDailyMinutes: z.number().int().min(1).max(1_440),
+    overtime: z
+      .object({
+        multiplierBps: z.number().int().min(0).max(100_000),
+        eligibleAfterMinutes: z.number().int().min(0).max(10_000),
+      })
+      .strict(),
+    attendancePolicy: z
+      .object({
+        eligibleStatuses: z
+          .array(z.enum(["DRAFT", "PRESENT", "ABSENT", "LEAVE"]))
+          .min(1)
+          .max(4),
+        prorateMode: z.enum(["WORK_UNITS", "PRESENT_DAYS"]),
+        minimumWorkUnitsForFullSalary: positiveDecimalSchema.nullable(),
+        capAtStandardWorkdays: z.boolean(),
+      })
+      .strict(),
+    roundingPolicy: z
+      .object({
+        unit: z.union([z.literal(1), z.literal(10), z.literal(100), z.literal(1_000)]),
+        mode: z.enum(["HALF_UP", "HALF_EVEN", "FLOOR", "CEILING"]),
+        applyAt: z.enum(["COMPONENT", "TOTAL"]),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const kpiCriterionSchema = z
+  .object({
+    code: ruleCodeSchema,
+    name: trimmedText("Tên tiêu chí", 160),
+    description: z.string().trim().max(2_000),
+    weightBps: z.number().int().min(1).max(10_000),
+    maxScore: z.number().int().min(1).max(10_000),
+    requiredEvidence: z.boolean(),
+    requiredNote: z.boolean(),
+    displayOrder: z.number().int().min(0).max(10_000),
+  })
+  .strict();
+
+export const kpiTemplateConfigSchema = z
+  .object({
+    kind: z.literal("KPI_TEMPLATE"),
+    criteria: z.array(kpiCriterionSchema).min(1).max(200),
+  })
+  .strict();
+
+export const configuredRuleSchema = z.discriminatedUnion("kind", [
+  dailyRewardConfigSchema,
+  monthlyLevelConfigSchema,
+  salaryConfigSchema,
+  kpiTemplateConfigSchema,
+]);
+
+export const configuredRuleSetCreateSchema = z.object({
+  name: trimmedText("Tên bộ rule", 120),
+  type: configuredRuleTypeSchema,
+  reason: reasonSchema,
+});
+
+export const configuredRuleDraftCreateSchema = z.object({
+  ruleSetId: idSchema,
+  cloneFromVersionId: idSchema.nullable().optional(),
+  notes: z.string().trim().max(2_000).nullable().optional(),
+  reason: reasonSchema,
+});
+
+export const configuredRuleDraftUpdateSchema = z.object({
+  configuration: configuredRuleSchema,
+  notes: z.string().trim().max(2_000).nullable(),
+  rowVersion: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const activeConfiguredRuleQuerySchema = z.object({
+  date: z.iso.date(),
+  type: configuredRuleTypeSchema.optional(),
+});
+
+export const configuredRuleCompareQuerySchema = z.object({
+  fromVersionId: idSchema,
+  toVersionId: idSchema,
+});
+
+export const ruleImpactPreviewSchema = z.object({
+  ruleVersionId: idSchema,
+  month: businessMonthSchema,
+});
+
+export const levelProposalGenerateSchema = z.object({
+  month: businessMonthSchema,
+  reason: reasonSchema,
+});
+
+export const levelProposalListQuerySchema = z.object({
+  month: businessMonthSchema,
+});
+
+export const levelProposalConfirmSchema = z.object({
+  version: z.number().int().positive(),
+  performanceLevelId: idSchema.nullable().optional(),
+  reason: reasonSchema,
+});
+
 export const violationCreateSchema = z
   .object({
     attendanceId: idSchema,
@@ -376,6 +561,89 @@ export type PenaltyRuleComparisonDto = Readonly<{
   addedCodes: readonly string[];
   removedCodes: readonly string[];
   changedCodes: readonly string[];
+}>;
+
+export type ConfiguredRuleType = (typeof CONFIGURED_RULE_TYPES)[number];
+export type DailyRewardConfig = z.infer<typeof dailyRewardConfigSchema>;
+export type MonthlyLevelConfig = z.infer<typeof monthlyLevelConfigSchema>;
+export type SalaryConfig = z.infer<typeof salaryConfigSchema>;
+export type KpiTemplateConfig = z.infer<typeof kpiTemplateConfigSchema>;
+export type ConfiguredRule = z.infer<typeof configuredRuleSchema>;
+
+export type ConfiguredRuleVersionDto = Readonly<{
+  id: string;
+  ruleSetId: string;
+  versionNo: number;
+  status: "DRAFT" | "SCHEDULED" | "ACTIVE" | "RETIRED";
+  effectiveStatus: "DRAFT" | "SCHEDULED" | "ACTIVE" | "RETIRED";
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  notes: string | null;
+  rowVersion: number;
+  clonedFromVersionId: string | null;
+  createdAt: string;
+  publishedAt: string | null;
+  configuration: ConfiguredRule;
+}>;
+
+export type ConfiguredRuleSetDto = Readonly<{
+  id: string;
+  name: string;
+  type: ConfiguredRuleType;
+  version: number;
+  versions: readonly ConfiguredRuleVersionDto[];
+}>;
+
+export type ConfiguredRuleComparisonDto = Readonly<{
+  fromVersionId: string;
+  toVersionId: string;
+  changedPaths: readonly string[];
+}>;
+
+export type RuleImpactPreviewDto = Readonly<{
+  ruleVersionId: string;
+  baselineVersionId: string | null;
+  month: string;
+  metric: "PROJECTED_AMOUNT_VND" | "MAX_KPI_SCORE";
+  rows: readonly Readonly<{
+    staffId: string;
+    staffCode: string;
+    fullName: string;
+    baselineValue: string;
+    draftValue: string;
+    delta: string;
+    details: Readonly<Record<string, string | number | boolean | null>>;
+  }>[];
+  totals: Readonly<{
+    baselineValue: string;
+    draftValue: string;
+    delta: string;
+  }>;
+}>;
+
+export type LevelProposalDto = Readonly<{
+  id: string;
+  sourceMonth: string;
+  effectiveFrom: string;
+  monthlyRevenue: string;
+  status: "PENDING" | "CONFIRMED" | "OVERRIDDEN";
+  version: number;
+  decisionReason: string | null;
+  staff: Readonly<{ id: string; staffCode: string; fullName: string }>;
+  suggestedLevel: Readonly<{ id: string; code: string; name: string; displayOrder: number }>;
+  confirmedLevel: Readonly<{
+    id: string;
+    code: string;
+    name: string;
+    displayOrder: number;
+  }> | null;
+}>;
+
+export type PerformanceLevelOptionDto = Readonly<{
+  id: string;
+  code: string;
+  name: string;
+  displayOrder: number;
 }>;
 
 export type AttendanceRecordDto = Readonly<{
@@ -547,6 +815,12 @@ export type PenaltyRuleDraftCreateInput = z.infer<typeof penaltyRuleDraftCreateS
 export type PenaltyRuleDraftUpdateInput = z.infer<typeof penaltyRuleDraftUpdateSchema>;
 export type PenaltyRulePublishInput = z.infer<typeof penaltyRulePublishSchema>;
 export type PenaltyRuleRetireInput = z.infer<typeof penaltyRuleRetireSchema>;
+export type ConfiguredRuleSetCreateInput = z.infer<typeof configuredRuleSetCreateSchema>;
+export type ConfiguredRuleDraftCreateInput = z.infer<typeof configuredRuleDraftCreateSchema>;
+export type ConfiguredRuleDraftUpdateInput = z.infer<typeof configuredRuleDraftUpdateSchema>;
+export type RuleImpactPreviewInput = z.infer<typeof ruleImpactPreviewSchema>;
+export type LevelProposalGenerateInput = z.infer<typeof levelProposalGenerateSchema>;
+export type LevelProposalConfirmInput = z.infer<typeof levelProposalConfirmSchema>;
 export type ViolationCreateInput = z.infer<typeof violationCreateSchema>;
 export type ViolationCancelInput = z.infer<typeof violationCancelSchema>;
 export type EvidencePresignInput = z.infer<typeof evidencePresignSchema>;
