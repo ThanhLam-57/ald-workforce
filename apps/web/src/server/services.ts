@@ -60,9 +60,17 @@ async function appendAudit(
     metadata: RequestMetadata;
   },
 ): Promise<void> {
+  const snapshotBranchId = input.after?.branchId ?? input.before?.branchId;
+  const branchId =
+    input.entityType === "Branch"
+      ? input.entityId
+      : typeof snapshotBranchId === "string"
+        ? snapshotBranchId
+        : undefined;
   await tx.auditLog.create({
     data: {
       companyId: input.actor.companyId,
+      ...(branchId ? { branchId } : {}),
       actorUserId: input.actor.userId,
       action: input.action,
       entityType: input.entityType,

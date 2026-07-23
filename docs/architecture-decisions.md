@@ -164,3 +164,25 @@
   ExcelJS hiện có; export chạy từ projection đã authorize và được ghi audit.
 - Lý do: một source of truth giữ report khớp employee/branch/payroll, còn snapshot
   template bảo đảm KPI lịch sử không đổi khi publish template mới.
+
+## ADR-018 — Import staging ledger, Export Center dùng worker và audit append-only
+
+- Trạng thái: Accepted.
+- Import dùng `ImportJob` làm staging ledger: private object key, MIME/size/SHA-256,
+  template, mapping, preview, lỗi theo sheet/dòng/cột và trạng thái commit. Unique
+  `(companyId, idempotencyKey)` và `(companyId, template, checksumSha256)` ngăn chạy lại
+  tạo duplicate.
+- File import tối đa 20 MiB, 20 sheet, 100 cột và 50.000 dòng. XLSX formula và chuỗi
+  có tiền tố công thức trong CSV bị từ chối trước commit. Commit chia batch 200 dòng;
+  mỗi batch là một transaction và có audit riêng.
+- `DataExportJob` là hàng đợi chung cho employee error report, branch monthly, payslip,
+  company monthly và audit. Worker tạo XLSX/CSV, neutralize formula injection, upload
+  private S3 và chỉ trả signed GET 60 giây sau khi authorize lại.
+- Export mặc định giữ 7 ngày (`EXPORT_RETENTION_DAYS`, giới hạn 1–30 ngày). Worker
+  chạy cleanup lúc 03:00 `Asia/Ho_Chi_Minh`, xóa object rồi chuyển job sang `EXPIRED`;
+  metadata/audit vẫn được giữ.
+- `AuditLog` có `branchId` nullable để lọc nhanh; database trigger chặn UPDATE/DELETE.
+  Redaction đệ quy che password/token/session/credential trước khi ghi mới và trước
+  khi đọc/export dữ liệu lịch sử.
+- Không thêm production dependency: parser/generator dùng ExcelJS, AWS SDK và pg-boss
+  đã có từ các phase trước.

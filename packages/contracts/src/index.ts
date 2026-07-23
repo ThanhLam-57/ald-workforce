@@ -1169,6 +1169,228 @@ export type ManagerKpiSettingDto = Readonly<{
   version: number;
 }>;
 
+export const importTemplateSchema = z.enum([
+  "BRANCHES",
+  "STAFF",
+  "ASSIGNMENTS",
+  "LEVELS",
+  "ATTENDANCE_LIVE",
+  "REWARD_RULES",
+  "PENALTY_RULES",
+  "HISTORICAL_PAYROLL",
+]);
+
+export const importPresignSchema = z
+  .object({
+    template: importTemplateSchema,
+    idempotencyKey: z.string().trim().min(8).max(128),
+    originalFileName: trimmedText("Tên file", 255).refine(
+      (value) => /\.(xlsx|csv)$/i.test(value),
+      "Chỉ hỗ trợ file XLSX hoặc CSV.",
+    ),
+    mimeType: z.enum([
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "text/csv",
+      "application/csv",
+    ]),
+    sizeBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(20 * 1_024 * 1_024),
+    checksumSha256: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
+    branchId: idSchema.nullable().optional(),
+    reason: reasonSchema,
+  })
+  .superRefine((value, context) => {
+    const isCsvName = /\.csv$/i.test(value.originalFileName);
+    const isCsvMime = value.mimeType === "text/csv" || value.mimeType === "application/csv";
+    if (isCsvName !== isCsvMime) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["mimeType"],
+        message: "Loại nội dung không khớp với phần mở rộng của file.",
+      });
+    }
+  });
+
+export const importPreviewSchema = z.object({
+  mapping: z.record(z.string().min(1).max(80), z.string().min(1).max(200)),
+  dryRun: z.boolean().default(true),
+});
+
+export const importCommitSchema = z.object({
+  confirm: z.literal(true),
+  reason: reasonSchema,
+});
+
+export const importListQuerySchema = z.object({
+  template: importTemplateSchema.optional(),
+  status: z
+    .enum([
+      "PENDING_UPLOAD",
+      "UPLOADED",
+      "VALIDATING",
+      "VALIDATED",
+      "COMMITTING",
+      "SUCCEEDED",
+      "FAILED",
+    ])
+    .optional(),
+  branchId: idSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+});
+
+export const dataExportTemplateSchema = z.enum([
+  "EMPLOYEE_ERROR_REPORT",
+  "BRANCH_MONTHLY",
+  "PAYSLIP",
+  "COMPANY_MONTHLY",
+  "AUDIT",
+]);
+
+export const dataExportCreateSchema = z.object({
+  template: dataExportTemplateSchema,
+  format: z.enum(["XLSX", "CSV"]),
+  branchId: idSchema.nullable().optional(),
+  month: businessMonthSchema.optional(),
+  staffId: idSchema.nullable().optional(),
+  payrollPeriodId: idSchema.nullable().optional(),
+  auditFilters: z
+    .object({
+      actorUserId: idSchema.optional(),
+      branchId: idSchema.optional(),
+      entityType: z.string().trim().max(120).optional(),
+      entityId: z.string().trim().max(160).optional(),
+      action: z.string().trim().max(120).optional(),
+      from: z.iso.datetime().optional(),
+      to: z.iso.datetime().optional(),
+    })
+    .refine(({ from, to }) => !from || !to || from < to, {
+      message: "Mốc bắt đầu phải trước mốc kết thúc.",
+      path: ["to"],
+    })
+    .optional(),
+  reason: reasonSchema,
+});
+
+export const dataExportListQuerySchema = z.object({
+  status: z.enum(["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "EXPIRED"]).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(30),
+});
+
+export const auditListQuerySchema = z
+  .object({
+    actorUserId: idSchema.optional(),
+    entityType: z.string().trim().max(120).optional(),
+    entityId: z.string().trim().max(160).optional(),
+    branchId: idSchema.optional(),
+    action: z.string().trim().max(120).optional(),
+    from: z.iso.datetime().optional(),
+    to: z.iso.datetime().optional(),
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    cursor: idSchema.optional(),
+  })
+  .refine(({ from, to }) => !from || !to || from < to, {
+    message: "Mốc bắt đầu phải trước mốc kết thúc.",
+    path: ["to"],
+  });
+
+export type ImportErrorDto = Readonly<{
+  id: string;
+  sheetName: string;
+  rowNumber: number;
+  columnName: string;
+  code: string;
+  message: string;
+  severity: "WARNING" | "ERROR" | "CRITICAL";
+  rawValue: string | null;
+}>;
+
+export type ImportJobDto = Readonly<{
+  id: string;
+  template:
+    | "BRANCHES"
+    | "STAFF"
+    | "ASSIGNMENTS"
+    | "LEVELS"
+    | "ATTENDANCE_LIVE"
+    | "REWARD_RULES"
+    | "PENALTY_RULES"
+    | "HISTORICAL_PAYROLL";
+  status:
+    | "PENDING_UPLOAD"
+    | "UPLOADED"
+    | "VALIDATING"
+    | "VALIDATED"
+    | "COMMITTING"
+    | "SUCCEEDED"
+    | "FAILED";
+  branchId: string | null;
+  originalFileName: string;
+  sizeBytes: string;
+  checksumSha256: string;
+  sourceHeaders: readonly string[];
+  mapping: Readonly<Record<string, string>>;
+  previewRows: readonly Readonly<Record<string, string | number | boolean | null>>[];
+  totalRows: number;
+  validRows: number;
+  errorRows: number;
+  committedRows: number;
+  dryRun: boolean;
+  errorMessage: string | null;
+  createdAt: string;
+  uploadedAt: string | null;
+  validatedAt: string | null;
+  committedAt: string | null;
+  errors: readonly ImportErrorDto[];
+}>;
+
+export type ImportTemplateDefinitionDto = Readonly<{
+  template: ImportJobDto["template"];
+  label: string;
+  fields: readonly Readonly<{
+    key: string;
+    label: string;
+    required: boolean;
+  }>[];
+}>;
+
+export type DataExportJobDto = Readonly<{
+  id: string;
+  template: "EMPLOYEE_ERROR_REPORT" | "BRANCH_MONTHLY" | "PAYSLIP" | "COMPANY_MONTHLY" | "AUDIT";
+  format: "XLSX" | "CSV";
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "EXPIRED";
+  branchId: string | null;
+  progress: number;
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  completedAt: string | null;
+  expiresAt: string;
+}>;
+
+export type AuditLogDto = Readonly<{
+  id: string;
+  branchId: string | null;
+  actor: Readonly<{ id: string; name: string; email: string }> | null;
+  action: string;
+  entityType: string;
+  entityId: string;
+  reason: string;
+  before: unknown;
+  after: unknown;
+  changes: readonly Readonly<{ path: string; before: unknown; after: unknown }>[];
+  requestId: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  occurredAt: string;
+}>;
+
 export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
 export type BranchUpdateInput = z.infer<typeof branchUpdateSchema>;
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
@@ -1213,3 +1435,11 @@ export type PayrollPeriodActionInput = z.infer<typeof payrollPeriodActionSchema>
 export type PayrollRevisionCreateInput = z.infer<typeof payrollRevisionCreateSchema>;
 export type PayrollAdjustmentCreateInput = z.infer<typeof payrollAdjustmentCreateSchema>;
 export type PayrollExportCreateInput = z.infer<typeof payrollExportCreateSchema>;
+export type ImportTemplate = z.infer<typeof importTemplateSchema>;
+export type ImportPresignInput = z.infer<typeof importPresignSchema>;
+export type ImportPreviewInput = z.infer<typeof importPreviewSchema>;
+export type ImportCommitInput = z.infer<typeof importCommitSchema>;
+export type ImportListQuery = z.infer<typeof importListQuerySchema>;
+export type DataExportCreateInput = z.infer<typeof dataExportCreateSchema>;
+export type DataExportListQuery = z.infer<typeof dataExportListQuerySchema>;
+export type AuditListQuery = z.infer<typeof auditListQuerySchema>;

@@ -44,6 +44,12 @@ export type ResourceAction =
   | "company-dashboard:read"
   | "manager-kpi:read"
   | "manager-kpi:write"
+  | "import:read"
+  | "import:write"
+  | "export-center:read"
+  | "export-center:write"
+  | "audit:read"
+  | "audit:export"
   | "company-settings:update";
 
 const GM_MUTATIONS = new Set<ResourceAction>([
@@ -83,6 +89,10 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
       action === "branch-overview:read" ||
       action === "branch-overview:write" ||
       action === "branch-overview:export" ||
+      action === "import:read" ||
+      action === "import:write" ||
+      action === "export-center:read" ||
+      action === "export-center:write" ||
       action === "manager-kpi:read"
     );
   }
@@ -1246,4 +1256,66 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     ],
     lines,
   };
+}
+
+const SPREADSHEET_FORMULA_PREFIX = /^[\s]*[=+\-@]/;
+const SENSITIVE_AUDIT_KEY =
+  /(password|passcode|secret|token|authorization|cookie|session|credential|api[-_]?key|private[-_]?key)/i;
+
+export function sanitizeSpreadsheetText(value: string): string {
+  return SPREADSHEET_FORMULA_PREFIX.test(value) || /^[\t\r]/.test(value) ? `'${value}` : value;
+}
+
+export function escapeCsvCell(value: string | number | boolean | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  const raw = typeof value === "string" ? sanitizeSpreadsheetText(value) : String(value);
+  return /[",\r\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
+}
+
+export function redactSensitiveAuditValue(value: unknown, key = ""): unknown {
+  if (SENSITIVE_AUDIT_KEY.test(key)) return "[REDACTED]";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveAuditValue(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([childKey, childValue]) => [
+        childKey,
+        redactSensitiveAuditValue(childValue, childKey),
+      ]),
+    );
+  }
+  return value;
+}
+
+export type AuditChange = Readonly<{ path: string; before: unknown; after: unknown }>;
+
+export function diffAuditValues(
+  before: unknown,
+  after: unknown,
+  path = "",
+): readonly AuditChange[] {
+  if (Object.is(before, after)) return [];
+  if (
+    before &&
+    after &&
+    typeof before === "object" &&
+    typeof after === "object" &&
+    !Array.isArray(before) &&
+    !Array.isArray(after)
+  ) {
+    const beforeRecord = before as Readonly<Record<string, unknown>>;
+    const afterRecord = after as Readonly<Record<string, unknown>>;
+    const keys = [...new Set([...Object.keys(beforeRecord), ...Object.keys(afterRecord)])].sort();
+    return keys.flatMap((childKey) =>
+      diffAuditValues(
+        beforeRecord[childKey],
+        afterRecord[childKey],
+        path ? `${path}.${childKey}` : childKey,
+      ),
+    );
+  }
+  return [{ path: path || "$", before, after }];
 }

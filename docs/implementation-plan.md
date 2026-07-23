@@ -119,3 +119,11 @@ Phần còn lại:
 | Web/worker tranh migration      | Release job duy nhất chạy `migrate deploy`                                  |
 | Aggregate lệch source           | Không lưu bảng tháng trùng; trace source IDs                                |
 | Import lặp                      | Idempotency key và per-row stable key                                       |
+
+## Prompt 7 — Đã hoàn thành
+
+- Import private XLSX/CSV: template, mapping, dry-run/preview, lỗi sheet-row-column,
+  idempotency/checksum và transaction theo batch.
+- Export Center worker: queue status, XLSX/CSV, signed URL, retention/cleanup.
+- Audit Explorer: actor/entity/branch/date/action filters, readable diff, redaction và
+  append-only database guard.

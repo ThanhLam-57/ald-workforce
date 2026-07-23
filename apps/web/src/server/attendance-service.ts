@@ -66,9 +66,11 @@ async function appendAudit(
     metadata: RequestMetadata;
   },
 ): Promise<void> {
+  const branchId = input.after?.branchId ?? input.before?.branchId;
   await tx.auditLog.create({
     data: {
       companyId: input.actor.companyId,
+      ...(typeof branchId === "string" ? { branchId } : {}),
       actorUserId: input.actor.userId,
       action: input.action,
       entityType: "AttendanceDay",

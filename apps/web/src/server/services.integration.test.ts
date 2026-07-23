@@ -162,6 +162,7 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const companyId of companyIds) {
     await prisma.$transaction([
+      prisma.$executeRawUnsafe("SET LOCAL ald.audit_cleanup = 'on'"),
       prisma.auditLog.deleteMany({ where: { companyId } }),
       prisma.branchAssignment.deleteMany({ where: { companyId } }),
       prisma.session.deleteMany({ where: { user: { companyId } } }),

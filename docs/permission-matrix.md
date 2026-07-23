@@ -107,3 +107,19 @@ Server tự lấy company/branch scope từ actor context. Penalty item phải t
 - Employee dùng staff ID người khác → bị chặn.
 - API export báo lỗi → response không có key/cột doanh số.
 - GM mutation nhạy cảm thiếu `reason` → validation error.
+
+### Import, Export Center và Audit (Prompt 7)
+
+| Endpoint/action                  | GM                         | Training Manager                                                       | Employee |
+| -------------------------------- | -------------------------- | ---------------------------------------------------------------------- | -------- |
+| Upload/map/preview/commit import | Mọi template trong company | Chỉ staff, assignment, attendance/live; bắt buộc branch đang phân công | Không    |
+| Xem/tải file lỗi import          | Mọi job company            | Job thuộc branch scope hoặc job chính mình tạo                         | Không    |
+| Tạo Export Center job            | Mọi template               | Employee error và branch monthly trong branch scope                    | Không    |
+| Download private export          | Job trong company          | Job thuộc branch scope                                                 | Không    |
+| Đọc/export audit                 | Có                         | Không                                                                  | Không    |
+
+Server resolve branch code trong từng dòng import rồi so với `activeBranchIds`; không tin
+`branchId` hoặc column mapping do client gửi. Employee error export không query live
+metric/revenue. Payslip, company report và audit export bị chặn cho manager kể cả đoán ID.
+Với staff/assignment/attendance import, server còn kiểm tra staff là Live, không phải chính
+manager và có assignment `MEMBER` hiệu lực tại branch/ngày của từng dòng ở cả preview lẫn commit.

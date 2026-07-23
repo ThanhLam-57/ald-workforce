@@ -270,6 +270,7 @@ afterAll(async () => {
     await tx.performanceLevel.deleteMany({ where: { companyId } });
     await tx.liveDailyMetric.deleteMany({ where: { companyId } });
     await tx.attendanceDay.deleteMany({ where: { companyId } });
+    await tx.$executeRawUnsafe("SET LOCAL ald.audit_cleanup = 'on'");
     await tx.auditLog.deleteMany({ where: { companyId } });
     await tx.branchAssignment.deleteMany({ where: { companyId } });
     await tx.session.deleteMany({ where: { user: { companyId } } });

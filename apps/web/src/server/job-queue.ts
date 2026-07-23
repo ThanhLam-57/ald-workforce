@@ -26,9 +26,27 @@ async function readyQueue(): Promise<PgBoss> {
     const boss = queueInstance();
     await boss.start();
     await boss.createQueue("payroll-export");
+    await boss.createQueue("data-export");
+    await boss.createQueue("export-cleanup");
     return boss;
   })();
   return globalQueue.aldBossReady;
+}
+
+export async function enqueueDataExport(exportJobId: string): Promise<string> {
+  const boss = await readyQueue();
+  const jobId = await boss.send(
+    "data-export",
+    { exportJobId },
+    {
+      singletonKey: exportJobId,
+      retryLimit: 3,
+      retryDelay: 30,
+      expireInSeconds: 30 * 60,
+    },
+  );
+  if (!jobId) throw new Error("Không thể enqueue data export job.");
+  return jobId;
 }
 
 export async function enqueuePayrollExport(exportJobId: string): Promise<string> {

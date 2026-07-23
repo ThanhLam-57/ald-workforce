@@ -158,6 +158,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await prisma.$transaction([
+    prisma.$executeRawUnsafe("SET LOCAL ald.audit_cleanup = 'on'"),
     prisma.liveDailyMetric.deleteMany({ where: { companyId } }),
     prisma.attendanceDay.deleteMany({ where: { companyId } }),
     prisma.auditLog.deleteMany({ where: { companyId } }),

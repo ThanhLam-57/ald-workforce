@@ -8,6 +8,7 @@ import { AttendanceWorkspace } from "./attendance-workspace";
 import { BranchOverviewWorkspace } from "./branch-overview-workspace";
 import { CompanyIntelligenceWorkspace } from "./company-intelligence-workspace";
 import { ConfiguredRuleCenter } from "./configured-rule-center";
+import { DataGovernanceWorkspace } from "./data-governance-workspace";
 import { FoundationAdmin } from "./foundation-admin";
 import { ManagerKpiWorkspace } from "./manager-kpi-workspace";
 import { PenaltyRuleCenter } from "./penalty-rule-center";
@@ -124,6 +125,14 @@ export default async function DashboardPage() {
             />
           ) : null}
           {actor.role === "GENERAL_MANAGER" ? <PenaltyRuleCenter /> : null}
+          <DataGovernanceWorkspace
+            branches={branches.map((branch) => ({
+              id: branch.id,
+              code: branch.code,
+              name: branch.name,
+            }))}
+            isGeneralManager={actor.role === "GENERAL_MANAGER"}
+          />
           {actor.role === "GENERAL_MANAGER" ? (
             <FoundationAdmin
               branches={branches.map((branch) => ({

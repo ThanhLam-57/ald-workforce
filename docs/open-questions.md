@@ -76,3 +76,16 @@ không tạo hardcode ngầm:
 4. Chính sách tháng locked/revision.
 5. Quyền employee xem revenue và payslip.
 6. Payroll âm, advance, tax/insurance nếu có.
+
+## Default tạm thời đã áp dụng trong Prompt 7
+
+- Import nhận XLSX/CSV tối đa 20 MiB, 20 sheet, 100 cột và 50.000 dòng; batch commit
+  là 200 dòng. Cần đo dữ liệu thật trước khi tăng.
+- File trùng được nhận diện theo company + template + SHA-256; idempotency key cùng
+  checksum trả lại job cũ.
+- Antivirus/quarantine object chưa được tích hợp; MIME, size, checksum, giới hạn cấu
+  trúc và formula rejection là gate hiện tại. TODO: chọn malware scanner trước production.
+- Export giữ 7 ngày, cấu hình 1–30 ngày bằng `EXPORT_RETENTION_DAYS`; metadata job và
+  audit giữ lâu dài.
+- Audit append-only, chưa triển khai cryptographic hash chain/WORM storage.
+- Historical payroll import tạo snapshot `legacy-import-v1`, không tái tính rule quá khứ.

@@ -1,5 +1,6 @@
 import {
   CreateBucketCommand,
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
@@ -102,6 +103,15 @@ export async function createEvidenceUploadUrl(input: {
   };
 }
 
+export async function createPrivateUploadUrl(input: {
+  objectKey: string;
+  mimeType: string;
+  sizeBytes: number;
+  checksumSha256: string;
+}) {
+  return createEvidenceUploadUrl(input);
+}
+
 export async function verifyEvidenceObject(input: {
   objectKey: string;
   mimeType: string;
@@ -123,6 +133,61 @@ export async function verifyEvidenceObject(input: {
   ) {
     throw new Error("Metadata evidence trên object storage không khớp yêu cầu đã ký.");
   }
+}
+
+export async function verifyPrivateObject(input: {
+  objectKey: string;
+  mimeType: string;
+  sizeBytes: number;
+  checksumSha256: string;
+}): Promise<void> {
+  return verifyEvidenceObject(input);
+}
+
+export async function readPrivateObject(objectKey: string): Promise<Uint8Array> {
+  const config = getStorageConfig();
+  const result = await config.client.send(
+    new GetObjectCommand({
+      Bucket: config.bucket,
+      Key: objectKey,
+    }),
+  );
+  if (!result.Body) throw new Error("Private object không có nội dung.");
+  return result.Body.transformToByteArray();
+}
+
+export async function putPrivateObject(input: {
+  objectKey: string;
+  mimeType: string;
+  body: Uint8Array;
+  checksumSha256?: string;
+}): Promise<void> {
+  await ensureBucket();
+  const config = getStorageConfig();
+  await config.client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: input.objectKey,
+      ContentType: input.mimeType,
+      ContentLength: input.body.byteLength,
+      Body: input.body,
+      ...(input.checksumSha256
+        ? {
+            Metadata: { sha256: input.checksumSha256 },
+          }
+        : {}),
+    }),
+  );
+}
+
+export async function deletePrivateObject(objectKey: string): Promise<void> {
+  const config = getStorageConfig();
+  await config.client.send(
+    new DeleteObjectCommand({
+      Bucket: config.bucket,
+      Key: objectKey,
+    }),
+  );
 }
 
 export async function createEvidenceViewUrl(input: {

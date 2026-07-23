@@ -71,6 +71,12 @@ function jsonValue(value: unknown): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
 }
 
+function auditBranchId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const branchId = (value as Readonly<Record<string, unknown>>).branchId;
+  return typeof branchId === "string" ? branchId : undefined;
+}
+
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
   if (value !== null && typeof value === "object") {
@@ -102,9 +108,11 @@ async function appendAudit(
     metadata: RequestMetadata;
   }>,
 ): Promise<void> {
+  const branchId = auditBranchId(input.after) ?? auditBranchId(input.before);
   await tx.auditLog.create({
     data: {
       companyId: input.actor.companyId,
+      ...(branchId ? { branchId } : {}),
       actorUserId: input.actor.userId,
       action: input.action,
       entityType: input.entityType,

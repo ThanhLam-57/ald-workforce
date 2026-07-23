@@ -119,6 +119,54 @@ enum ManagerKpiEvaluationStatus {
   PUBLISHED
 }
 
+enum ImportTemplate {
+  BRANCHES
+  STAFF
+  ASSIGNMENTS
+  LEVELS
+  ATTENDANCE_LIVE
+  REWARD_RULES
+  PENALTY_RULES
+  HISTORICAL_PAYROLL
+}
+
+enum ImportJobStatus {
+  PENDING_UPLOAD
+  UPLOADED
+  VALIDATING
+  VALIDATED
+  COMMITTING
+  SUCCEEDED
+  FAILED
+}
+
+enum ImportErrorSeverity {
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+enum DataExportTemplate {
+  EMPLOYEE_ERROR_REPORT
+  BRANCH_MONTHLY
+  PAYSLIP
+  COMPANY_MONTHLY
+  AUDIT
+}
+
+enum DataExportFormat {
+  XLSX
+  CSV
+}
+
+enum DataExportStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+}
+
 model Company {
   id                           String                    @id @default(uuid()) @db.Uuid
   name                         String
@@ -156,6 +204,9 @@ model Company {
   staffEmploymentHistories     StaffEmploymentHistory[]
   managerKpiEvaluations        ManagerKpiEvaluation[]
   managerKpiLines              ManagerKpiCriterionLine[]
+  importJobs                   ImportJob[]
+  importErrors                 ImportError[]
+  dataExportJobs               DataExportJob[]
   auditLogs                    AuditLog[]
 
   @@map("companies")
@@ -185,6 +236,9 @@ model Branch {
   payrollExportJobs     PayrollExportJob[]
   payrollDownloadLogs   PayrollDownloadLog[]
   managerKpiEvaluations ManagerKpiEvaluation[]
+  importJobs            ImportJob[]
+  dataExportJobs        DataExportJob[]
+  auditLogs             AuditLog[]
 
   @@unique([companyId, code])
   @@index([companyId, isActive])
@@ -271,6 +325,8 @@ model User {
   employmentHistoriesCreated StaffEmploymentHistory[] @relation("EmploymentHistoryCreatedBy")
   managerKpiCreated          ManagerKpiEvaluation[]   @relation("ManagerKpiCreatedBy")
   managerKpiPublished        ManagerKpiEvaluation[]   @relation("ManagerKpiPublishedBy")
+  importJobsRequested        ImportJob[]              @relation("ImportRequestedBy")
+  dataExportsRequested       DataExportJob[]          @relation("DataExportRequestedBy")
 
   @@index([companyId, role, active])
   @@map("users")
@@ -916,9 +972,100 @@ model ManagerKpiCriterionLine {
   @@map("manager_kpi_criterion_lines")
 }
 
+model ImportJob {
+  id                String          @id @default(uuid()) @db.Uuid
+  companyId         String          @db.Uuid
+  branchId          String?         @db.Uuid
+  template          ImportTemplate
+  status            ImportJobStatus @default(PENDING_UPLOAD)
+  idempotencyKey    String
+  objectKey         String          @unique
+  originalFileName  String
+  mimeType          String
+  sizeBytes         BigInt
+  checksumSha256    String
+  mapping           Json?
+  sourceHeaders     Json?
+  previewRows       Json?
+  totalRows         Int             @default(0)
+  validRows         Int             @default(0)
+  errorRows         Int             @default(0)
+  committedRows     Int             @default(0)
+  dryRun            Boolean         @default(true)
+  errorMessage      String?
+  requestedByUserId String          @db.Uuid
+  reason            String
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  uploadedAt        DateTime?       @db.Timestamptz(3)
+  validatedAt       DateTime?       @db.Timestamptz(3)
+  committedAt       DateTime?       @db.Timestamptz(3)
+  company           Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch            Branch?         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  requestedBy       User            @relation("ImportRequestedBy", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  errors            ImportError[]
+
+  @@unique([companyId, idempotencyKey], map: "import_jobs_company_idempotency_key")
+  @@unique([companyId, template, checksumSha256], map: "import_jobs_company_template_checksum_key")
+  @@index([companyId, status, createdAt(sort: Desc)], map: "import_jobs_company_status_created_idx")
+  @@index([companyId, branchId, createdAt(sort: Desc)], map: "import_jobs_company_branch_created_idx")
+  @@map("import_jobs")
+}
+
+model ImportError {
+  id          String              @id @default(uuid()) @db.Uuid
+  companyId   String              @db.Uuid
+  importJobId String              @db.Uuid
+  sheetName   String
+  rowNumber   Int
+  columnName  String
+  code        String
+  message     String
+  severity    ImportErrorSeverity @default(ERROR)
+  rawValue    String?
+  createdAt   DateTime            @default(now()) @db.Timestamptz(3)
+  company     Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  importJob   ImportJob           @relation(fields: [importJobId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, importJobId, rowNumber], map: "import_errors_company_job_row_idx")
+  @@map("import_errors")
+}
+
+model DataExportJob {
+  id                String             @id @default(uuid()) @db.Uuid
+  companyId         String             @db.Uuid
+  branchId          String?            @db.Uuid
+  template          DataExportTemplate
+  format            DataExportFormat
+  status            DataExportStatus   @default(QUEUED)
+  parameters        Json
+  progress          Int                @default(0)
+  objectKey         String?            @unique
+  fileName          String?
+  mimeType          String?
+  sizeBytes         BigInt?
+  checksumSha256    String?
+  errorMessage      String?
+  requestedByUserId String             @db.Uuid
+  reason            String
+  createdAt         DateTime           @default(now()) @db.Timestamptz(3)
+  startedAt         DateTime?          @db.Timestamptz(3)
+  completedAt       DateTime?          @db.Timestamptz(3)
+  expiresAt         DateTime           @db.Timestamptz(3)
+  deletedAt         DateTime?          @db.Timestamptz(3)
+  company           Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch            Branch?            @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  requestedBy       User               @relation("DataExportRequestedBy", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, status, createdAt(sort: Desc)], map: "data_export_jobs_company_status_created_idx")
+  @@index([companyId, branchId, createdAt(sort: Desc)], map: "data_export_jobs_company_branch_created_idx")
+  @@index([status, expiresAt], map: "data_export_jobs_status_expiry_idx")
+  @@map("data_export_jobs")
+}
+
 model AuditLog {
   id          String   @id @default(uuid()) @db.Uuid
   companyId   String   @db.Uuid
+  branchId    String?  @db.Uuid
   actorUserId String?  @db.Uuid
   action      String
   entityType  String
@@ -931,9 +1078,13 @@ model AuditLog {
   userAgent   String?
   occurredAt  DateTime @default(now()) @db.Timestamptz(3)
   company     Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch      Branch?  @relation(fields: [branchId], references: [id], onDelete: Restrict)
   actor       User?    @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([companyId, occurredAt(sort: Desc)])
+  @@index([companyId, branchId, occurredAt(sort: Desc)], map: "audit_logs_company_branch_occurred_idx")
+  @@index([companyId, actorUserId, occurredAt(sort: Desc)], map: "audit_logs_company_actor_occurred_idx")
+  @@index([companyId, action, occurredAt(sort: Desc)], map: "audit_logs_company_action_occurred_idx")
   @@index([companyId, entityType, entityId])
   @@map("audit_logs")
 }

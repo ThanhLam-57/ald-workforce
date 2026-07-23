@@ -16,12 +16,14 @@ import {
   createEvidenceViewUrl,
   verifyEvidenceObject,
 } from "./object-storage";
+import { appendSecureAudit } from "./audit-service";
 import type { RequestMetadata } from "./request-metadata";
 
 type Transaction = Prisma.TransactionClient;
 
 export const violationSelect = {
   id: true,
+  branchId: true,
   attendanceId: true,
   businessDate: true,
   penaltyItemId: true,
@@ -102,9 +104,11 @@ async function appendAudit(
     metadata: RequestMetadata;
   },
 ): Promise<void> {
+  const branchId = input.after?.branchId ?? input.before?.branchId;
   await tx.auditLog.create({
     data: {
       companyId: input.actor.companyId,
+      ...(typeof branchId === "string" ? { branchId } : {}),
       actorUserId: input.actor.userId,
       action: input.action,
       entityType: input.entityType,
@@ -121,6 +125,7 @@ async function appendAudit(
 
 function violationAuditShape(violation: ViolationRecord): Record<string, unknown> {
   return {
+    branchId: violation.branchId,
     attendanceId: violation.attendanceId,
     businessDate: violation.businessDate.toISOString().slice(0, 10),
     penaltyItemId: violation.penaltyItemId,
@@ -509,7 +514,7 @@ export async function completeEvidenceUpload(
   });
 }
 
-export async function getEvidenceView(actor: ActorContext, id: string) {
+export async function getEvidenceView(actor: ActorContext, id: string, metadata?: RequestMetadata) {
   requirePermission(actor, "evidence:read");
   const evidence = await prisma.evidenceObject.findFirst({
     where: { id, companyId: actor.companyId, status: "READY" },
@@ -526,9 +531,22 @@ export async function getEvidenceView(actor: ActorContext, id: string) {
   if (actor.role === "TRAINING_MANAGER" && !actor.activeBranchIds.includes(evidence.branchId)) {
     throw new DomainError("NOT_FOUND", "Không tìm thấy evidence.");
   }
-  return createEvidenceViewUrl({
+  const signed = await createEvidenceViewUrl({
     objectKey: evidence.objectKey,
     originalFileName: evidence.originalFileName,
     mimeType: evidence.mimeType,
   });
+  if (metadata) {
+    await appendSecureAudit({
+      actor,
+      action: "EVIDENCE_VIEW",
+      entityType: "EvidenceObject",
+      entityId: evidence.id,
+      branchId: evidence.branchId,
+      reason: "Đọc evidence bằng signed URL ngắn hạn.",
+      after: { violationId: evidence.violationId, expiresInSeconds: signed.expiresInSeconds },
+      metadata,
+    });
+  }
+  return signed;
 }

@@ -211,3 +211,17 @@ Mỗi migration production dùng `prisma migrate deploy` từ release job duy nh
 - Attendance, violation, rule published, payroll, audit: không hard-delete.
 - Session/verification hết hạn được purge theo retention job.
 - Object storage dùng lifecycle rule; metadata lịch sử giữ theo policy pháp lý được xác nhận.
+
+## Prompt 7 materialize
+
+- `ImportJob` và `ImportError` lưu checksum/idempotency, object metadata, mapping,
+  preview, lỗi theo sheet/dòng/cột và số dòng commit.
+- `DataExportJob` lưu template/format/parameters, queue progress, private object
+  metadata, thời điểm hết hạn và trạng thái `EXPIRED`.
+- `AuditLog.branchId` cùng index actor/action/branch hỗ trợ tra cứu; database trigger
+  chặn update/delete.
+- Migration `20260723230000_import_export_audit` triển khai các enum, bảng, constraint,
+  index, foreign key và append-only guard nêu trên.
+- Import list dùng `(companyId, status, createdAt desc)` và branch/created; export
+  cleanup dùng `(status, expiresAt)`; audit dùng company + branch/actor/action + time.
+- Export object mặc định xóa sau 7 ngày, còn job và audit không hard-delete.

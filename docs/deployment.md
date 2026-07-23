@@ -87,3 +87,7 @@ pg_restore --clean --if-exists --no-owner --no-acl --dbname="$RESTORE_DATABASE_U
 - Alert readiness failure, worker error rate, job retry/dead-letter và database saturation.
 - Audit business là append-only; operational logs không chứa payload nhạy cảm.
 - Kiểm tra định kỳ cross-company/cross-branch IDOR và export field redaction.
+- Import PUT hết hạn sau 5 phút, tối đa 20 MiB và phải `HEAD` verify MIME/size/SHA-256
+  trước khi parse. Source file luôn ở private bucket.
+- `EXPORT_RETENTION_DAYS` mặc định 7, chỉ nhận 1–30. Worker đăng ký queue
+  `data-export`, `export-cleanup` và cron cleanup 03:00 theo `Asia/Ho_Chi_Minh`.

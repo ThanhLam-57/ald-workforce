@@ -4,6 +4,7 @@ import { DomainError, requirePermission, type ActorContext } from "@ald/domain";
 
 import { enqueuePayrollExport } from "./job-queue";
 import { createPrivateDownloadUrl } from "./object-storage";
+import { appendSecureAudit } from "./audit-service";
 import type { RequestMetadata } from "./request-metadata";
 
 function toJobDto(job: {
@@ -251,6 +252,21 @@ export async function getPayrollExportDownload(
       ipAddress: metadata.ipAddress,
       userAgent: metadata.userAgent,
     },
+  });
+  await appendSecureAudit({
+    actor,
+    action: "PAYROLL_EXPORT_DOWNLOAD",
+    entityType: "PayrollExportJob",
+    entityId: job.id,
+    branchId: job.branchId,
+    reason: "Tải file payroll bằng signed URL ngắn hạn.",
+    after: {
+      payrollPeriodId: job.payrollPeriodId,
+      staffId: job.staffId,
+      fileName: job.fileName,
+      expiresInSeconds: signed.expiresInSeconds,
+    },
+    metadata,
   });
   return { ...signed, fileName: job.fileName };
 }

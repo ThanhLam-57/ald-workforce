@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import { PgBoss } from "pg-boss";
 import path from "node:path";
 
+import { cleanupExpiredExports, processDataExportJob } from "./data-export.js";
 import { processPayrollExportJob } from "./payroll-export.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env"), quiet: true });
@@ -38,10 +39,25 @@ boss.on("error", (error) => {
 
 await boss.start();
 await boss.createQueue("payroll-export");
+await boss.createQueue("data-export");
+await boss.createQueue("export-cleanup");
+await boss.schedule("export-cleanup", "0 3 * * *", null, {
+  tz: "Asia/Ho_Chi_Minh",
+});
 await boss.work<{ exportJobId: string }>("payroll-export", async ([job]) => {
   if (!job?.data.exportJobId) {
     throw new Error("Payroll export job thiếu exportJobId.");
   }
   await processPayrollExportJob(job.data.exportJobId);
+});
+await boss.work<{ exportJobId: string }>("data-export", async ([job]) => {
+  if (!job?.data.exportJobId) {
+    throw new Error("Data export job thiếu exportJobId.");
+  }
+  await processDataExportJob(job.data.exportJobId);
+});
+await boss.work("export-cleanup", async () => {
+  const deleted = await cleanupExpiredExports();
+  console.info(JSON.stringify({ event: "export.cleanup", deleted }));
 });
 console.info(JSON.stringify({ event: "worker.ready" }));
