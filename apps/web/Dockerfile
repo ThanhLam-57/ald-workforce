@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.7
+FROM node:22.22.2-bookworm-slim AS build
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global corepack@0.35.0 \
+    && corepack enable \
+    && corepack prepare pnpm@11.9.0 --activate
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json .npmrc ./
+COPY apps/web/package.json apps/web/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/domain/package.json packages/domain/package.json
+COPY packages/ui/package.json packages/ui/package.json
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+ENV DATABASE_URL=postgresql://build:build@127.0.0.1:5432/build
+ENV BETTER_AUTH_SECRET=build-only-secret-change-at-runtime-123456
+ENV BETTER_AUTH_URL=http://localhost:3000
+RUN pnpm turbo run build --filter=@ald/web
+
+FROM node:22.22.2-bookworm-slim AS runtime
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates openssl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1001 nodejs \
+    && useradd --system --uid 1001 --gid nodejs nextjs
+
+COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/standalone ./
+COPY --from=build --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.next/static
+USER nextjs
+EXPOSE 3000
+CMD ["node", "apps/web/server.js"]

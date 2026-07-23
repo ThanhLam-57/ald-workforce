@@ -1,0 +1,207 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum EmploymentCategory {
+  OFFICIAL
+  PROBATION
+  CONTRACTOR
+  INTERN
+}
+
+enum EmploymentStatus {
+  ACTIVE
+  ON_LEAVE
+  TERMINATED
+}
+
+enum AssignmentType {
+  MEMBER
+  PRIMARY_MANAGER
+  SECONDARY_MANAGER
+}
+
+model Company {
+  id                     String             @id @default(uuid()) @db.Uuid
+  name                   String
+  slug                   String             @unique
+  timezone               String             @default("Asia/Ho_Chi_Minh")
+  selfServiceEnabled     Boolean            @default(false)
+  employeeRevenueVisible Boolean            @default(false)
+  version                Int                @default(1)
+  createdAt              DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime           @updatedAt @db.Timestamptz(3)
+  branches               Branch[]
+  staffMembers           StaffMember[]
+  users                  User[]
+  branchAssignments      BranchAssignment[]
+  auditLogs              AuditLog[]
+
+  @@map("companies")
+}
+
+model Branch {
+  id          String             @id @default(uuid()) @db.Uuid
+  companyId   String             @db.Uuid
+  code        String
+  name        String
+  address     String?
+  isActive    Boolean            @default(true)
+  version     Int                @default(1)
+  createdAt   DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime           @updatedAt @db.Timestamptz(3)
+  company     Company            @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  assignments BranchAssignment[]
+
+  @@unique([companyId, code])
+  @@index([companyId, isActive])
+  @@map("branches")
+}
+
+model StaffMember {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  companyId          String                 @db.Uuid
+  staffCode          String
+  fullName           String
+  email              String?
+  phone              String?
+  jobTitle           String
+  employmentCategory EmploymentCategory
+  employmentStatus   EmploymentStatus       @default(ACTIVE)
+  version            Int                    @default(1)
+  archivedAt         DateTime?              @db.Timestamptz(3)
+  createdAt          DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime               @updatedAt @db.Timestamptz(3)
+  company            Company                @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  user               User?
+  assignments        BranchAssignment[]
+
+  @@unique([companyId, staffCode])
+  @@index([companyId, employmentStatus, archivedAt])
+  @@map("staff_members")
+}
+
+model User {
+  id              String      @id @default(uuid()) @db.Uuid
+  companyId       String      @db.Uuid
+  staffId         String?     @unique @db.Uuid
+  name            String
+  email           String      @unique
+  emailVerified   Boolean     @default(false)
+  image           String?
+  username        String?     @unique
+  displayUsername String?
+  role            String      @default("LIVE_EMPLOYEE")
+  active          Boolean     @default(true)
+  banned          Boolean     @default(false)
+  banReason       String?
+  banExpires      DateTime?   @db.Timestamptz(3)
+  version         Int         @default(1)
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+  company         Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff           StaffMember? @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  sessions        Session[]
+  accounts        Account[]
+  auditLogs       AuditLog[]  @relation("AuditActor")
+
+  @@index([companyId, role, active])
+  @@map("users")
+}
+
+model Session {
+  id             String   @id @default(uuid()) @db.Uuid
+  expiresAt      DateTime @db.Timestamptz(3)
+  token          String   @unique
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+  ipAddress      String?
+  userAgent      String?
+  impersonatedBy String?  @db.Uuid
+  userId         String   @db.Uuid
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id @default(uuid()) @db.Uuid
+  accountId             String
+  providerId            String
+  userId                String    @db.Uuid
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime? @db.Timestamptz(3)
+  refreshTokenExpiresAt DateTime? @db.Timestamptz(3)
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @db.Timestamptz(3)
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String    @id @default(uuid()) @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime  @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime  @updatedAt @db.Timestamptz(3)
+
+  @@index([identifier])
+  @@map("verifications")
+}
+
+model BranchAssignment {
+  id             String         @id @default(uuid()) @db.Uuid
+  companyId      String         @db.Uuid
+  branchId       String         @db.Uuid
+  staffId        String         @db.Uuid
+  assignmentType AssignmentType @default(MEMBER)
+  effectiveFrom  DateTime       @db.Date
+  effectiveTo    DateTime?      @db.Date
+  version        Int            @default(1)
+  archivedAt     DateTime?      @db.Timestamptz(3)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(3)
+  company        Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch         Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  staff          StaffMember    @relation(fields: [staffId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, effectiveFrom, effectiveTo])
+  @@index([companyId, staffId, effectiveFrom, effectiveTo])
+  @@map("branch_assignments")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid()) @db.Uuid
+  companyId   String   @db.Uuid
+  actorUserId String?  @db.Uuid
+  action      String
+  entityType  String
+  entityId    String
+  reason      String
+  before      Json?
+  after       Json?
+  requestId   String?
+  ipAddress   String?
+  userAgent   String?
+  occurredAt  DateTime @default(now()) @db.Timestamptz(3)
+  company     Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  actor       User?    @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, occurredAt(sort: Desc)])
+  @@index([companyId, entityType, entityId])
+  @@map("audit_logs")
+}

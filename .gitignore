@@ -1,0 +1,14 @@
+.env
+.env.local
+.env.*.local
+!.env.example
+.next/
+.turbo/
+coverage/
+dist/
+node_modules/
+playwright-report/
+test-results/
+packages/db/src/generated/
+*.tsbuildinfo
+*.log
