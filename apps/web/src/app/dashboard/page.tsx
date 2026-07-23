@@ -6,6 +6,7 @@ import { listBranches, listStaff } from "@/server/services";
 
 import { AttendanceWorkspace } from "./attendance-workspace";
 import { FoundationAdmin } from "./foundation-admin";
+import { PenaltyRuleCenter } from "./penalty-rule-center";
 import { SignOutButton } from "./sign-out-button";
 
 export const dynamic = "force-dynamic";
@@ -90,7 +91,11 @@ export default async function DashboardPage() {
               )}
             </section>
           </div>
-          <AttendanceWorkspace staff={attendanceStaff} />
+          <AttendanceWorkspace
+            canOverridePenalty={actor.role === "GENERAL_MANAGER"}
+            staff={attendanceStaff}
+          />
+          {actor.role === "GENERAL_MANAGER" ? <PenaltyRuleCenter /> : null}
           {actor.role === "GENERAL_MANAGER" ? (
             <FoundationAdmin
               branches={branches.map((branch) => ({

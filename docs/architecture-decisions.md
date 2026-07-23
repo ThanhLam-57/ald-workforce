@@ -56,3 +56,19 @@
 - Trạng thái: Accepted
 - Quyết định: update/archive phải gửi version; update dùng compare-and-increment trong transaction. Conflict trả HTTP 409 kèm DTO `current` đã authorize để UI tải lại hoặc ghép thay đổi.
 - Lý do: bảng tháng có nhiều người nhập đồng thời; last-write-wins sẽ làm mất dữ liệu mà không cảnh báo.
+
+## ADR-010 — Evidence private S3 và presigned URL ngắn hạn
+
+- Trạng thái: Accepted
+- Production dependency mới: `@aws-sdk/client-s3` và `@aws-sdk/s3-request-presigner`.
+- Quyết định: database chỉ lưu private object key và metadata; browser upload bằng presigned PUT 5 phút, view bằng presigned GET 60 giây sau khi server authorize lại.
+- Quyết định: allow-list JPEG/PNG/WebP, giới hạn 10 MiB, ký Content-Type + SHA-256 checksum + checksum metadata và HEAD verify size/type/checksum trước trạng thái READY.
+- Lý do: SDK chính thức hỗ trợ S3/MinIO path-style, không đưa file qua Next.js process, không tạo public URL và cho phép kiểm tra toàn vẹn trước khi evidence được sử dụng.
+
+## ADR-011 — Penalty version bất biến và violation snapshot
+
+- Trạng thái: Accepted
+- Quyết định: draft chỉnh sửa được; SCHEDULED/ACTIVE/RETIRED không sửa nội dung. PostgreSQL trigger bảo vệ cả rule version và penalty items đã publish.
+- Quyết định: effective interval dùng `[effectiveFrom, effectiveTo)` và exclusion constraint chặn overlap theo rule set.
+- Quyết định: violation snapshot item name, amount và rule/item IDs; publish version mới không hồi tố record cũ.
+- Lý do: rule phải tái hiện đúng tại ngày vi phạm và payroll/report tương lai không được đổi theo cấu hình mới.

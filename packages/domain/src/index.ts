@@ -24,7 +24,14 @@ export type ResourceAction =
   | "attendance:read"
   | "attendance:write"
   | "attendance:archive"
-  | "attendance:export";
+  | "attendance:export"
+  | "rule:read"
+  | "rule:write"
+  | "violation:read"
+  | "violation:write"
+  | "violation:cancel"
+  | "evidence:upload"
+  | "evidence:read";
 
 const GM_MUTATIONS = new Set<ResourceAction>([
   "branch:create",
@@ -53,8 +60,18 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
       action === "attendance:read" ||
       action === "attendance:write" ||
       action === "attendance:archive" ||
-      action === "attendance:export"
+      action === "attendance:export" ||
+      action === "rule:read" ||
+      action === "violation:read" ||
+      action === "violation:write" ||
+      action === "violation:cancel" ||
+      action === "evidence:upload" ||
+      action === "evidence:read"
     );
+  }
+
+  if (actor.role === "LIVE_EMPLOYEE") {
+    return action === "rule:read";
   }
 
   return false;
@@ -216,4 +233,72 @@ export function enumerateBusinessMonth(month: string): readonly BusinessMonthDay
       dayOfWeek: date.getUTCDay(),
     };
   });
+}
+
+export type EffectiveRuleStatus = "DRAFT" | "SCHEDULED" | "ACTIVE" | "RETIRED";
+
+export function isDateInEffectiveInterval(
+  date: string,
+  effectiveFrom: string,
+  effectiveTo: string | null,
+): boolean {
+  return date >= effectiveFrom && (!effectiveTo || date < effectiveTo);
+}
+
+export function effectiveRuleStatus(
+  storedStatus: EffectiveRuleStatus,
+  date: string,
+  effectiveFrom: string | null,
+  effectiveTo: string | null,
+): EffectiveRuleStatus {
+  if (storedStatus === "DRAFT" || !effectiveFrom) return "DRAFT";
+  if (date < effectiveFrom) return "SCHEDULED";
+  if (effectiveTo && date >= effectiveTo) return "RETIRED";
+  return "ACTIVE";
+}
+
+export function effectiveIntervalsOverlap(
+  leftFrom: string,
+  leftTo: string | null,
+  rightFrom: string,
+  rightTo: string | null,
+): boolean {
+  return (!rightTo || leftFrom < rightTo) && (!leftTo || rightFrom < leftTo);
+}
+
+export function sumPenaltyAmounts(amounts: readonly string[]): string {
+  return amounts.reduce((total, amount) => total + BigInt(amount), 0n).toString();
+}
+
+export type ComparablePenaltyItem = Readonly<{
+  code: string;
+  name: string;
+  description: string;
+  defaultAmount: string;
+  isActive: boolean;
+  displayColor: string;
+  displayOrder: number;
+}>;
+
+export function comparePenaltyItems(
+  fromItems: readonly ComparablePenaltyItem[],
+  toItems: readonly ComparablePenaltyItem[],
+): Readonly<{
+  addedCodes: readonly string[];
+  removedCodes: readonly string[];
+  changedCodes: readonly string[];
+}> {
+  const fromByCode = new Map(fromItems.map((item) => [item.code, item]));
+  const toByCode = new Map(toItems.map((item) => [item.code, item]));
+  const addedCodes = [...toByCode.keys()].filter((code) => !fromByCode.has(code)).sort();
+  const removedCodes = [...fromByCode.keys()].filter((code) => !toByCode.has(code)).sort();
+  const changedCodes = [...toByCode.entries()]
+    .filter(([code, item]) => {
+      const previous = fromByCode.get(code);
+      return previous !== undefined && JSON.stringify(previous) !== JSON.stringify(item);
+    })
+    .map(([code]) => code)
+    .sort();
+
+  return { addedCodes, removedCodes, changedCodes };
 }

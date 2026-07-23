@@ -85,7 +85,8 @@ Migration bật extension `btree_gist` trước khi tạo exclusion constraint.
 ### Rules
 
 - `rule_sets`: danh tính logical của loại rule và scope.
-- `rule_versions`: payload JSON có schema version, trạng thái, effective interval, checksum và actor.
+- `rule_versions`: version number, trạng thái, effective interval, notes, actor tạo/publish và optimistic row version.
+- `penalty_items`: danh mục typed theo version, gồm code/name/description, BIGINT default amount, reminder/metadata, màu và thứ tự.
 - Published/scheduled version bất biến. Một transaction publish phải lock rule set, kiểm tra overlap rồi chốt version.
 - Database exclusion constraint bảo vệ overlap published ở lớp cuối.
 
@@ -118,7 +119,14 @@ Prompt 1 materialize:
 - `LiveDailyMetric`: extension 1–1, phút Live, revenue BIGINT và snapshot cấu hình đơn vị;
 - company revenue unit/scale.
 
-Violation/evidence, rules, KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration riêng.
+Prompt 2 materialize:
+
+- `RuleSet`, `RuleVersion`, `PenaltyItem` với no-overlap `[from,to)`, immutable trigger cho published version và item;
+- `Violation` snapshot rule version, item, amount/detail theo ngày nghiệp vụ; cancel bằng status, DB chặn hard-delete;
+- `EvidenceObject` lưu object key private, MIME, size, checksum và trạng thái verify;
+- index theo company/branch/staff/date và audit cho toàn bộ mutation.
+
+KPI và payroll vẫn chỉ nằm trong mô hình logic và sẽ có migration riêng.
 
 ## 5. Migration plan
 
@@ -132,9 +140,10 @@ Violation/evidence, rules, KPI và payroll vẫn chỉ nằm trong mô hình log
    - attendance day và live metric 1–1;
    - unique attendance day, check constraints, optimistic version và archive;
    - violation/evidence và publish workflow được để ở phase sau.
-3. `0003_versioned_rules`
-   - rule set/version;
-   - immutable trigger/policy và exclusion interval.
+3. `0003_penalty_rules_violations` — đã triển khai
+   - rule set/version/penalty item;
+   - immutable trigger/policy và exclusion interval;
+   - violation snapshot, cancel-only và private evidence metadata.
 4. `0004_manager_kpi`
    - manager attendance, KPI template/version/review.
 5. `0005_payroll`
@@ -153,7 +162,9 @@ Mỗi migration production dùng `prisma migrate deploy` từ release job duy nh
 - `branch_assignments(companyId, branchId, effectiveFrom, effectiveTo)`.
 - `branch_assignments(companyId, staffId, effectiveFrom, effectiveTo)`.
 - `audit_logs(companyId, occurredAt desc)` và `(companyId, entityType, entityId)`.
-- Tương lai: attendance `(companyId, branchId, workDate)`; payroll `(companyId, year, month, status)`.
+- Attendance `(companyId, branchId, businessDate)`; violation `(companyId, branchId|staffId, businessDate, status)`.
+- Rule version `(companyId, status, effectiveFrom, effectiveTo)` và penalty item `(companyId, ruleVersionId, isActive, displayOrder)`.
+- Tương lai: payroll `(companyId, year, month, status)`.
 
 ## 7. Xóa và retention
 

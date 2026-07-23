@@ -27,7 +27,7 @@ Client không được quyết định scope. `branchId`, `companyId`, `staffId`
 | Violation/evidence        | CRUD/archive trong công ty                | CRUD trong branch scope                                    | Đọc bản thân đã publish                    |
 | Attendance TM             | CRUD                                      | Không                                                      | Không                                      |
 | KPI TM                    | CRUD/publish                              | Chỉ đọc KPI bản thân đã publish                            | Không                                      |
-| Active rules              | CRUD/version/publish                      | Chỉ đọc rule hiệu lực                                      | Không                                      |
+| Active rules              | CRUD/version/publish                      | Chỉ đọc rule hiệu lực                                      | Chỉ đọc rule hiệu lực                      |
 | Payroll                   | Calculate/review/lock/publish/export      | Không                                                      | Chỉ payslip bản thân đã publish            |
 | Báo cáo công ty           | Đọc/export                                | Không                                                      | Không                                      |
 | Báo cáo branch            | Đọc/export                                | Đọc/export branch scope                                    | Không                                      |
@@ -70,6 +70,18 @@ Client không được quyết định scope. `branchId`, `companyId`, `staffId`
 | `GET /api/exports/employee-error-report` | Staff toàn company          | Chỉ Live staff trong branch                        | Không                                   |
 
 `branchId` không xuất hiện trong mutation input. Server resolve assignment tại business date rồi snapshot branch. Export error report dùng allow-list attendance và không select live metric/revenue.
+
+### Endpoint rule, violation và evidence (Prompt 2)
+
+| Endpoint/action                      | GM                           | TM                                        | Employee                    |
+| ------------------------------------ | ---------------------------- | ----------------------------------------- | --------------------------- |
+| Đọc `/api/rules/penalty/active?date` | Rule hiệu lực trong company  | Rule hiệu lực trong company               | Rule hiệu lực trong company |
+| Tạo/sửa/clone/publish/retire rule    | Có, reason + audit + version | Không                                     | Không                       |
+| Tạo/cancel violation                 | Attendance toàn company      | Live staff trong branch, không chính mình | Không                       |
+| Presign/complete/view evidence       | Violation toàn company       | Violation trong branch scope              | Chưa bật                    |
+| Compare/lịch sử rule                 | Có                           | Không                                     | Không                       |
+
+Server tự lấy company/branch scope từ actor context. Penalty item phải thuộc version hiệu lực tại business date. Chỉ GM được override amount và bắt buộc có `overrideReason`; violation luôn snapshot amount/rule/item. Signed GET chỉ được tạo sau khi authorize evidence qua attendance/branch.
 
 ## 5. Test bắt buộc
 

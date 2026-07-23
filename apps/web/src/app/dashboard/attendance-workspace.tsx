@@ -4,9 +4,12 @@ import type {
   AttendanceMonthDayDto,
   AttendanceMonthDto,
   AttendanceRecordDto,
+  ViolationDto,
 } from "@ald/contracts";
 import { Button } from "@ald/ui";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+
+import { AttendanceViolations } from "./attendance-violations";
 
 type StaffOption = Readonly<{
   id: string;
@@ -33,6 +36,8 @@ type EditableDay = Readonly<{
   saveState: SaveState;
   message: string | null;
   conflictRecord: AttendanceRecordDto | null;
+  violations: readonly ViolationDto[];
+  activePenaltyTotal: string;
 }>;
 
 type ApiPayload = Readonly<{
@@ -117,6 +122,8 @@ function editableDay(day: AttendanceMonthDayDto): EditableDay {
     saveState: record ? "saved" : "idle",
     message: null,
     conflictRecord: null,
+    violations: day.violations,
+    activePenaltyTotal: day.activePenaltyTotal,
   };
 }
 
@@ -145,6 +152,8 @@ function rowFromRecord(day: EditableDay, record: AttendanceRecordDto): EditableD
     businessDate: day.businessDate,
     dayOfWeek: day.dayOfWeek,
     attendance: record,
+    violations: day.violations,
+    activePenaltyTotal: day.activePenaltyTotal,
   });
 }
 
@@ -168,7 +177,13 @@ function moveGridFocus(event: KeyboardEvent<HTMLElement>, rowIndex: number, colu
   }
 }
 
-export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffOption[] }>) {
+export function AttendanceWorkspace({
+  staff,
+  canOverridePenalty,
+}: Readonly<{
+  staff: readonly StaffOption[];
+  canOverridePenalty: boolean;
+}>) {
   const [staffId, setStaffId] = useState(staff[0]?.id ?? "");
   const [month, setMonth] = useState(currentMonth);
   const [reason, setReason] = useState("");
@@ -178,6 +193,7 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
   const [loadError, setLoadError] = useState<string | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [view, setView] = useState<"daily" | "monthly">("daily");
+  const [refreshToken, setRefreshToken] = useState(0);
   const daysRef = useRef(days);
   const reasonRef = useRef(reason);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -318,7 +334,7 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
       });
 
     return () => controller.abort();
-  }, [month, staffId]);
+  }, [month, refreshToken, staffId]);
 
   useEffect(
     () => () => {
@@ -340,6 +356,11 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
       conflictRecord: null,
     }));
     scheduleSave(businessDate);
+  }
+
+  function refreshAttendance() {
+    setLoading(true);
+    setRefreshToken((current) => current + 1);
   }
 
   function reloadConflict(businessDate: string) {
@@ -504,7 +525,7 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
         <p className="text-slate-600">
           {dataset
-            ? `${dataset.staff.staffCode} — ${dataset.staff.fullName} · doanh số ${dataset.revenueConfig.unit} × ${dataset.revenueConfig.scale}`
+            ? `${dataset.staff.staffCode} — ${dataset.staff.fullName} · doanh số ${dataset.revenueConfig.unit} × ${dataset.revenueConfig.scale} · tổng phạt tháng ${new Intl.NumberFormat("vi-VN").format(BigInt(dataset.activePenaltyTotal))} ₫`
             : "Đang chuẩn bị dữ liệu…"}
         </p>
         <a
@@ -560,6 +581,11 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
                     <span className="text-xs text-slate-500">
                       {day.record ? statusLabels[day.status] : "—"}
                     </span>
+                    {day.activePenaltyTotal !== "0" ? (
+                      <span className="block text-xs font-medium text-rose-700">
+                        Phạt {new Intl.NumberFormat("vi-VN").format(BigInt(day.activePenaltyTotal))}
+                      </span>
+                    ) : null}
                   </td>
                 ))}
               </tr>
@@ -582,6 +608,7 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
                 <th>Số công</th>
                 <th>Doanh số</th>
                 <th className="min-w-64">Ghi chú</th>
+                <th className="min-w-96">Lỗi & evidence</th>
                 <th>Lưu</th>
                 <th>Thao tác</th>
               </tr>
@@ -729,6 +756,17 @@ export function AttendanceWorkspace({ staff }: Readonly<{ staff: readonly StaffO
                           updateField(day.businessDate, "note", event.target.value)
                         }
                         value={day.note}
+                      />
+                    </td>
+                    <td>
+                      <AttendanceViolations
+                        activePenaltyTotal={day.activePenaltyTotal}
+                        attendanceId={day.record?.id ?? null}
+                        businessDate={day.businessDate}
+                        canOverrideAmount={canOverridePenalty}
+                        onChanged={refreshAttendance}
+                        reason={reason}
+                        violations={day.violations}
                       />
                     </td>
                     <td className="min-w-36">

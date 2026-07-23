@@ -1,6 +1,6 @@
 # ALD Workforce
 
-Ứng dụng nội bộ quản lý nhiều cơ sở, nhân sự, chấm công, KPI, doanh số và tính lương. Foundation gồm Better Auth database session, RBAC theo company/branch, branch/staff/account/assignment và audit. Prompt 1 bổ sung attendance + Live metrics theo tháng, autosave optimistic-lock và export báo lỗi không chứa doanh số. Violation, rule, KPI và payroll chưa được triển khai.
+Ứng dụng nội bộ quản lý nhiều cơ sở, nhân sự, chấm công, KPI, doanh số và tính lương. Hiện hệ thống có Better Auth database session, RBAC theo company/branch, attendance + Live metrics theo tháng, rule phạt có version, violation snapshot, evidence private và export báo lỗi không chứa doanh số. KPI và payroll chưa được triển khai.
 
 ## Yêu cầu
 
@@ -42,7 +42,7 @@ pnpm test:e2e
 pnpm build
 ```
 
-Integration tests yêu cầu PostgreSQL từ Compose và dùng `DATABASE_URL` trong `.env`. Lần đầu chạy E2E:
+Integration tests yêu cầu PostgreSQL + MinIO từ Compose và dùng `DATABASE_URL`, `S3_*` trong `.env`. Lần đầu chạy E2E:
 
 ```powershell
 pnpm --filter @ald/web exec playwright install chromium
@@ -74,9 +74,20 @@ Development dùng `prisma migrate dev`; release chỉ dùng `prisma migrate depl
 - `PATCH /api/users/:id`
 - `GET|POST /api/attendance`
 - `PATCH|DELETE /api/attendance/:id` (`DELETE` là archive, không hard-delete)
+- `GET|POST /api/rules/penalty`
+- `POST /api/rules/penalty/drafts`
+- `PATCH /api/rules/penalty/versions/:id`
+- `POST /api/rules/penalty/versions/:id/publish|retire`
+- `GET /api/rules/penalty/active?date`
+- `GET /api/rules/penalty/compare`
+- `POST /api/violations`
+- `DELETE /api/violations/:id` (`DELETE` là cancel, không hard-delete)
+- `POST /api/evidence/presign`
+- `POST /api/evidence/:id/complete`
+- `GET /api/evidence/:id/view`
 - `GET /api/exports/employee-error-report`
 
-Mọi response nghiệp vụ authenticated dùng `private, no-store`. Mutation attendance yêu cầu `reason`, update/archive dùng optimistic `version` và ghi audit before/after. Doanh số được serialize thành string; ngày nghiệp vụ dùng `Asia/Ho_Chi_Minh`.
+Mọi response nghiệp vụ authenticated dùng `private, no-store`. Mutation nhạy cảm yêu cầu `reason`, bản ghi mutable dùng optimistic version và ghi audit before/after. Tiền/doanh số được serialize thành string; ngày nghiệp vụ dùng `Asia/Ho_Chi_Minh`. Rule đã publish là bất biến, khoảng hiệu lực là `[effectiveFrom, effectiveTo)`. Evidence chỉ vào bucket private qua presigned PUT 5 phút, được `HEAD` xác minh MIME/kích thước/SHA-256 và chỉ cấp signed GET 60 giây sau authorization.
 
 ## Tài liệu
 

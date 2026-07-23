@@ -39,6 +39,29 @@ enum RevenueUnit {
   THOUSAND_VND
 }
 
+enum RuleSetType {
+  PENALTY
+}
+
+enum RuleVersionStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  RETIRED
+}
+
+enum ViolationStatus {
+  ACTIVE
+  CANCELLED
+}
+
+enum EvidenceStatus {
+  PENDING_UPLOAD
+  READY
+  REJECTED
+  CANCELLED
+}
+
 model Company {
   id                     String             @id @default(uuid()) @db.Uuid
   name                   String
@@ -57,6 +80,11 @@ model Company {
   branchAssignments      BranchAssignment[]
   attendanceDays         AttendanceDay[]
   liveDailyMetrics       LiveDailyMetric[]
+  ruleSets               RuleSet[]
+  ruleVersions           RuleVersion[]
+  penaltyItems           PenaltyItem[]
+  violations             Violation[]
+  evidenceObjects        EvidenceObject[]
   auditLogs              AuditLog[]
 
   @@map("companies")
@@ -76,6 +104,8 @@ model Branch {
   assignments      BranchAssignment[]
   attendanceDays   AttendanceDay[]
   liveDailyMetrics LiveDailyMetric[]
+  violations       Violation[]
+  evidenceObjects  EvidenceObject[]
 
   @@unique([companyId, code])
   @@index([companyId, isActive])
@@ -100,6 +130,7 @@ model StaffMember {
   user               User?
   assignments        BranchAssignment[]
   attendanceDays     AttendanceDay[]
+  violations         Violation[]
 
   @@unique([companyId, staffCode])
   @@index([companyId, employmentStatus, archivedAt])
@@ -107,30 +138,36 @@ model StaffMember {
 }
 
 model User {
-  id                String          @id @default(uuid()) @db.Uuid
-  companyId         String          @db.Uuid
-  staffId           String?         @unique @db.Uuid
-  name              String
-  email             String          @unique
-  emailVerified     Boolean         @default(false)
-  image             String?
-  username          String?         @unique
-  displayUsername   String?
-  role              String          @default("LIVE_EMPLOYEE")
-  active            Boolean         @default(true)
-  banned            Boolean         @default(false)
-  banReason         String?
-  banExpires        DateTime?       @db.Timestamptz(3)
-  version           Int             @default(1)
-  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
-  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
-  company           Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
-  staff             StaffMember?    @relation(fields: [staffId], references: [id], onDelete: SetNull)
-  sessions          Session[]
-  accounts          Account[]
-  auditLogs         AuditLog[]      @relation("AuditActor")
-  attendanceCreated AttendanceDay[] @relation("AttendanceCreatedBy")
-  attendanceUpdated AttendanceDay[] @relation("AttendanceUpdatedBy")
+  id                    String           @id @default(uuid()) @db.Uuid
+  companyId             String           @db.Uuid
+  staffId               String?          @unique @db.Uuid
+  name                  String
+  email                 String           @unique
+  emailVerified         Boolean          @default(false)
+  image                 String?
+  username              String?          @unique
+  displayUsername       String?
+  role                  String           @default("LIVE_EMPLOYEE")
+  active                Boolean          @default(true)
+  banned                Boolean          @default(false)
+  banReason             String?
+  banExpires            DateTime?        @db.Timestamptz(3)
+  version               Int              @default(1)
+  createdAt             DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime         @updatedAt @db.Timestamptz(3)
+  company               Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  staff                 StaffMember?     @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  sessions              Session[]
+  accounts              Account[]
+  auditLogs             AuditLog[]       @relation("AuditActor")
+  attendanceCreated     AttendanceDay[]  @relation("AttendanceCreatedBy")
+  attendanceUpdated     AttendanceDay[]  @relation("AttendanceUpdatedBy")
+  ruleSetsCreated       RuleSet[]        @relation("RuleSetCreatedBy")
+  ruleVersionsCreated   RuleVersion[]    @relation("RuleVersionCreatedBy")
+  ruleVersionsPublished RuleVersion[]    @relation("RuleVersionPublishedBy")
+  violationsCreated     Violation[]      @relation("ViolationCreatedBy")
+  violationsCancelled   Violation[]      @relation("ViolationCancelledBy")
+  evidenceCreated       EvidenceObject[] @relation("EvidenceCreatedBy")
 
   @@index([companyId, role, active])
   @@map("users")
@@ -230,6 +267,7 @@ model AttendanceDay {
   createdBy       User             @relation("AttendanceCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
   updatedBy       User             @relation("AttendanceUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: Restrict)
   liveMetric      LiveDailyMetric?
+  violations      Violation[]
 
   @@unique([companyId, staffId, businessDate])
   @@index([companyId, branchId, businessDate])
@@ -254,6 +292,143 @@ model LiveDailyMetric {
 
   @@index([companyId, branchId])
   @@map("live_daily_metrics")
+}
+
+model RuleSet {
+  id              String        @id @default(uuid()) @db.Uuid
+  companyId       String        @db.Uuid
+  type            RuleSetType   @default(PENALTY)
+  name            String
+  version         Int           @default(1)
+  createdByUserId String        @db.Uuid
+  createdAt       DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime      @updatedAt @db.Timestamptz(3)
+  company         Company       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  createdBy       User          @relation("RuleSetCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  versions        RuleVersion[]
+
+  @@unique([companyId, type, name])
+  @@index([companyId, type])
+  @@map("rule_sets")
+}
+
+model RuleVersion {
+  id                  String            @id @default(uuid()) @db.Uuid
+  companyId           String            @db.Uuid
+  ruleSetId           String            @db.Uuid
+  versionNo           Int
+  status              RuleVersionStatus @default(DRAFT)
+  effectiveFrom       DateTime?         @db.Date
+  effectiveTo         DateTime?         @db.Date
+  notes               String?
+  rowVersion          Int               @default(1)
+  clonedFromVersionId String?           @db.Uuid
+  createdByUserId     String            @db.Uuid
+  publishedByUserId   String?           @db.Uuid
+  publishedAt         DateTime?         @db.Timestamptz(3)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
+  company             Company           @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  ruleSet             RuleSet           @relation(fields: [ruleSetId], references: [id], onDelete: Restrict)
+  clonedFrom          RuleVersion?      @relation("RuleVersionClone", fields: [clonedFromVersionId], references: [id], onDelete: Restrict)
+  clones              RuleVersion[]     @relation("RuleVersionClone")
+  createdBy           User              @relation("RuleVersionCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  publishedBy         User?             @relation("RuleVersionPublishedBy", fields: [publishedByUserId], references: [id], onDelete: Restrict)
+  items               PenaltyItem[]
+  violations          Violation[]
+
+  @@unique([ruleSetId, versionNo])
+  @@index([companyId, status, effectiveFrom, effectiveTo])
+  @@map("rule_versions")
+}
+
+model PenaltyItem {
+  id             String      @id @default(uuid()) @db.Uuid
+  companyId      String      @db.Uuid
+  ruleVersionId  String      @db.Uuid
+  code           String
+  name           String
+  description    String
+  defaultAmount  BigInt
+  reminderPolicy Json?
+  metadata       Json?
+  isActive       Boolean     @default(true)
+  displayColor   String      @default("#64748B")
+  displayOrder   Int         @default(0)
+  createdAt      DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime    @updatedAt @db.Timestamptz(3)
+  company        Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  ruleVersion    RuleVersion @relation(fields: [ruleVersionId], references: [id], onDelete: Restrict)
+  violations     Violation[]
+
+  @@unique([ruleVersionId, code])
+  @@index([companyId, ruleVersionId, isActive, displayOrder])
+  @@map("penalty_items")
+}
+
+model Violation {
+  id                 String           @id @default(uuid()) @db.Uuid
+  companyId          String           @db.Uuid
+  branchId           String           @db.Uuid
+  attendanceId       String           @db.Uuid
+  staffId            String           @db.Uuid
+  businessDate       DateTime         @db.Date
+  penaltyItemId      String           @db.Uuid
+  ruleVersionId      String           @db.Uuid
+  itemName           String
+  amount             BigInt
+  detail             String
+  note               String?
+  overrideReason     String?
+  status             ViolationStatus  @default(ACTIVE)
+  version            Int              @default(1)
+  createdByUserId    String           @db.Uuid
+  cancelledByUserId  String?          @db.Uuid
+  cancelledAt        DateTime?        @db.Timestamptz(3)
+  cancellationReason String?
+  createdAt          DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime         @updatedAt @db.Timestamptz(3)
+  company            Company          @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch             Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  attendance         AttendanceDay    @relation(fields: [attendanceId], references: [id], onDelete: Restrict)
+  staff              StaffMember      @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  penaltyItem        PenaltyItem      @relation(fields: [penaltyItemId], references: [id], onDelete: Restrict)
+  ruleVersion        RuleVersion      @relation(fields: [ruleVersionId], references: [id], onDelete: Restrict)
+  createdBy          User             @relation("ViolationCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  cancelledBy        User?            @relation("ViolationCancelledBy", fields: [cancelledByUserId], references: [id], onDelete: Restrict)
+  evidenceObjects    EvidenceObject[]
+
+  @@index([companyId, branchId, businessDate, status])
+  @@index([companyId, staffId, businessDate, status])
+  @@index([attendanceId, status])
+  @@map("violations")
+}
+
+model EvidenceObject {
+  id               String         @id @default(uuid()) @db.Uuid
+  companyId        String         @db.Uuid
+  branchId         String         @db.Uuid
+  violationId      String         @db.Uuid
+  objectKey        String         @unique
+  originalFileName String
+  mimeType         String
+  sizeBytes        BigInt
+  checksumSha256   String
+  status           EvidenceStatus @default(PENDING_UPLOAD)
+  version          Int            @default(1)
+  createdByUserId  String         @db.Uuid
+  uploadedAt       DateTime?      @db.Timestamptz(3)
+  verifiedAt       DateTime?      @db.Timestamptz(3)
+  rejectionReason  String?
+  createdAt        DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @db.Timestamptz(3)
+  company          Company        @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch           Branch         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  violation        Violation      @relation(fields: [violationId], references: [id], onDelete: Restrict)
+  createdBy        User           @relation("EvidenceCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, violationId, status])
+  @@map("evidence_objects")
 }
 
 model AuditLog {

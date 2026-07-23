@@ -11,12 +11,15 @@ import {
   DomainError,
   enumerateBusinessMonth,
   requirePermission,
+  sumPenaltyAmounts,
   validateAttendanceValues,
   type ActorContext,
 } from "@ald/domain";
 
 import { parseBusinessDate, toBusinessDate } from "./business-date";
+import { createEvidenceViewUrl } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
+import { toViolationDto, violationSelect } from "./violation-service";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -368,9 +371,34 @@ export async function getAttendanceMonth(
   const byDate = new Map(
     records.map((record) => [record.businessDate.toISOString().slice(0, 10), toDto(record)]),
   );
+  const violations = await prisma.violation.findMany({
+    where: {
+      companyId: actor.companyId,
+      staffId,
+      businessDate: { gte: start, lt: end },
+      ...(actor.role === "TRAINING_MANAGER"
+        ? { branchId: { in: [...actor.activeBranchIds] } }
+        : {}),
+    },
+    select: violationSelect,
+    orderBy: [{ businessDate: "asc" }, { createdAt: "asc" }],
+  });
+  const violationsByDate = new Map<string, ReturnType<typeof toViolationDto>[]>();
+  for (const violation of violations) {
+    const date = violation.businessDate.toISOString().slice(0, 10);
+    const bucket = violationsByDate.get(date) ?? [];
+    bucket.push(toViolationDto(violation));
+    violationsByDate.set(date, bucket);
+  }
+  const activePenaltyTotal = sumPenaltyAmounts(
+    violations
+      .filter((violation) => violation.status === "ACTIVE")
+      .map((violation) => violation.amount.toString()),
+  );
 
   return {
     month,
+    activePenaltyTotal,
     staff: {
       id: target.id,
       staffCode: target.staffCode,
@@ -384,6 +412,12 @@ export async function getAttendanceMonth(
     days: days.map((day) => ({
       ...day,
       attendance: byDate.get(day.businessDate) ?? null,
+      violations: violationsByDate.get(day.businessDate) ?? [],
+      activePenaltyTotal: sumPenaltyAmounts(
+        (violationsByDate.get(day.businessDate) ?? [])
+          .filter((violation) => violation.status === "ACTIVE")
+          .map((violation) => violation.amount),
+      ),
     })),
   };
 }
@@ -649,11 +683,61 @@ export async function createEmployeeErrorReport(
       workUnits: true,
       overtimeMinutes: true,
       note: true,
+      violations: {
+        where: { companyId: actor.companyId, status: "ACTIVE" },
+        select: {
+          itemName: true,
+          detail: true,
+          amount: true,
+          note: true,
+          evidenceObjects: {
+            where: { companyId: actor.companyId, status: "READY" },
+            select: {
+              objectKey: true,
+              originalFileName: true,
+              mimeType: true,
+            },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
     },
     orderBy: { businessDate: "asc" },
   });
 
-  // This DTO deliberately does not select or serialize live metrics/revenue.
+  const reportViolations = await Promise.all(
+    attendance.flatMap((record) =>
+      record.violations.map(async (violation) => ({
+        businessDate: record.businessDate.toISOString().slice(0, 10),
+        attendance: {
+          status: record.status,
+          workUnits: record.workUnits.toString(),
+          overtimeMinutes: record.overtimeMinutes,
+          note: record.note,
+        },
+        itemName: violation.itemName,
+        detail: violation.detail,
+        amount: violation.amount.toString(),
+        note: violation.note,
+        evidence: await Promise.all(
+          violation.evidenceObjects.map(async (evidence) => ({
+            fileName: evidence.originalFileName,
+            mimeType: evidence.mimeType,
+            url: (
+              await createEvidenceViewUrl({
+                objectKey: evidence.objectKey,
+                originalFileName: evidence.originalFileName,
+                mimeType: evidence.mimeType,
+              })
+            ).url,
+          })),
+        ),
+      })),
+    ),
+  );
+
+  // This query and DTO deliberately do not select or serialize live metrics/revenue.
   return {
     reportType: "EMPLOYEE_ERROR_REPORT",
     month,
@@ -670,6 +754,6 @@ export async function createEmployeeErrorReport(
       overtimeMinutes: record.overtimeMinutes,
       note: record.note,
     })),
-    violations: [],
+    violations: reportViolations,
   };
 }

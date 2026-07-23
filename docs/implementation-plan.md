@@ -36,18 +36,18 @@ Exit:
 - Employee error report skeleton không query/serialize revenue.
 - Integration/E2E branch scope, GM/TM permission, timezone và optimistic concurrency.
 
-Còn lại cho phase có violation/self-service:
-
-- Violation/evidence schema và rule linkage.
-- Publish workflow và DTO employee chỉ đọc dữ liệu đã publish.
-
 ## Phase 3 — Versioned rule center
 
-- Typed rule schemas cho daily/monthly reward, penalty, salary.
-- Draft/preview/schedule/publish state machine.
-- PostgreSQL no-overlap constraint và immutable published guard.
-- Dropdown penalty theo effective date và violation snapshot.
-- Golden boundary tests.
+Đã hoàn thành phần PENALTY trong Prompt 2:
+
+- Typed RuleSet/RuleVersion/PenaltyItem và draft/clone/schedule/publish/retire.
+- PostgreSQL no-overlap `[from,to)` và immutable published guard.
+- Dropdown màu theo effective date, violation snapshot, GM override có lý do.
+- Evidence private bằng presigned PUT + HEAD verify + authorized signed GET.
+- Tổng phạt ngày/tháng và export báo lỗi không query/serialize revenue.
+- Unit/integration/E2E cho boundary, snapshot, IDOR và immutable rule.
+
+Rule thưởng/lương và employee self-service tiếp tục ở phase tương ứng.
 
 ## Phase 4 — KPI quản lý
 

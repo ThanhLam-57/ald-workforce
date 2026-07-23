@@ -105,6 +105,17 @@ const revenueAmountSchema = z
     "Doanh số vượt giới hạn lưu trữ.",
   );
 
+const penaltyAmountSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+$/, "Tiền phạt phải là số nguyên không âm.")
+  .refine(
+    (value) => BigInt(value) <= 9_223_372_036_854_775_807n,
+    "Tiền phạt vượt giới hạn lưu trữ.",
+  );
+
+const jsonObjectSchema = z.record(z.string(), z.unknown());
+
 const attendanceValuesSchema = z.object({
   checkInAt: z.iso.datetime({ offset: true }).nullable().optional(),
   checkOutAt: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -138,6 +149,199 @@ export const attendanceMonthQuerySchema = z.object({
   month: businessMonthSchema,
 });
 
+export const penaltyRuleSetCreateSchema = z.object({
+  name: trimmedText("Tên bộ rule", 120),
+  reason: reasonSchema,
+});
+
+export const penaltyRuleDraftCreateSchema = z.object({
+  ruleSetId: idSchema,
+  cloneFromVersionId: idSchema.nullable().optional(),
+  notes: z.string().trim().max(2_000).nullable().optional(),
+  reason: reasonSchema,
+});
+
+export const penaltyItemInputSchema = z.object({
+  code: trimmedText("Mã lỗi", 40)
+    .regex(/^[A-Za-z0-9_-]+$/, "Mã lỗi chỉ gồm chữ, số, gạch ngang hoặc gạch dưới.")
+    .transform((value) => value.toUpperCase()),
+  name: trimmedText("Tên lỗi", 160),
+  description: trimmedText("Mô tả lỗi", 2_000),
+  defaultAmount: penaltyAmountSchema,
+  reminderPolicy: jsonObjectSchema.nullable().optional(),
+  metadata: jsonObjectSchema.nullable().optional(),
+  isActive: z.boolean().default(true),
+  displayColor: z
+    .string()
+    .regex(/^#[0-9A-Fa-f]{6}$/, "Màu phải có định dạng #RRGGBB.")
+    .transform((value) => value.toUpperCase()),
+  displayOrder: z.number().int().min(0).max(10_000),
+});
+
+export const penaltyRuleDraftUpdateSchema = z
+  .object({
+    notes: z.string().trim().max(2_000).nullable(),
+    items: z.array(penaltyItemInputSchema).max(200),
+    rowVersion: z.number().int().positive(),
+    reason: reasonSchema,
+  })
+  .superRefine(({ items }, context) => {
+    const codes = new Set<string>();
+    for (const item of items) {
+      if (codes.has(item.code)) {
+        context.addIssue({
+          code: "custom",
+          message: `Mã lỗi ${item.code} bị trùng trong cùng version.`,
+          path: ["items"],
+        });
+      }
+      codes.add(item.code);
+    }
+  });
+
+export const penaltyRulePublishSchema = z
+  .object({
+    effectiveFrom: z.iso.date(),
+    effectiveTo: z.iso.date().nullable(),
+    rowVersion: z.number().int().positive(),
+    reason: reasonSchema,
+  })
+  .refine(
+    ({ effectiveFrom, effectiveTo }) => !effectiveTo || effectiveFrom < effectiveTo,
+    "Ngày kết thúc phải sau ngày bắt đầu.",
+  );
+
+export const penaltyRuleRetireSchema = z.object({
+  effectiveTo: z.iso.date(),
+  rowVersion: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const activePenaltyRuleQuerySchema = z.object({
+  date: z.iso.date(),
+});
+
+export const penaltyRuleCompareQuerySchema = z.object({
+  fromVersionId: idSchema,
+  toVersionId: idSchema,
+});
+
+export const violationCreateSchema = z
+  .object({
+    attendanceId: idSchema,
+    penaltyItemId: idSchema,
+    detail: trimmedText("Chi tiết thực tế", 2_000),
+    note: z.string().trim().max(2_000).nullable().optional(),
+    amountOverride: penaltyAmountSchema.nullable().optional(),
+    overrideReason: reasonSchema.nullable().optional(),
+    reason: reasonSchema,
+  })
+  .superRefine(({ amountOverride, overrideReason }, context) => {
+    if (amountOverride !== undefined && amountOverride !== null && !overrideReason) {
+      context.addIssue({
+        code: "custom",
+        message: "Override tiền phạt bắt buộc có lý do.",
+        path: ["overrideReason"],
+      });
+    }
+  });
+
+export const violationCancelSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const evidencePresignSchema = z.object({
+  violationId: idSchema,
+  originalFileName: trimmedText("Tên file", 255),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  sizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(10 * 1_024 * 1_024),
+  checksumSha256: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
+  reason: reasonSchema,
+});
+
+export const evidenceCompleteSchema = z.object({
+  version: z.number().int().positive(),
+});
+
+export type EvidenceDto = Readonly<{
+  id: string;
+  originalFileName: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  sizeBytes: string;
+  checksumSha256: string;
+  status: "PENDING_UPLOAD" | "READY" | "REJECTED" | "CANCELLED";
+  version: number;
+}>;
+
+export type ViolationDto = Readonly<{
+  id: string;
+  attendanceId: string;
+  businessDate: string;
+  penaltyItemId: string;
+  ruleVersionId: string;
+  itemName: string;
+  amount: string;
+  detail: string;
+  note: string | null;
+  overrideReason: string | null;
+  status: "ACTIVE" | "CANCELLED";
+  version: number;
+  displayColor: string;
+  evidence: readonly EvidenceDto[];
+}>;
+
+export type PenaltyItemDto = Readonly<{
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  defaultAmount: string;
+  reminderPolicy: Readonly<Record<string, unknown>> | null;
+  metadata: Readonly<Record<string, unknown>> | null;
+  isActive: boolean;
+  displayColor: string;
+  displayOrder: number;
+}>;
+
+export type PenaltyRuleVersionDto = Readonly<{
+  id: string;
+  ruleSetId: string;
+  versionNo: number;
+  status: "DRAFT" | "SCHEDULED" | "ACTIVE" | "RETIRED";
+  effectiveStatus: "DRAFT" | "SCHEDULED" | "ACTIVE" | "RETIRED";
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  notes: string | null;
+  rowVersion: number;
+  clonedFromVersionId: string | null;
+  createdAt: string;
+  publishedAt: string | null;
+  items: readonly PenaltyItemDto[];
+}>;
+
+export type PenaltyRuleSetDto = Readonly<{
+  id: string;
+  name: string;
+  type: "PENALTY";
+  version: number;
+  versions: readonly PenaltyRuleVersionDto[];
+}>;
+
+export type PenaltyRuleComparisonDto = Readonly<{
+  fromVersionId: string;
+  toVersionId: string;
+  addedCodes: readonly string[];
+  removedCodes: readonly string[];
+  changedCodes: readonly string[];
+}>;
+
 export type AttendanceRecordDto = Readonly<{
   id: string;
   staffId: string;
@@ -162,10 +366,13 @@ export type AttendanceMonthDayDto = Readonly<{
   businessDate: string;
   dayOfWeek: number;
   attendance: AttendanceRecordDto | null;
+  violations: readonly ViolationDto[];
+  activePenaltyTotal: string;
 }>;
 
 export type AttendanceMonthDto = Readonly<{
   month: string;
+  activePenaltyTotal: string;
   staff: Readonly<{
     id: string;
     staffCode: string;
@@ -195,7 +402,24 @@ export type EmployeeErrorReportDto = Readonly<{
     overtimeMinutes: number;
     note: string | null;
   }>[];
-  violations: readonly [];
+  violations: readonly Readonly<{
+    businessDate: string;
+    attendance: Readonly<{
+      status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+      workUnits: string;
+      overtimeMinutes: number;
+      note: string | null;
+    }>;
+    itemName: string;
+    detail: string;
+    amount: string;
+    note: string | null;
+    evidence: readonly Readonly<{
+      fileName: string;
+      mimeType: string;
+      url: string;
+    }>[];
+  }>[];
 }>;
 
 export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
@@ -210,3 +434,12 @@ export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
 export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
 export type AttendanceArchiveInput = z.infer<typeof attendanceArchiveSchema>;
 export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;
+export type PenaltyRuleSetCreateInput = z.infer<typeof penaltyRuleSetCreateSchema>;
+export type PenaltyRuleDraftCreateInput = z.infer<typeof penaltyRuleDraftCreateSchema>;
+export type PenaltyRuleDraftUpdateInput = z.infer<typeof penaltyRuleDraftUpdateSchema>;
+export type PenaltyRulePublishInput = z.infer<typeof penaltyRulePublishSchema>;
+export type PenaltyRuleRetireInput = z.infer<typeof penaltyRuleRetireSchema>;
+export type ViolationCreateInput = z.infer<typeof violationCreateSchema>;
+export type ViolationCancelInput = z.infer<typeof violationCancelSchema>;
+export type EvidencePresignInput = z.infer<typeof evidencePresignSchema>;
+export type EvidenceCompleteInput = z.infer<typeof evidenceCompleteSchema>;

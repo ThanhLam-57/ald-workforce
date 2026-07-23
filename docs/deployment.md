@@ -19,8 +19,9 @@ Web và worker:
 - `NEXT_PUBLIC_APP_URL=https://<public-domain>`
 - `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`
 - `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_FORCE_PATH_STYLE`
+- `S3_AUTO_CREATE_BUCKET` (`true` chỉ cho local/dev; production tạo bucket bằng hạ tầng)
 
-Không commit secret. Dùng secret manager/environment của Railway. Bucket phải private và chặn public ACL/policy.
+Không commit secret. Dùng secret manager/environment của Railway. Bucket phải private và chặn public ACL/policy. CORS bucket chỉ cho origin web tin cậy, method `PUT`/`GET` và các header đã ký (`content-type`, `content-length`, `x-amz-checksum-sha256`, `x-amz-meta-sha256`).
 
 ## 3. Release flow
 
@@ -82,6 +83,7 @@ pg_restore --clean --if-exists --no-owner --no-acl --dbname="$RESTORE_DATABASE_U
 - Web là service public duy nhất.
 - Rotate Better Auth/S3/database credentials theo policy.
 - Signed URL TTL ngắn; không log token/signed URL/password.
+- Presigned evidence PUT hết hạn sau 5 phút; signed GET hết hạn sau 60 giây; complete phải `HEAD` verify MIME, size và SHA-256.
 - Alert readiness failure, worker error rate, job retry/dead-letter và database saturation.
 - Audit business là append-only; operational logs không chứa payload nhạy cảm.
 - Kiểm tra định kỳ cross-company/cross-branch IDOR và export field redaction.
