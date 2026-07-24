@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test("GM mở sample payroll, calculate và xem breakdown", async ({ page }) => {
-  await page.goto("/dashboard");
+  await page.goto("/payroll");
   const businessMonthParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Ho_Chi_Minh",
     year: "numeric",

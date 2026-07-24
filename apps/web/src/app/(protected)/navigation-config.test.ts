@@ -4,13 +4,16 @@ import { navigationForRole, roleCanOpenPath } from "./navigation-config";
 
 describe("navigation theo vai trò", () => {
   it("không expose payroll/admin/company report cho manager", () => {
-    const hrefs = navigationForRole("TRAINING_MANAGER").map((item) => item.href);
+    const items = navigationForRole("TRAINING_MANAGER");
+    const hrefs = items.map((item) => item.href);
 
     expect(hrefs).toContain("/attendance");
     expect(hrefs).toContain("/branch-overview");
     expect(hrefs).not.toContain("/payroll");
     expect(hrefs).not.toContain("/administration");
     expect(hrefs).not.toContain("/company-report");
+    expect(items.find((item) => item.href === "/data-governance")?.label).toBe("Import & Export");
+    expect(items.some((item) => item.label.includes("Audit"))).toBe(false);
   });
 
   it("employee chỉ có tổng quan, payslip và bảo mật", () => {

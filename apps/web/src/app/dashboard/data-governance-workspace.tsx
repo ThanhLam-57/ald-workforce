@@ -346,7 +346,7 @@ export function DataGovernanceWorkspace({
           Data governance
         </p>
         <h2 id="data-governance-title" className="mt-1 text-2xl font-semibold">
-          Import, Export Center và Audit
+          {isGeneralManager ? "Import, Export Center và Audit" : "Import và Export Center"}
         </h2>
         <p className="mt-2 text-sm text-slate-600">
           Dữ liệu file được kiểm tra checksum, phạm vi cơ sở và formula injection trước khi ghi.

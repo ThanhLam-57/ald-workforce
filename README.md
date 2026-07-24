@@ -33,6 +33,29 @@ pnpm dev
 Web mặc định ở `http://localhost:3000`. Seed không in mật khẩu; tên đăng nhập và tên
 biến môi trường chứa mật khẩu được ghi trong log. Không chạy demo seed trên production.
 
+## Điều hướng theo vai trò
+
+Sau khi đăng nhập, `/dashboard` hiển thị tổng quan gọn theo vai trò. Trên desktop dùng
+sidebar bên trái; trên màn hình nhỏ dùng nút **Menu**. Mỗi module có URL riêng nên có thể
+bookmark và dùng nút back/forward của trình duyệt. Server kiểm tra lại session, vai trò và
+branch scope ở từng route; việc một mục không xuất hiện trong menu không phải là lớp bảo mật
+duy nhất.
+
+| Khu vực                     | URL                  | Quyền truy cập                                      |
+| --------------------------- | -------------------- | --------------------------------------------------- |
+| Tổng quan                   | `/dashboard`         | Tất cả vai trò, nội dung theo vai trò               |
+| Chấm công & Live            | `/attendance`        | GM, Training Manager trong branch                   |
+| Tổng quan cơ sở             | `/branch-overview`   | GM, Training Manager trong branch                   |
+| Báo cáo công ty             | `/company-report`    | GM                                                  |
+| KPI quản lý                 | `/manager-kpi`       | GM; Training Manager chỉ dữ liệu được phép          |
+| Rule thưởng/level/lương/KPI | `/rules/configured`  | GM chỉnh sửa; Training Manager chỉ đọc active rule  |
+| Rule phạt                   | `/rules/penalties`   | GM                                                  |
+| Payroll                     | `/payroll`           | GM                                                  |
+| Import/Export/Audit         | `/data-governance`   | GM; Training Manager chỉ Import/Export trong branch |
+| Quản trị nền tảng           | `/administration`    | GM                                                  |
+| Phiếu lương cá nhân         | `/my-payslips`       | Live Employee, chỉ phiếu đã publish của mình        |
+| Bảo mật tài khoản           | `/settings/security` | Tất cả vai trò                                      |
+
 ## Kiểm tra bắt buộc
 
 ```powershell

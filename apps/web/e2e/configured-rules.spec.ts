@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 test("GM chỉnh draft salary rule và publish từ Rule Center", async ({ page }) => {
-  await page.goto("/dashboard");
+  await page.goto("/rules/configured");
   const suffix = Date.now().toString(36);
   const name = `Salary E2E ${suffix}`;
   const createdResponse = await page.request.post("/api/rules/configured", {

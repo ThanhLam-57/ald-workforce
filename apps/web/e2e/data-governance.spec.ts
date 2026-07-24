@@ -4,7 +4,8 @@ test("GM thấy Import, Export Center, Audit và API template được scope", a
   page,
   request,
 }) => {
-  await page.goto("/dashboard");
+  await page.goto("/data-governance");
+  await expect(page.getByRole("heading", { name: "Import, Export Center & Audit" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Import, Export Center và Audit" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "1. Import dữ liệu cũ" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "2. Export Center" })).toBeVisible();

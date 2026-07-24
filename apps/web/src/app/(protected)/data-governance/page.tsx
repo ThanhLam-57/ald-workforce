@@ -11,9 +11,15 @@ export default async function DataGovernancePage() {
   return (
     <>
       <PageHeader
-        description="Import dữ liệu cũ, theo dõi export job và tra cứu audit trong đúng phạm vi được cấp."
+        description={
+          actor.role === "GENERAL_MANAGER"
+            ? "Import dữ liệu cũ, theo dõi export job và tra cứu audit trong đúng phạm vi được cấp."
+            : "Import dữ liệu và theo dõi export job trong đúng phạm vi cơ sở được phân công."
+        }
         eyebrow="Quản trị dữ liệu"
-        title="Import, Export Center & Audit"
+        title={
+          actor.role === "GENERAL_MANAGER" ? "Import, Export Center & Audit" : "Import & Export"
+        }
       />
       <DataGovernanceWorkspace
         branches={branches.map((branch) => ({

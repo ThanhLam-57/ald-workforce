@@ -11,12 +11,9 @@ function currentBusinessMonth(): string {
 
 test("GM xem company intelligence, export và tạo draft KPI quản lý", async ({ page }) => {
   const month = process.env.SEED_PAYROLL_MONTH ?? currentBusinessMonth();
-  await page.goto("/dashboard");
+  await page.goto("/company-report");
 
-  await expect(
-    page.getByRole("heading", { name: "Dashboard và báo cáo toàn công ty" }),
-  ).toBeVisible();
-  await expect(page.getByRole("heading", { name: "KPI quản lý đào tạo" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dashboard và báo cáo công ty" })).toBeVisible();
 
   const reportResponse = await page.request.get(`/api/company-report?month=${month}`);
   expect(reportResponse.ok()).toBe(true);
@@ -62,6 +59,9 @@ test("GM xem company intelligence, export và tạo draft KPI quản lý", async
     expect(createResponse.ok()).toBe(true);
   }
 
-  await page.reload();
-  await expect(page.getByText("Quản lý đào tạo Demo", { exact: true }).first()).toBeVisible();
+  await page.goto("/manager-kpi");
+  await expect(page.getByRole("heading", { level: 1, name: "KPI quản lý đào tạo" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 3, name: "TMDEMO — Quản lý đào tạo Demo" }),
+  ).toBeVisible();
 });

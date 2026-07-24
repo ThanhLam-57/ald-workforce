@@ -11,8 +11,8 @@ async function signInAsGm(page: Page) {
 test("GM đăng nhập bằng username và thấy dashboard quản trị", async ({ page }) => {
   await page.context().clearCookies();
   await signInAsGm(page);
-  await expect(page.getByText("Tổng quan nền tảng")).toBeVisible();
-  await expect(page.getByText("Quản trị nền tảng")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tổng quan công ty" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Quản trị nền tảng" })).toBeVisible();
 });
 
 test("không cho tự đăng ký tài khoản", async ({ request }) => {
@@ -28,7 +28,7 @@ test("không cho tự đăng ký tài khoản", async ({ request }) => {
 });
 
 test("GM nhập attendance Live và autosave từ hồ sơ tháng", async ({ page }) => {
-  await page.goto("/dashboard");
+  await page.goto("/attendance");
   const suffix = Date.now().toString(36);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -111,7 +111,7 @@ test("GM nhập attendance Live và autosave từ hồ sơ tháng", async ({ pag
 });
 
 test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({ page }) => {
-  await page.goto("/dashboard");
+  await page.goto("/attendance");
   const suffix = Date.now().toString(36);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -228,7 +228,7 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
 });
 
 test("GM sửa branch overview và dữ liệu phản ánh về employee sheet", async ({ page }) => {
-  await page.goto("/dashboard");
+  await page.goto("/branch-overview");
   const suffix = Date.now().toString(36);
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",

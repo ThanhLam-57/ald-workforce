@@ -96,7 +96,15 @@ const navigationItems: readonly NavigationItem[] = [
     shortLabel: "DL",
     description: "Luân chuyển dữ liệu và nhật ký hệ thống",
     section: "Dữ liệu",
-    roles: ["GENERAL_MANAGER", "TRAINING_MANAGER"],
+    roles: ["GENERAL_MANAGER"],
+  },
+  {
+    href: "/data-governance",
+    label: "Import & Export",
+    shortLabel: "DL",
+    description: "Nhập và xuất dữ liệu trong phạm vi cơ sở",
+    section: "Dữ liệu",
+    roles: ["TRAINING_MANAGER"],
   },
   {
     href: "/administration",
