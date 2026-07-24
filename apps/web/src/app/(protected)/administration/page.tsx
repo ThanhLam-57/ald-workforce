@@ -1,4 +1,4 @@
-import { FoundationAdmin } from "@/app/dashboard/foundation-admin";
+import { AdministrationWorkspace } from "@/app/dashboard/administration-workspace";
 import { listBranches, listStaff } from "@/server/services";
 
 import { PageHeader } from "../page-header";
@@ -15,12 +15,12 @@ export default async function AdministrationPage() {
         eyebrow="Thiết lập hệ thống"
         title="Quản trị nền tảng"
       />
-      <FoundationAdmin
-        branches={branches.map((branch) => ({
+      <AdministrationWorkspace
+        branchOptions={branches.map((branch) => ({
           id: branch.id,
           label: `${branch.code} — ${branch.name}`,
         }))}
-        staff={staff.map((person) => ({
+        staffOptions={staff.map((person) => ({
           id: person.id,
           label: `${person.staffCode} — ${person.fullName}`,
         }))}
