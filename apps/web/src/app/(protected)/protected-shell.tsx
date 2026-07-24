@@ -99,6 +99,7 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
   const activeItem = navigation.find((item) => isActive(pathname, item.href));
 
   useEffect(() => {
@@ -114,7 +115,26 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
     document.body.style.overflow = "hidden";
     closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMobileOpen(false);
+      if (event.key === "Escape") {
+        setMobileOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusable = Array.from(
+        drawerRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -191,6 +211,7 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
             aria-label="Menu di động"
             aria-modal="true"
             className="relative flex h-full w-[min(88vw,21rem)] flex-col bg-white shadow-2xl"
+            ref={drawerRef}
             role="dialog"
           >
             <div className="flex h-20 items-center justify-between border-b border-slate-100 px-5">

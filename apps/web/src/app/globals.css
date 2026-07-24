@@ -20,6 +20,13 @@ body {
   background: radial-gradient(circle at top left, rgb(14 165 233 / 8%), transparent 30rem), #f8fafc;
 }
 
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid rgb(2 132 199 / 35%);
+  outline-offset: 3px;
+}
+
 input,
 select,
 textarea {
