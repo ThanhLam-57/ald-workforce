@@ -55,6 +55,8 @@ export async function getOptionalActor(
     staffId: user.staffId ?? null,
     role,
     activeBranchIds,
+    name: user.name,
+    username: user.username ?? null,
     mustChangePassword: user.mustChangePassword,
     twoFactorEnabled: Boolean(user.twoFactorEnabled),
   };

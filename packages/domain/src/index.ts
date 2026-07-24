@@ -8,6 +8,8 @@ export type ActorContext = Readonly<{
   staffId: string | null;
   role: AuthRole;
   activeBranchIds: readonly string[];
+  name?: string;
+  username?: string | null;
   mustChangePassword?: boolean;
   twoFactorEnabled?: boolean;
 }>;
