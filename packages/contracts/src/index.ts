@@ -92,6 +92,116 @@ export const userUpdateSchema = z.object({
   reason: reasonSchema,
 });
 
+const adminPageSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().trim().max(120).default(""),
+  direction: z.enum(["asc", "desc"]).default("asc"),
+});
+
+export const adminBranchListQuerySchema = adminPageSchema.extend({
+  status: z.enum(["ALL", "ACTIVE", "INACTIVE"]).default("ALL"),
+  sort: z.enum(["code", "name", "updatedAt"]).default("code"),
+});
+
+export const adminStaffListQuerySchema = adminPageSchema.extend({
+  employmentStatus: z.enum(["ALL", "ACTIVE", "ON_LEAVE", "TERMINATED"]).default("ALL"),
+  employmentCategory: z
+    .enum(["ALL", "OFFICIAL", "PROBATION", "CONTRACTOR", "INTERN"])
+    .default("ALL"),
+  branchId: idSchema.optional(),
+  account: z.enum(["ALL", "LINKED", "UNLINKED"]).default("ALL"),
+  sort: z.enum(["staffCode", "fullName", "updatedAt"]).default("staffCode"),
+});
+
+export const adminAssignmentListQuerySchema = adminPageSchema.extend({
+  branchId: idSchema.optional(),
+  staffId: idSchema.optional(),
+  assignmentType: z.enum(["ALL", "MEMBER", "PRIMARY_MANAGER", "SECONDARY_MANAGER"]).default("ALL"),
+  status: z.enum(["ALL", "CURRENT", "UPCOMING", "ENDED", "CANCELLED"]).default("ALL"),
+  sort: z.enum(["effectiveFrom", "updatedAt"]).default("effectiveFrom"),
+  direction: z.enum(["asc", "desc"]).default("desc"),
+});
+
+export const adminUserListQuerySchema = adminPageSchema.extend({
+  role: z.enum(["ALL", ...AUTH_ROLES]).default("ALL"),
+  status: z.enum(["ALL", "ACTIVE", "INACTIVE"]).default("ALL"),
+  account: z.enum(["ALL", "LINKED", "UNLINKED"]).default("ALL"),
+  sort: z.enum(["name", "username", "updatedAt"]).default("name"),
+});
+
+export type AdminPageDto<T> = Readonly<{
+  items: readonly T[];
+  page: number;
+  pageSize: number;
+  total: number;
+}>;
+
+export type AdminBranchDto = Readonly<{
+  id: string;
+  code: string;
+  name: string;
+  address: string | null;
+  isActive: boolean;
+  activeStaffCount: number;
+  activeManagerCount: number;
+  version: number;
+  updatedAt: string;
+}>;
+
+export type AdminStaffDto = Readonly<{
+  id: string;
+  staffCode: string;
+  fullName: string;
+  streamingAlias: string | null;
+  email: string | null;
+  phone: string | null;
+  jobTitle: string;
+  employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+  employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+  currentAssignments: readonly Readonly<{
+    id: string;
+    branchId: string;
+    branchCode: string;
+    branchName: string;
+    assignmentType: "MEMBER" | "PRIMARY_MANAGER" | "SECONDARY_MANAGER";
+  }>[];
+  user: Readonly<{ id: string; username: string | null; active: boolean }> | null;
+  level: Readonly<{ code: string; name: string }> | null;
+  version: number;
+  updatedAt: string;
+}>;
+
+export type AdminAssignmentDto = Readonly<{
+  id: string;
+  branch: Readonly<{ id: string; code: string; name: string; isActive: boolean }>;
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+  }>;
+  assignmentType: "MEMBER" | "PRIMARY_MANAGER" | "SECONDARY_MANAGER";
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  status: "CURRENT" | "UPCOMING" | "ENDED" | "CANCELLED";
+  version: number;
+  updatedAt: string;
+}>;
+
+export type AdminUserDto = Readonly<{
+  id: string;
+  name: string;
+  username: string | null;
+  email: string;
+  role: "GENERAL_MANAGER" | "TRAINING_MANAGER" | "LIVE_EMPLOYEE";
+  active: boolean;
+  mustChangePassword: boolean;
+  staff: Readonly<{ id: string; staffCode: string; fullName: string }> | null;
+  version: number;
+  updatedAt: string;
+}>;
+
 export const loginSchema = z.object({
   identifier: trimmedText("Email hoặc tên đăng nhập", 320),
   password: z.string().min(1).max(128),
@@ -1419,6 +1529,10 @@ export type AssignmentCreateInput = z.infer<typeof assignmentCreateSchema>;
 export type AssignmentUpdateInput = z.infer<typeof assignmentUpdateSchema>;
 export type UserCreateInput = z.infer<typeof userCreateSchema>;
 export type UserUpdateInput = z.infer<typeof userUpdateSchema>;
+export type AdminBranchListQuery = z.infer<typeof adminBranchListQuerySchema>;
+export type AdminStaffListQuery = z.infer<typeof adminStaffListQuerySchema>;
+export type AdminAssignmentListQuery = z.infer<typeof adminAssignmentListQuerySchema>;
+export type AdminUserListQuery = z.infer<typeof adminUserListQuerySchema>;
 export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
 export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
 export type AttendanceArchiveInput = z.infer<typeof attendanceArchiveSchema>;
