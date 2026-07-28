@@ -1,5 +1,6 @@
 import { prisma } from "@ald/db";
 import { prismaAdapter } from "@better-auth/prisma-adapter";
+import { createHash } from "node:crypto";
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { admin as adminPlugin, twoFactor, username } from "better-auth/plugins";
@@ -10,6 +11,7 @@ import {
   liveEmployeeAuthRole,
   trainingManagerAuthRole,
 } from "./auth-permissions";
+import { resolveAppUrl, resolveTrustedOrigins } from "./app-url";
 
 function requiredProductionValue(
   value: string | undefined,
@@ -25,23 +27,42 @@ function requiredProductionValue(
   return localFallback;
 }
 
-const appUrl = requiredProductionValue(
-  process.env.BETTER_AUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL,
-  "BETTER_AUTH_URL",
-  "http://localhost:3000",
-);
-const secret = requiredProductionValue(
-  process.env.BETTER_AUTH_SECRET,
-  "BETTER_AUTH_SECRET",
-  "local-only-change-me-ald-workforce-32-chars",
-);
-const trustedOrigins = [
-  appUrl,
-  ...(process.env.TRUSTED_ORIGINS ?? "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean),
-];
+function optionalSecretValue(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  if (!value || value.includes("<") || value.includes(">")) {
+    return undefined;
+  }
+  return value;
+}
+
+function resolveAuthSecret(): string {
+  const explicitSecret = optionalSecretValue("BETTER_AUTH_SECRET");
+  if (explicitSecret) {
+    return explicitSecret;
+  }
+
+  const railwaySeed = [
+    process.env.RAILWAY_PROJECT_ID,
+    process.env.RAILWAY_ENVIRONMENT_ID,
+    process.env.RAILWAY_SERVICE_ID,
+    process.env.RAILWAY_PUBLIC_DOMAIN,
+  ]
+    .filter(Boolean)
+    .join(":");
+  if (railwaySeed) {
+    return createHash("sha256").update(`ald-workforce:${railwaySeed}`).digest("hex");
+  }
+
+  return requiredProductionValue(
+    undefined,
+    "BETTER_AUTH_SECRET",
+    "local-only-change-me-ald-workforce-32-chars",
+  );
+}
+
+const appUrl = resolveAppUrl();
+const secret = resolveAuthSecret();
+const trustedOrigins = resolveTrustedOrigins(appUrl);
 
 export const auth = betterAuth({
   appName: "ALD Workforce",

@@ -1,17 +1,9 @@
+import { resolveAppUrl, resolveTrustedOrigins } from "./app-url";
+
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 function trustedOrigins(): Set<string> {
-  const values = [
-    process.env.BETTER_AUTH_URL,
-    process.env.NEXT_PUBLIC_APP_URL,
-    ...(process.env.TRUSTED_ORIGINS ?? "").split(","),
-  ];
-  return new Set(
-    values
-      .map((value) => value?.trim())
-      .filter((value): value is string => Boolean(value))
-      .map((value) => new URL(value).origin),
-  );
+  return new Set(resolveTrustedOrigins(resolveAppUrl()));
 }
 
 export function isTrustedMutationRequest(request: Request): boolean {

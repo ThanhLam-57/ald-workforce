@@ -1,10 +1,47 @@
 import { describe, expect, it } from "vitest";
 
-import { readBootstrapAdminConfig } from "./bootstrap-admin-config.js";
+import {
+  DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+  readBootstrapAdminConfig,
+} from "./bootstrap-admin-config.js";
 
 describe("readBootstrapAdminConfig", () => {
   it("does nothing unless explicitly enabled", () => {
     expect(readBootstrapAdminConfig({})).toEqual({ enabled: false });
+  });
+
+  it("auto-enables on Railway with a first-login default password", () => {
+    expect(
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+      }),
+    ).toMatchObject({
+      enabled: true,
+      adminUsername: "admin",
+      adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+    });
+  });
+
+  it("allows explicitly disabling Railway bootstrap after the first deploy", () => {
+    expect(
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_DISABLED: "true",
+      }),
+    ).toEqual({ enabled: false });
+  });
+
+  it("ignores imported placeholder passwords on Railway", () => {
+    expect(
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_ENABLED: "false",
+        BOOTSTRAP_ADMIN_PASSWORD: "<strong-temporary-password>",
+      }),
+    ).toMatchObject({
+      enabled: true,
+      adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+    });
   });
 
   it("requires a strong temporary password", () => {

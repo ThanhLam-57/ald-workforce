@@ -12,8 +12,20 @@ export type BootstrapAdminConfig =
       adminPassword: string;
     };
 
+export const DEFAULT_BOOTSTRAP_ADMIN_PASSWORD = "ALD-Admin-123456!";
+
+function isRailwayRuntime(environment: NodeJS.ProcessEnv): boolean {
+  return Boolean(
+    environment.RAILWAY_PROJECT_ID ||
+      environment.RAILWAY_ENVIRONMENT_ID ||
+      environment.RAILWAY_SERVICE_ID ||
+      environment.RAILWAY_PUBLIC_DOMAIN,
+  );
+}
+
 function requiredValue(environment: NodeJS.ProcessEnv, key: string, fallback?: string): string {
-  const value = environment[key]?.trim() || fallback;
+  const candidate = environment[key]?.trim();
+  const value = candidate && !candidate.includes("<") && !candidate.includes(">") ? candidate : fallback;
   if (!value) {
     throw new Error(`${key} is required when BOOTSTRAP_ADMIN_ENABLED=true.`);
   }
@@ -21,11 +33,20 @@ function requiredValue(environment: NodeJS.ProcessEnv, key: string, fallback?: s
 }
 
 export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): BootstrapAdminConfig {
-  if (environment.BOOTSTRAP_ADMIN_ENABLED !== "true") {
+  const enabled = environment.BOOTSTRAP_ADMIN_ENABLED?.trim().toLowerCase();
+  if (
+    environment.BOOTSTRAP_ADMIN_DISABLED === "true" ||
+    (enabled === "false" && !isRailwayRuntime(environment)) ||
+    (enabled !== "true" && !isRailwayRuntime(environment))
+  ) {
     return { enabled: false };
   }
 
-  const adminPassword = requiredValue(environment, "BOOTSTRAP_ADMIN_PASSWORD");
+  const adminPassword = requiredValue(
+    environment,
+    "BOOTSTRAP_ADMIN_PASSWORD",
+    isRailwayRuntime(environment) ? DEFAULT_BOOTSTRAP_ADMIN_PASSWORD : undefined,
+  );
   if (adminPassword.length < 12) {
     throw new Error("BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters.");
   }
