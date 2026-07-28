@@ -26,7 +26,8 @@ function isRailwayRuntime(environment: NodeJS.ProcessEnv): boolean {
 
 function requiredValue(environment: NodeJS.ProcessEnv, key: string, fallback?: string): string {
   const candidate = environment[key]?.trim();
-  const value = candidate && !candidate.includes("<") && !candidate.includes(">") ? candidate : fallback;
+  const value =
+    candidate && !candidate.includes("<") && !candidate.includes(">") ? candidate : fallback;
   if (!value) {
     throw new Error(`${key} is required when BOOTSTRAP_ADMIN_ENABLED=true.`);
   }
@@ -94,7 +95,6 @@ export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): Bootst
     adminUsername,
     adminPassword,
     resetPassword:
-      booleanValue(environment, "BOOTSTRAP_ADMIN_RESET_PASSWORD") ||
-      Boolean(explicitAdminPassword),
+      booleanValue(environment, "BOOTSTRAP_ADMIN_RESET_PASSWORD") || Boolean(explicitAdminPassword),
   };
 }

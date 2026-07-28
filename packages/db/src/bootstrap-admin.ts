@@ -1,9 +1,10 @@
 import { hashPassword } from "better-auth/crypto";
+import { pathToFileURL } from "node:url";
 
 import { readBootstrapAdminConfig } from "./bootstrap-admin-config.js";
 import { prisma } from "./client.js";
 
-async function bootstrapAdmin(): Promise<void> {
+export async function bootstrapAdmin(): Promise<void> {
   const config = readBootstrapAdminConfig(process.env);
   if (!config.enabled) {
     console.log("Admin bootstrap skipped.");
@@ -82,9 +83,7 @@ async function bootstrapAdmin(): Promise<void> {
             active: true,
             banned: false,
             banReason: null,
-            ...(shouldResetPassword
-              ? { mustChangePassword: true, passwordChangedAt: null }
-              : {}),
+            ...(shouldResetPassword ? { mustChangePassword: true, passwordChangedAt: null } : {}),
           },
         })
       : await transaction.user.create({
@@ -135,11 +134,18 @@ async function bootstrapAdmin(): Promise<void> {
   );
 }
 
-bootstrapAdmin()
-  .catch((error: unknown) => {
-    console.error("Admin bootstrap failed.", error);
-    process.exitCode = 1;
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+function isDirectRun(): boolean {
+  const entrypoint = process.argv[1];
+  return Boolean(entrypoint && pathToFileURL(entrypoint).href === import.meta.url);
+}
+
+if (isDirectRun()) {
+  bootstrapAdmin()
+    .catch((error: unknown) => {
+      console.error("Admin bootstrap failed.", error);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

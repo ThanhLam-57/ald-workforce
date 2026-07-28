@@ -20,7 +20,7 @@ theo mặc định; ứng dụng chỉ phát signed URL sau authorization.
 2. Ở web đặt custom config file `/railway.web.json`; worker dùng
    `/railway.worker.json`.
 3. Web dùng pre-deploy command
-   `node packages/db/node_modules/prisma/build/index.js migrate deploy --config packages/db/prisma.config.ts`.
+   `node packages/db/dist/railway-predeploy.js`.
    Không cấu hình migration ở worker hoặc start command.
 4. Tạo PostgreSQL và Bucket trong cùng environment.
 5. Map biến môi trường bằng Railway reference variables; không sao chép secret vào repo.
