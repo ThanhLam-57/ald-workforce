@@ -123,6 +123,9 @@ async function bootstrapAdmin(): Promise<void> {
         data: { password: passwordHash },
       });
     }
+    if (shouldResetPassword) {
+      await transaction.rateLimit.deleteMany();
+    }
   });
 
   console.log(
