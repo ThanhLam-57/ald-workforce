@@ -1,33 +1,60 @@
 import { describe, expect, it } from "vitest";
 
-import { can, canAccessBranch, type ActorContext } from "./index.js";
-
-const gm: ActorContext = {
-  userId: "gm",
-  companyId: "company",
-  staffId: "staff-gm",
-  role: "GENERAL_MANAGER",
-  activeBranchIds: [],
-};
+import { can, type ActorContext, type ResourceAction } from "./index";
 
 const manager: ActorContext = {
-  userId: "manager",
-  companyId: "company",
-  staffId: "staff-manager",
+  userId: "manager-user",
+  companyId: "company-a",
+  staffId: "manager-staff",
   role: "TRAINING_MANAGER",
   activeBranchIds: ["branch-a"],
+  canManagePayroll: true,
 };
 
-describe("authorization policy", () => {
-  it("cho phép GM mutation toàn công ty", () => {
-    expect(can(gm, "branch:create")).toBe(true);
-    expect(can(gm, "assignment:update")).toBe(true);
+describe("Training Manager permission matrix", () => {
+  it.each<ResourceAction>([
+    "branch:read",
+    "staff:read",
+    "attendance:read",
+    "attendance:write",
+    "attendance:export",
+    "violation:read",
+    "violation:write",
+    "violation:cancel",
+    "evidence:upload",
+    "evidence:read",
+    "branch-overview:read",
+    "company-report:read",
+    "rule:read",
+    "manager-kpi:read",
+  ])("allows %s", (action) => {
+    expect(can(manager, action)).toBe(true);
   });
 
-  it("chỉ cho manager đọc và giới hạn branch được phân công", () => {
-    expect(can(manager, "staff:read")).toBe(true);
-    expect(can(manager, "staff:update")).toBe(false);
-    expect(canAccessBranch(manager, "branch-a")).toBe(true);
-    expect(canAccessBranch(manager, "branch-b")).toBe(false);
+  it.each<ResourceAction>([
+    "branch-overview:write",
+    "branch-overview:export",
+    "company-report:export",
+    "payroll:read",
+    "payroll:write",
+    "payroll:export",
+    "rule:write",
+    "manager-kpi:write",
+    "import:read",
+    "import:write",
+    "export-center:read",
+    "export-center:write",
+    "audit:read",
+    "audit:export",
+    "branch:create",
+    "branch:update",
+    "staff:create",
+    "staff:update",
+    "user:create",
+    "user:update",
+    "assignment:create",
+    "assignment:update",
+  ])("denies %s even when canManagePayroll is true", (action) => {
+    expect(can(manager, action)).toBe(false);
   });
 });

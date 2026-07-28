@@ -4,6 +4,9 @@ import { listBranches } from "@/server/services";
 import { PageHeader } from "../page-header";
 import { requirePageActor } from "../page-access";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export default async function BranchOverviewPage() {
   const actor = await requirePageActor(["GENERAL_MANAGER", "TRAINING_MANAGER"]);
   const branches = await listBranches(actor);

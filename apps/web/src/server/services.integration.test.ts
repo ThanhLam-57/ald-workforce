@@ -184,6 +184,7 @@ describe("tenant và branch scope", () => {
     expect(branches.map(({ id }) => id)).toEqual([branchAId]);
     expect(staff.some(({ id }) => id === memberAId)).toBe(true);
     expect(staff.some(({ fullName }) => fullName === "Nhân viên B")).toBe(false);
+    expect(staff.every((item) => !("baseSalaryAmount" in item))).toBe(true);
   });
 
   it("chặn IDOR khi manager truy cập trực tiếp branch ngoài scope", async () => {

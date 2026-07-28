@@ -14,7 +14,7 @@ import { prisma, type Prisma } from "@ald/db";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 
-const TEMPLATE_VERSION = "PAYSLIP_V1";
+const TEMPLATE_VERSION = "PAYSLIP_V2_COINS";
 const FONT_REGULAR_URL = import.meta.resolve(
   "@expo-google-fonts/noto-sans/400Regular/NotoSans_400Regular.ttf",
 );
@@ -53,9 +53,45 @@ function money(value: string): string {
   return new Intl.NumberFormat("vi-VN").format(BigInt(value));
 }
 
+function coin(value: string | null): string {
+  return value === null ? "Chưa có" : `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} xu`;
+}
+
+function monthlyLevelData(data: PayslipExportData): PayrollCalculationOutput["monthlyLevel"] {
+  return (
+    data.output.monthlyLevel ?? {
+      workedDayCount: 0,
+      attendanceRequiredDays: null,
+      attendanceEligible: false,
+      previousMonthCoins: null,
+      previousMonthCoinsSource: "NONE",
+      previousLevelCode: null,
+      previousLevelName: null,
+      previousLevelOrder: null,
+      currentMonthCoins: data.output.aggregates.revenueAmount,
+      currentLevelCode: data.output.suggestedLevelCode ?? null,
+      currentLevelName: null,
+      currentLevelOrder: null,
+      transition: "NONE",
+    }
+  );
+}
+
 function dateLabel(date: string): string {
   const [year, month, day] = date.split("-");
   return `${day}/${month}/${year}`;
+}
+
+function weekdayLabel(date: string): string {
+  return new Intl.DateTimeFormat("vi-VN", {
+    weekday: "short",
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(new Date(`${date}T12:00:00+07:00`));
+}
+
+function durationLabel(minutes: number): string {
+  const safe = Math.max(0, Math.trunc(minutes));
+  return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
 }
 
 const statusLabels = {
@@ -78,10 +114,13 @@ function dailyValues(data: PayslipExportData) {
     .sort((left, right) => left.businessDate.localeCompare(right.businessDate))
     .map((row) => ({
       ...row,
-      dailyBonus: (bonusByAttendance.get(row.attendanceId) ?? 0n).toString(),
-      penalties: row.violations
-        .reduce((total, violation) => total + BigInt(violation.amount), 0n)
-        .toString(),
+      dailyBonus:
+        row.dailyRevenueBonusOverride ?? (bonusByAttendance.get(row.attendanceId) ?? 0n).toString(),
+      penalties:
+        row.penaltiesOverride ??
+        row.violations
+          .reduce((total, violation) => total + BigInt(violation.amount), 0n)
+          .toString(),
     }));
 }
 
@@ -94,6 +133,7 @@ export async function createPayslipWorkbook(
   workbook.created = generatedAt;
   workbook.modified = generatedAt;
   workbook.subject = `${TEMPLATE_VERSION} · ${data.calculationHash}`;
+  const level = monthlyLevelData(data);
   const summary = workbook.addWorksheet("Phiếu lương", {
     properties: { tabColor: { argb: "FF0369A1" } },
     pageSetup: {
@@ -131,6 +171,16 @@ export async function createPayslipWorkbook(
     row.getCell(1).font = { bold: true, color: { argb: "FF334155" } };
     row.getCell(3).font = { bold: true, color: { argb: "FF334155" } };
   });
+  summary.getRow(6).values = data.employeeRevenueVisible
+    ? [
+        "Ngày làm việc",
+        `${level.workedDayCount}/${level.attendanceRequiredDays ?? "—"} ngày`,
+        "Tổng xu tháng",
+        coin(level.currentMonthCoins),
+      ]
+    : ["Ngày làm việc", `${level.workedDayCount}/${level.attendanceRequiredDays ?? "—"} ngày`];
+  summary.getRow(6).getCell(1).font = { bold: true, color: { argb: "FF334155" } };
+  summary.getRow(6).getCell(3).font = { bold: true, color: { argb: "FF334155" } };
   summary.getRow(7).values = ["Khoản thu nhập", "Số tiền (VND)", "Diễn giải", "Rule / nguồn"];
   summary.getRow(7).eachCell((cell) => {
     cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
@@ -138,20 +188,43 @@ export async function createPayslipWorkbook(
     cell.alignment = { horizontal: "center", vertical: "middle" };
   });
   const componentRows: Array<[string, string, string]> = [
-    ["Lương cơ bản tham chiếu", data.output.components.baseSalary, "Không cộng trùng"],
+    ["Lương cơ bản nhân viên", data.output.components.baseSalary, "Không cộng trùng"],
+    [
+      `Lương thử việc (${data.output.employmentSalary.probationSalaryRateBps / 100}%)`,
+      data.output.employmentSalary.probationSalaryAmount,
+      `${data.output.employmentSalary.probationWorkUnits} công`,
+    ],
+    [
+      "Lương chính thức (100%)",
+      data.output.employmentSalary.officialSalaryAmount,
+      `${data.output.employmentSalary.officialWorkUnits} công`,
+    ],
     [
       "Lương theo công",
       data.output.components.proratedSalary,
       `${data.output.aggregates.workUnits} công`,
     ],
-    ["Thưởng doanh số ngày", data.output.components.dailyRevenueBonus, "Tổng các ngày"],
-    ["Thưởng doanh số tháng", data.output.components.monthlyRevenueBonus, "Theo level tháng"],
-    ["Thưởng chuyên cần", data.output.components.attendanceBonus, "Theo rule tháng"],
-    ["Thưởng thành tích", data.output.components.achievementBonus, "Theo rule tháng"],
+    ["Thưởng xu theo ngày", data.output.components.dailyRevenueBonus, "Tổng các ngày"],
+    ["Thưởng xu tháng (dữ liệu cũ)", data.output.components.monthlyRevenueBonus, "Tương thích"],
     [
-      "Thưởng level",
-      data.output.components.levelBonus,
-      data.output.suggestedLevelCode ?? "Không có",
+      "Thưởng chuyên cần",
+      data.output.components.attendanceBonus,
+      `${level.workedDayCount}/${level.attendanceRequiredDays ?? "—"} ngày`,
+    ],
+    [
+      "Thưởng thành tựu",
+      data.output.components.achievementBonus,
+      level.currentLevelName ?? level.currentLevelCode ?? "Chưa đạt bậc",
+    ],
+    [
+      "Thưởng duy trì bậc",
+      data.output.components.retainLevelBonus,
+      level.transition === "RETAIN" ? "Giữ bậc" : "Không áp dụng",
+    ],
+    [
+      "Thưởng nhảy bậc",
+      data.output.components.jumpLevelBonus,
+      level.transition === "JUMP" ? "Tăng bậc" : "Không áp dụng",
     ],
     [
       "Tăng ca",
@@ -171,6 +244,7 @@ export async function createPayslipWorkbook(
       "MONTHLY_REVENUE_BONUS",
       "ATTENDANCE_BONUS",
       "ACHIEVEMENT_BONUS",
+      "LEVEL_BONUS",
       "LEVEL_BONUS",
       "OVERTIME_PAY",
       "OTHER_BONUS",
@@ -205,7 +279,7 @@ export async function createPayslipWorkbook(
   totalRow.values = [
     "THỰC NHẬN",
     {
-      formula: "B9+SUM(B10:B16)-B17-B18",
+      formula: "B9+SUM(B10:B17)-B18-B19",
       result: exactExcelNumber(data.output.components.totalIncome),
     },
     data.output.anomalyFlags.length > 0
@@ -227,7 +301,7 @@ export async function createPayslipWorkbook(
     pageSetup: { orientation: "landscape", fitToPage: true, fitToWidth: 1 },
   });
   daily.views = [{ state: "frozen", ySplit: 2, showGridLines: false }];
-  daily.mergeCells(1, 1, 1, data.employeeRevenueVisible ? 9 : 8);
+  daily.mergeCells(1, 1, 1, data.employeeRevenueVisible ? 15 : 13);
   daily.getCell(1, 1).value = `CHI TIẾT NGÀY · ${data.staff.code} · ${data.month}`;
   daily.getCell(1, 1).font = { bold: true, size: 15, color: { argb: "FFFFFFFF" } };
   daily.getCell(1, 1).fill = {
@@ -237,14 +311,20 @@ export async function createPayslipWorkbook(
   };
   const headers = [
     "Ngày",
+    "Thứ",
     "Trạng thái",
+    "Check-in",
+    "Check-out",
     "Công",
-    "Live (phút)",
+    "Live (HH:mm)",
     "Tăng ca",
-    ...(data.employeeRevenueVisible ? ["Doanh số"] : []),
+    ...(data.employeeRevenueVisible ? ["Doanh số (xu)"] : []),
+    ...(data.employeeRevenueVisible ? ["Mốc xu"] : []),
     "Thưởng ngày",
+    "Phân loại lỗi",
+    "Chi tiết lỗi",
     "Tiền phạt",
-    "Attendance ID",
+    "Ghi chú",
   ];
   daily.getRow(2).values = headers;
   daily.getRow(2).eachCell((cell) => {
@@ -256,22 +336,47 @@ export async function createPayslipWorkbook(
     const row = daily.getRow(3 + index);
     row.values = [
       dateLabel(value.businessDate),
+      weekdayLabel(value.businessDate),
       statusLabels[value.status],
+      value.checkInTime ?? "",
+      value.checkOutTime ?? "",
       Number(value.workUnits),
-      value.actualLiveMinutes,
-      value.overtimeMinutes,
+      durationLabel(value.actualLiveMinutes),
+      durationLabel(value.overtimeMinutes),
       ...(data.employeeRevenueVisible ? [exactExcelNumber(value.revenueAmount)] : []),
+      ...(data.employeeRevenueVisible
+        ? [
+            value.rewardThresholdAmount === null || value.rewardThresholdAmount === undefined
+              ? ""
+              : exactExcelNumber(value.rewardThresholdAmount),
+          ]
+        : []),
       exactExcelNumber(value.dailyBonus),
+      value.violationCategory ?? "",
+      value.violationDetail ?? "",
       exactExcelNumber(value.penalties),
-      value.attendanceId,
+      value.note ?? "",
     ];
-    row.getCell(3).numFmt = "0.00";
-    for (let column = 6; column <= headers.length - 1; column += 1) {
-      row.getCell(column).numFmt = "#,##0;[Red](#,##0);-";
-    }
+    row.getCell(6).numFmt = "0.00";
+    const revenueColumn = data.employeeRevenueVisible ? 9 : null;
+    const thresholdColumn = data.employeeRevenueVisible ? 10 : null;
+    const bonusColumn = data.employeeRevenueVisible ? 11 : 9;
+    const penaltyColumn = bonusColumn + 3;
+    [revenueColumn, thresholdColumn, bonusColumn, penaltyColumn]
+      .filter((column): column is number => column !== null)
+      .forEach((column) => {
+        row.getCell(column).numFmt = "#,##0;[Red](#,##0);-";
+      });
   });
   daily.columns = headers.map((header) => ({
-    width: header === "Attendance ID" ? 38 : header === "Trạng thái" ? 15 : 14,
+    width:
+      header === "Chi tiết lỗi" || header === "Ghi chú"
+        ? 30
+        : header === "Phân loại lỗi"
+          ? 22
+          : header === "Trạng thái"
+            ? 15
+            : 14,
   }));
   daily.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: headers.length } };
   daily.pageSetup.printTitlesRow = "1:2";
@@ -293,6 +398,7 @@ export async function createPayslipPdf(
   generatedAt = new Date(),
 ): Promise<Buffer> {
   const fonts = await pdfFonts();
+  const level = monthlyLevelData(data);
   return new Promise<Buffer>((resolve, reject) => {
     const document = new PDFDocument({
       size: "A4",
@@ -331,21 +437,35 @@ export async function createPayslipPdf(
     document.text(`Cơ sở: ${data.branchCode} — ${data.branchName}`, 330, metaY + 17);
     document.text(`ACC / Alias: ${data.staff.streamingAlias ?? "—"}`, 38, metaY + 34);
     document.text(`Calculation #${data.calculationNo}`, 330, metaY + 34);
+    document.text(
+      `Ngày làm việc: ${level.workedDayCount}/${level.attendanceRequiredDays ?? "—"} ngày`,
+      38,
+      metaY + 51,
+    );
+    if (data.employeeRevenueVisible) {
+      document.text(`Tổng xu: ${coin(level.currentMonthCoins)}`, 330, metaY + 51);
+    }
 
     const summaryRows: Array<[string, string, boolean?]> = [
-      ["Lương cơ bản tham chiếu", data.output.components.baseSalary],
+      ["Lương cơ bản nhân viên", data.output.components.baseSalary],
+      [
+        `Lương thử việc (${data.output.employmentSalary.probationSalaryRateBps / 100}%)`,
+        data.output.employmentSalary.probationSalaryAmount,
+      ],
+      ["Lương chính thức (100%)", data.output.employmentSalary.officialSalaryAmount],
       ["Lương theo công", data.output.components.proratedSalary],
-      ["Thưởng doanh số ngày", data.output.components.dailyRevenueBonus],
-      ["Thưởng doanh số tháng", data.output.components.monthlyRevenueBonus],
+      ["Thưởng xu theo ngày", data.output.components.dailyRevenueBonus],
+      ["Thưởng xu tháng (dữ liệu cũ)", data.output.components.monthlyRevenueBonus],
       ["Thưởng chuyên cần", data.output.components.attendanceBonus],
-      ["Thưởng thành tích", data.output.components.achievementBonus],
-      ["Thưởng level", data.output.components.levelBonus],
+      ["Thưởng thành tựu", data.output.components.achievementBonus],
+      ["Thưởng duy trì bậc", data.output.components.retainLevelBonus],
+      ["Thưởng nhảy bậc", data.output.components.jumpLevelBonus],
       ["Tiền tăng ca", data.output.components.overtimePay],
       ["Thưởng / điều chỉnh khác", data.output.components.otherBonus],
       ["Tiền phạt", data.output.components.penalties, true],
       ["Tạm ứng", data.output.components.advance, true],
     ];
-    let y = 165;
+    let y = 182;
     document.rect(38, y, pageWidth, 24).fill("#0284C7");
     document.font("NotoBold").fontSize(10).fillColor("#FFFFFF");
     document.text("Khoản thu nhập", 48, y + 7);
@@ -481,11 +601,33 @@ const exportJobInclude = {
 } satisfies Prisma.PayrollExportJobInclude;
 
 function outputFromJson(value: Prisma.JsonValue): PayrollCalculationOutput {
-  return value as unknown as PayrollCalculationOutput;
+  const output = value as unknown as PayrollCalculationOutput;
+  return {
+    ...output,
+    employmentSalary: output.employmentSalary ?? {
+      joinedDate: null,
+      officialDate: null,
+      probationSalaryRateBps: 8_500,
+      probationWorkUnits: "0",
+      officialWorkUnits: output.aggregates.workUnits,
+      excludedBeforeJoinWorkUnits: "0",
+      probationSalaryAmount: "0",
+      officialSalaryAmount: output.components.proratedSalary,
+      calculatedProratedSalary: output.components.proratedSalary,
+      fallbackMode: "LEGACY_OFFICIAL_WITHOUT_OFFICIAL_DATE",
+    },
+  };
 }
 
 function inputFromJson(value: Prisma.JsonValue): PayrollCalculationInput {
-  return value as unknown as PayrollCalculationInput;
+  const input = value as unknown as Omit<PayrollCalculationInput, "baseSalaryAmount"> & {
+    baseSalaryAmount?: string;
+  };
+  return {
+    ...input,
+    // Preserve export compatibility for snapshots generated before per-staff salary.
+    baseSalaryAmount: input.baseSalaryAmount ?? input.salaryRule.configuration.baseSalary,
+  };
 }
 
 async function loadPayslips(jobId: string): Promise<{

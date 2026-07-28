@@ -1,42 +1,224 @@
 "use client";
 
-import type { PayrollExportJobDto, PayrollPeriodDto } from "@ald/contracts";
+import type {
+  PayrollDailyRowDto,
+  PayrollExportJobDto,
+  PayrollPeriodDto,
+  PayrollWorksheetValues,
+} from "@ald/contracts";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import {
+  durationInputError,
+  isDurationInputDraft,
+  parseDurationMinutes,
+} from "./attendance-duration";
+
 type BranchOption = Readonly<{ id: string; code: string; name: string }>;
+type DayOverride = PayrollWorksheetValues["days"][number];
+type DayField = Exclude<keyof DayOverride, "businessDate">;
+type ComponentField = keyof PayrollWorksheetValues["components"];
+
+const emptyWorksheet = (): PayrollWorksheetValues => ({ days: [], components: {} });
 
 const statusLabels = {
-  DRAFT: "Nháp",
-  CALCULATED: "Đã tính",
-  REVIEWED: "Đã review",
-  LOCKED: "Đã khóa",
-  PUBLISHED: "Đã publish",
+  DRAFT: "Đang làm",
+  CALCULATED: "Đã lưu",
+  REVIEWED: "Đã lưu",
+  LOCKED: "Đã gửi",
+  PUBLISHED: "Đã gửi",
 } as const;
 
-const lineLabels = {
-  BASE_SALARY: "Lương cơ bản",
-  PRORATED_SALARY: "Lương theo công",
-  DAILY_REVENUE_BONUS: "Thưởng ngày",
-  MONTHLY_REVENUE_BONUS: "Thưởng tháng",
-  ATTENDANCE_BONUS: "Chuyên cần",
-  ACHIEVEMENT_BONUS: "Thành tích",
-  LEVEL_BONUS: "Level",
-  OVERTIME_PAY: "Tăng ca",
-  OTHER_BONUS: "Thưởng / điều chỉnh",
-  PENALTY: "Phạt",
-  ADVANCE: "Tạm ứng",
-  TOTAL_INCOME: "Thực nhận",
+const transitionLabels = {
+  NONE: "Chưa xác định",
+  RETAIN: "Giữ bậc",
+  JUMP: "Tăng bậc",
+  DOWN: "Giảm bậc",
 } as const;
+
+const previousCoinSourceLabels = {
+  PUBLISHED_PAYROLL: "Phiếu lương đã gửi tháng trước",
+  ATTENDANCE_LIVE: "Tự động từ Chấm công & Live",
+  MANUAL_BASELINE: "Nhập thủ công",
+  NONE: "Chưa có dữ liệu",
+} as const;
+
+const componentRows: readonly Readonly<{
+  key: ComponentField;
+  label: string;
+  subtract?: boolean;
+  signed?: boolean;
+}>[] = [
+  { key: "proratedSalary", label: "Lương theo công" },
+  { key: "dailyRevenueBonus", label: "Thưởng xu theo ngày" },
+  { key: "monthlyRevenueBonus", label: "Thưởng xu tháng (dữ liệu cũ)" },
+  { key: "attendanceBonus", label: "Thưởng chuyên cần" },
+  { key: "achievementBonus", label: "Thưởng thành tích" },
+  { key: "retainLevelBonus", label: "Thưởng giữ bậc" },
+  { key: "jumpLevelBonus", label: "Thưởng nhảy bậc" },
+  { key: "overtimePay", label: "Tiền tăng ca" },
+  { key: "otherBonus", label: "Thưởng khác", signed: true },
+  { key: "penalties", label: "Tiền phạt", subtract: true },
+  { key: "advance", label: "Tạm ứng", subtract: true },
+] as const;
 
 function currentMonth(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function money(value: string | null): string {
-  return value === null
-    ? "Ẩn theo chính sách"
-    : `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} ₫`;
+function money(value: string | bigint | null): string {
+  if (value === null) return "Chưa có";
+  return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} ₫`;
+}
+
+function coins(value: string | bigint | null | undefined): string {
+  if (value === null || value === undefined) return "Chưa có";
+  return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} xu`;
+}
+
+function safeBigInt(value: string | undefined): bigint {
+  return value && /^-?\d+$/.test(value) ? BigInt(value) : 0n;
+}
+
+function formatDuration(minutes: number): string {
+  const safe = Number.isFinite(minutes) && minutes >= 0 ? Math.trunc(minutes) : 0;
+  return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
+}
+
+function formatDate(value: string): string {
+  return `${value.slice(8, 10)}/${value.slice(5, 7)}/${value.slice(0, 4)}`;
+}
+
+function formatOptionalDate(value: string | null): string {
+  return value ? formatDate(value) : "Chưa cập nhật";
+}
+
+function weekday(value: string): string {
+  const date = new Date(`${value}T12:00:00+07:00`);
+  return new Intl.DateTimeFormat("vi-VN", {
+    weekday: "short",
+    timeZone: "Asia/Ho_Chi_Minh",
+  }).format(date);
+}
+
+function own(object: object | undefined, key: PropertyKey): boolean {
+  return object ? Object.prototype.hasOwnProperty.call(object, key) : false;
+}
+
+function PayrollDurationInput({
+  ariaLabel,
+  className,
+  disabled,
+  minutes,
+  onCommit,
+}: Readonly<{
+  ariaLabel: string;
+  className: string;
+  disabled: boolean;
+  minutes: number;
+  onCommit: (minutes: number) => void;
+}>) {
+  const formatted = formatDuration(minutes);
+  const [draft, setDraft] = useState(formatted);
+  const error = durationInputError(draft);
+
+  function commit() {
+    const parsed = parseDurationMinutes(draft);
+    if (parsed === null) {
+      setDraft(formatted);
+      return;
+    }
+    setDraft(formatDuration(parsed));
+    if (parsed !== minutes) onCommit(parsed);
+  }
+
+  return (
+    <input
+      aria-invalid={error ? "true" : undefined}
+      aria-label={ariaLabel}
+      className={className}
+      disabled={disabled}
+      inputMode="numeric"
+      maxLength={5}
+      onBlur={commit}
+      onChange={(event) => {
+        if (isDurationInputDraft(event.target.value)) setDraft(event.target.value);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDraft(formatted);
+          event.currentTarget.blur();
+        }
+      }}
+      pattern="\d{1,2}:[0-5]\d"
+      placeholder="HH:mm"
+      title={error ?? "Nhập thời lượng HH:mm, ví dụ 02:30"}
+      type="text"
+      value={draft}
+    />
+  );
+}
+
+function dayOverride(
+  values: PayrollWorksheetValues,
+  businessDate: string,
+): DayOverride | undefined {
+  return values.days.find((day) => day.businessDate === businessDate);
+}
+
+function displayedDayValue(
+  row: PayrollDailyRowDto,
+  values: PayrollWorksheetValues,
+  field: DayField,
+): unknown {
+  const local = dayOverride(values, row.businessDate);
+  if (own(local, field)) return local?.[field];
+  if (row.overriddenFields.includes(field)) return row.source[field];
+  return row[field];
+}
+
+function roundRational(
+  numerator: bigint,
+  denominator: bigint,
+  mode: "HALF_UP" | "HALF_EVEN" | "FLOOR" | "CEILING",
+): bigint {
+  if (denominator <= 0n || numerator < 0n) return 0n;
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  if (remainder === 0n || mode === "FLOOR") return quotient;
+  if (mode === "CEILING") return quotient + 1n;
+  const doubled = remainder * 2n;
+  if (doubled > denominator) return quotient + 1n;
+  if (doubled < denominator) return quotient;
+  return mode === "HALF_UP" || quotient % 2n !== 0n ? quotient + 1n : quotient;
+}
+
+function roundMoney(
+  numerator: bigint,
+  denominator: bigint,
+  unit: number,
+  mode: "HALF_UP" | "HALF_EVEN" | "FLOOR" | "CEILING",
+): bigint {
+  const scale = BigInt(unit);
+  return roundRational(numerator, denominator * scale, mode) * scale;
+}
+
+function decimalParts(values: readonly string[]): Readonly<{ numerator: bigint; scale: bigint }> {
+  let scale = 1n;
+  const parsed = values.map((value) => {
+    const [, integer = "0", fraction = ""] = /^(\d+)(?:\.(\d+))?$/.exec(value) ?? [];
+    const itemScale = 10n ** BigInt(fraction.length);
+    if (itemScale > scale) scale = itemScale;
+    return { numerator: BigInt(`${integer}${fraction}`), scale: itemScale };
+  });
+  return {
+    numerator: parsed.reduce((total, item) => total + item.numerator * (scale / item.scale), 0n),
+    scale,
+  };
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -48,178 +230,340 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
-  const payload = (await response.json()) as {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const responseBody = await response.text();
+  if (!contentType.includes("application/json")) {
+    const error = new Error(
+      response.status === 404
+        ? "API Payroll chưa được nạp trên máy local. Hãy khởi động lại lệnh pnpm dev rồi tải lại trang."
+        : `Máy chủ trả về phản hồi không hợp lệ (HTTP ${response.status}).`,
+    );
+    error.name = response.status === 409 ? "CONFLICT" : "API_ERROR";
+    throw error;
+  }
+  let payload: {
     data?: T;
     error?: { message?: string };
   };
+  try {
+    payload = JSON.parse(responseBody) as typeof payload;
+  } catch {
+    const error = new Error(`API Payroll trả về JSON không hợp lệ (HTTP ${response.status}).`);
+    error.name = "API_ERROR";
+    throw error;
+  }
   if (!response.ok || payload.data === undefined) {
-    throw new Error(payload.error?.message ?? "Không thể tải dữ liệu payroll.");
+    const error = new Error(payload.error?.message ?? "Không thể tải dữ liệu Payroll.");
+    error.name = response.status === 409 ? "CONFLICT" : "API_ERROR";
+    throw error;
   }
   return payload.data;
 }
 
+function CellShell({
+  children,
+  overridden,
+  onReset,
+}: Readonly<{ children: ReactNode; overridden: boolean; onReset: () => void }>) {
+  return (
+    <div className={`relative min-w-0 ${overridden ? "rounded bg-amber-50 p-0.5" : ""}`}>
+      {children}
+      {overridden ? (
+        <button
+          aria-label="Dùng lại giá trị tự tính"
+          className="absolute -right-1 -top-2 z-10 rounded-full border border-amber-300 bg-white px-1 text-[10px] text-amber-800 shadow-sm"
+          onClick={onReset}
+          title="Dùng lại giá trị tự tính"
+          type="button"
+        >
+          ↺
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function fieldClass(overridden: boolean, width: string): string {
+  return `${width} rounded border px-2 py-1.5 text-xs outline-none focus:border-sky-500 ${
+    overridden ? "border-amber-300 bg-amber-50" : "border-slate-300 bg-white"
+  }`;
+}
+
 export function PayrollWorkspace({
   branches,
-  isGeneralManager,
+  canManagePayroll,
 }: Readonly<{
   branches: readonly BranchOption[];
-  isGeneralManager: boolean;
+  canManagePayroll: boolean;
 }>) {
   const [month, setMonth] = useState(currentMonth);
   const [branchId, setBranchId] = useState(branches[0]?.id ?? "");
-  const [periods, setPeriods] = useState<readonly PayrollPeriodDto[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [period, setPeriod] = useState<PayrollPeriodDto | null>(null);
+  const [selectedStaffId, setSelectedStaffId] = useState("ALL");
+  const [employeeSearch, setEmployeeSearch] = useState("");
+  const [worksheet, setWorksheet] = useState<PayrollWorksheetValues>(emptyWorksheet);
+  const [standardDaysOff, setStandardDaysOff] = useState("");
+  const [reason, setReason] = useState("Cập nhật bảng lương");
   const [jobs, setJobs] = useState<readonly PayrollExportJobDto[]>([]);
-  const [reason, setReason] = useState("Xử lý kỳ lương theo quy trình");
-  const [adjustmentAmount, setAdjustmentAmount] = useState("0");
-  const [adjustmentType, setAdjustmentType] = useState<"OTHER_BONUS" | "ADVANCE" | "CORRECTION">(
-    "OTHER_BONUS",
-  );
-  const [adjustmentStaffId, setAdjustmentStaffId] = useState("");
+  const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const selected = useMemo(
-    () => periods.find((period) => period.id === selectedId) ?? periods[0] ?? null,
-    [periods, selectedId],
+  const selectedEntry = useMemo(
+    () => period?.entries.find((entry) => entry.staff.id === selectedStaffId) ?? null,
+    [period, selectedStaffId],
   );
-  const effectiveAdjustmentStaffId = adjustmentStaffId || selected?.entries[0]?.staff.id || "";
 
-  const loadPeriods = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const params = new URLSearchParams();
-      if (month) params.set("month", month);
-      if (isGeneralManager && branchId) params.set("branchId", branchId);
-      const result = await api<readonly PayrollPeriodDto[]>(
-        `/api/payroll/periods?${params.toString()}`,
+  const filteredEntries = useMemo(() => {
+    const query = employeeSearch.trim().toLocaleLowerCase("vi");
+    if (!period || !query) return period?.entries ?? [];
+    return period.entries.filter((entry) =>
+      `${entry.staff.staffCode} ${entry.staff.fullName}`.toLocaleLowerCase("vi").includes(query),
+    );
+  }, [employeeSearch, period]);
+
+  const loadWorkspace = useCallback(
+    async (forceCalculate = false) => {
+      if (!month || (canManagePayroll && !branchId)) {
+        setPeriod(null);
+        return;
+      }
+      setLoading(true);
+      setError(null);
+      setNotice(null);
+      try {
+        if (!canManagePayroll) {
+          const result = await api<readonly PayrollPeriodDto[]>(
+            `/api/payroll/periods?month=${encodeURIComponent(month)}`,
+          );
+          setPeriod(result[0] ?? null);
+          setSelectedStaffId(result[0]?.entries[0]?.staff.id ?? "ALL");
+          return;
+        }
+        let result = await api<PayrollPeriodDto>("/api/payroll/periods/ensure", {
+          method: "POST",
+          body: JSON.stringify({
+            branchId,
+            month,
+            reason: "Mở bảng lương theo tháng và cơ sở",
+          }),
+        });
+        if (forceCalculate || result.entries.length === 0) {
+          result = await api<PayrollPeriodDto>(`/api/payroll/periods/${result.id}/calculate`, {
+            method: "POST",
+            body: JSON.stringify({
+              version: result.version,
+              reason: forceCalculate
+                ? "Đồng bộ lại từ Chấm công & Live"
+                : "Tự động lấy dữ liệu Chấm công & Live",
+            }),
+          });
+        }
+        setPeriod(result);
+        setSelectedStaffId((current) =>
+          current === "ALL" || result.entries.some((entry) => entry.staff.id === current)
+            ? current
+            : "ALL",
+        );
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : "Không thể mở kỳ lương.";
+        setError(
+          /salary rule|SALARY_RULES/i.test(message)
+            ? "Chưa có Quy định lương áp dụng cho tháng này. Hãy vào menu Quy định → Quy định lương để thiết lập."
+            : message,
+        );
+        try {
+          const result = await api<readonly PayrollPeriodDto[]>(
+            `/api/payroll/periods?branchId=${encodeURIComponent(branchId)}&month=${encodeURIComponent(month)}`,
+          );
+          setPeriod(result[0] ?? null);
+        } catch {
+          setPeriod(null);
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [branchId, canManagePayroll, month],
+  );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadWorkspace(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadWorkspace]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (!selectedEntry) {
+        setWorksheet(emptyWorksheet());
+        return;
+      }
+      setWorksheet(selectedEntry.worksheetOverride?.values ?? emptyWorksheet());
+      setStandardDaysOff(
+        String(
+          period?.standardDaysOff.overrideValue ??
+            period?.standardDaysOff.appliedValue ??
+            period?.standardDaysOff.ruleValue ??
+            "",
+        ),
       );
-      setPeriods(result);
-      setSelectedId((current) =>
-        current && result.some((period) => period.id === current)
-          ? current
-          : (result[0]?.id ?? null),
-      );
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể tải kỳ lương.");
-      setPeriods([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [branchId, isGeneralManager, month]);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [period, selectedEntry]);
 
   const loadJobs = useCallback(async (periodId: string) => {
     try {
-      const result = await api<readonly PayrollExportJobDto[]>(
-        `/api/payroll/periods/${periodId}/exports`,
+      setJobs(
+        await api<readonly PayrollExportJobDto[]>(`/api/payroll/periods/${periodId}/exports`),
       );
-      setJobs(result);
     } catch {
       setJobs([]);
     }
   }, []);
 
   useEffect(() => {
-    const timeout = window.setTimeout(() => void loadPeriods(), 0);
-    return () => window.clearTimeout(timeout);
-  }, [loadPeriods]);
-
-  useEffect(() => {
-    if (!selected?.id) return;
-    const timeout = window.setTimeout(() => void loadJobs(selected.id), 0);
-    return () => window.clearTimeout(timeout);
-  }, [loadJobs, selected?.id]);
+    if (!period?.id) return;
+    const timer = window.setTimeout(() => void loadJobs(period.id), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadJobs, period?.id]);
 
   useEffect(() => {
     if (
-      !selected?.id ||
+      !period?.id ||
       !jobs.some((job) => job.status === "QUEUED" || job.status === "PROCESSING")
     ) {
       return;
     }
-    const timer = window.setInterval(() => void loadJobs(selected.id), 1_500);
+    const timer = window.setInterval(() => void loadJobs(period.id), 1_500);
     return () => window.clearInterval(timer);
-  }, [jobs, loadJobs, selected?.id]);
+  }, [jobs, loadJobs, period?.id]);
 
-  async function createPeriod(): Promise<void> {
-    if (!branchId) return;
+  function updateDay<K extends DayField>(
+    businessDate: string,
+    field: K,
+    value: DayOverride[K] | undefined,
+  ): void {
+    setWorksheet((current) => {
+      const existing = dayOverride(current, businessDate) ?? { businessDate };
+      const mutable = { ...existing } as Record<string, unknown>;
+      if (value === undefined) delete mutable[field];
+      else mutable[field] = value;
+      const next = mutable as DayOverride;
+      const hasValues = Object.keys(next).some((key) => key !== "businessDate");
+      return {
+        ...current,
+        days: [
+          ...current.days.filter((day) => day.businessDate !== businessDate),
+          ...(hasValues ? [next] : []),
+        ].sort((left, right) => left.businessDate.localeCompare(right.businessDate)),
+      };
+    });
+  }
+
+  function updateComponent(field: ComponentField, value: string | undefined): void {
+    setWorksheet((current) => {
+      const components = { ...current.components };
+      if (value === undefined) delete components[field];
+      else components[field] = value;
+      return { ...current, components };
+    });
+  }
+
+  function updateTopLevel(
+    field:
+      | "baseSalaryAmount"
+      | "previousMonthCoins"
+      | "previousLevelCode"
+      | "currentLevelCode"
+      | "currentLevelName",
+    value: string | null | undefined,
+  ): void {
+    setWorksheet((current) => {
+      const next = { ...current } as Record<string, unknown>;
+      if (value === undefined || (field === "baseSalaryAmount" && value === null)) {
+        delete next[field];
+      } else {
+        next[field] = value;
+      }
+      return next as PayrollWorksheetValues;
+    });
+  }
+
+  async function saveWorksheet(values = worksheet): Promise<void> {
+    if (!period || !selectedEntry) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      const created = await api<PayrollPeriodDto>("/api/payroll/periods", {
-        method: "POST",
-        body: JSON.stringify({ branchId, month, reason }),
+      const result = await api<PayrollPeriodDto>(`/api/payroll/periods/${period.id}/worksheet`, {
+        method: "PUT",
+        body: JSON.stringify({
+          staffId: selectedEntry.staff.id,
+          periodVersion: period.version,
+          overrideVersion: selectedEntry.worksheetOverride?.version ?? null,
+          standardDaysOffOverride: standardDaysOff.trim() === "" ? null : Number(standardDaysOff),
+          values,
+          reason,
+        }),
       });
-      await loadPeriods();
-      setSelectedId(created.id);
+      setPeriod(result);
+      setSelectedStaffId(selectedEntry.staff.id);
+      setNotice("Đã lưu và tính lại bảng lương.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể tạo kỳ lương.");
+      const message = caught instanceof Error ? caught.message : "Không thể lưu bảng lương.";
+      setError(
+        caught instanceof Error && caught.name === "CONFLICT"
+          ? `${message} Dữ liệu trên màn hình chưa bị mất; hãy tải lại trước khi lưu tiếp.`
+          : message,
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  async function periodAction(action: "calculate" | "review" | "lock" | "publish"): Promise<void> {
-    if (!selected) return;
+  async function syncAttendance(): Promise<void> {
+    if (!period || !selectedEntry) {
+      await loadWorkspace(true);
+      return;
+    }
+    if (period.status === "LOCKED" || period.status === "PUBLISHED") {
+      await saveWorksheet(worksheet);
+      return;
+    }
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      const updated = await api<PayrollPeriodDto>(`/api/payroll/periods/${selected.id}/${action}`, {
+      const result = await api<PayrollPeriodDto>(`/api/payroll/periods/${period.id}/calculate`, {
         method: "POST",
-        body: JSON.stringify({ version: selected.version, reason }),
+        body: JSON.stringify({
+          version: period.version,
+          reason: "Đồng bộ lại từ Chấm công & Live, giữ nguyên các ô đã chỉnh",
+        }),
       });
-      setPeriods((current) =>
-        current.map((period) => (period.id === updated.id ? updated : period)),
-      );
+      setPeriod(result);
+      setNotice("Đã đồng bộ dữ liệu nguồn và giữ nguyên các ô đã chỉnh.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể chuyển trạng thái.");
+      setError(caught instanceof Error ? caught.message : "Không thể đồng bộ dữ liệu nguồn.");
     } finally {
       setBusy(false);
     }
   }
 
-  async function createRevision(): Promise<void> {
-    if (!selected) return;
+  async function sendPayslips(): Promise<void> {
+    if (!period) return;
     setBusy(true);
     setError(null);
     try {
-      const revision = await api<PayrollPeriodDto>(
-        `/api/payroll/periods/${selected.id}/revisions`,
-        { method: "POST", body: JSON.stringify({ reason }) },
-      );
-      await loadPeriods();
-      setSelectedId(revision.id);
+      const result = await api<PayrollPeriodDto>(`/api/payroll/periods/${period.id}/send`, {
+        method: "POST",
+        body: JSON.stringify({ version: period.version, reason }),
+      });
+      setPeriod(result);
+      setNotice("Đã gửi phiếu lương mới nhất cho nhân viên.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể tạo revision.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addAdjustment(): Promise<void> {
-    if (!selected || !effectiveAdjustmentStaffId) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const updated = await api<PayrollPeriodDto>(
-        `/api/payroll/periods/${selected.id}/adjustments`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            staffId: effectiveAdjustmentStaffId,
-            type: adjustmentType,
-            amount: adjustmentAmount,
-            reason,
-            periodVersion: selected.version,
-          }),
-        },
-      );
-      await loadPeriods();
-      setSelectedId(updated.id);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể tạo adjustment.");
+      setError(caught instanceof Error ? caught.message : "Không thể gửi phiếu lương.");
     } finally {
       setBusy(false);
     }
@@ -229,17 +573,18 @@ export function PayrollWorkspace({
     kind: "PAYSLIP_XLSX" | "PAYSLIP_PDF" | "BULK_ZIP",
     staffId?: string,
   ): Promise<void> {
-    if (!selected) return;
+    if (!period) return;
     setBusy(true);
     setError(null);
     try {
-      await api<PayrollExportJobDto>(`/api/payroll/periods/${selected.id}/exports`, {
+      await api<PayrollExportJobDto>(`/api/payroll/periods/${period.id}/exports`, {
         method: "POST",
         body: JSON.stringify({ kind, staffId: staffId ?? null, reason }),
       });
-      await loadJobs(selected.id);
+      await loadJobs(period.id);
+      setNotice("Đã đưa file vào hàng đợi xuất dữ liệu.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể tạo export.");
+      setError(caught instanceof Error ? caught.message : "Không thể tạo file.");
     } finally {
       setBusy(false);
     }
@@ -254,292 +599,281 @@ export function PayrollWorkspace({
     }
   }
 
+  const editableRows = selectedEntry?.dailyRows ?? [];
+  const workUnits = decimalParts(
+    editableRows.map((row) => String(displayedDayValue(row, worksheet, "workUnits") ?? "0")),
+  );
+  const overtimeMinutes = editableRows.reduce(
+    (total, row) => total + Number(displayedDayValue(row, worksheet, "overtimeMinutes") ?? 0),
+    0,
+  );
+  const totalCoins = editableRows.reduce(
+    (total, row) =>
+      total + safeBigInt(String(displayedDayValue(row, worksheet, "revenueAmount") ?? "0")),
+    0n,
+  );
+  const dailyBonusFromRows = editableRows.reduce(
+    (total, row) =>
+      total + safeBigInt(String(displayedDayValue(row, worksheet, "dailyRevenueBonus") ?? "0")),
+    0n,
+  );
+  const penaltiesFromRows = editableRows.reduce(
+    (total, row) =>
+      total + safeBigInt(String(displayedDayValue(row, worksheet, "penalties") ?? "0")),
+    0n,
+  );
+
+  function calculatedComponent(field: ComponentField): string {
+    if (!selectedEntry || !period) return "0";
+    if (field === "dailyRevenueBonus") return dailyBonusFromRows.toString();
+    if (field === "penalties") return penaltiesFromRows.toString();
+    if (field === "proratedSalary") return selectedEntry.calculatedComponents.proratedSalary;
+    const policy = period.salaryPolicy;
+    const payableDays =
+      standardDaysOff.trim() === ""
+        ? period.standardDaysOff.standardPayableDays
+        : period.standardDaysOff.daysInMonth - Number(standardDaysOff);
+    const baseSalary = safeBigInt(worksheet.baseSalaryAmount ?? selectedEntry.sourceBaseSalary);
+    if (
+      field === "overtimePay" &&
+      payableDays &&
+      payableDays > 0 &&
+      policy.standardDailyMinutes &&
+      policy.overtimeMultiplierBps !== null &&
+      policy.roundingUnit &&
+      policy.roundingMode &&
+      policy.roundingApplyAt === "COMPONENT"
+    ) {
+      return roundMoney(
+        baseSalary * BigInt(overtimeMinutes) * BigInt(policy.overtimeMultiplierBps),
+        BigInt(payableDays) * BigInt(policy.standardDailyMinutes) * 10_000n,
+        policy.roundingUnit,
+        policy.roundingMode,
+      ).toString();
+    }
+    return selectedEntry.calculatedComponents[field];
+  }
+
+  function effectiveComponent(field: ComponentField): string {
+    return own(worksheet.components, field)
+      ? (worksheet.components[field] ?? "0")
+      : calculatedComponent(field);
+  }
+
+  const previewTotal = componentRows.reduce((total, row) => {
+    const value = safeBigInt(effectiveComponent(row.key));
+    return row.subtract ? total - value : total + value;
+  }, 0n);
+
+  const originalWorksheet = selectedEntry?.worksheetOverride?.values ?? emptyWorksheet();
+  const dirty =
+    selectedEntry !== null &&
+    (JSON.stringify(worksheet) !== JSON.stringify(originalWorksheet) ||
+      standardDaysOff !==
+        String(
+          period?.standardDaysOff.overrideValue ??
+            period?.standardDaysOff.appliedValue ??
+            period?.standardDaysOff.ruleValue ??
+            "",
+        ));
+
   return (
-    <section className="mt-8 rounded-2xl border border-slate-200 bg-white p-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+    <section className="mt-6 min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 [overflow-wrap:anywhere]">
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-sky-700">
-            Payroll ledger
+            Bảng chấm lương
           </p>
-          <h2 className="mt-1 text-xl font-semibold">
-            {isGeneralManager ? "Review, khóa và publish lương" : "Phiếu lương của tôi"}
+          <h2 className="mt-1 break-words text-xl font-semibold text-slate-950">
+            {canManagePayroll ? "Kỳ lương theo tháng" : "Phiếu lương của tôi"}
           </h2>
-          <p className="mt-1 text-sm text-slate-600">
-            Snapshot bất biến · tiền VND nguyên · revision có audit
+          <p className="mt-1 break-words text-sm text-slate-600">
+            Dữ liệu lấy từ Chấm công & Live; ô màu vàng là giá trị đã sửa riêng trong Payroll.
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {isGeneralManager ? (
+        {period ? (
+          <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-800">
+            {statusLabels[period.status]}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="mt-5 grid min-w-0 gap-3 lg:grid-cols-[180px_260px_minmax(280px,1fr)]">
+        <label className="min-w-0 text-xs font-medium text-slate-700">
+          1. Kỳ lương
+          <input
+            className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            onChange={(event) => {
+              setMonth(event.target.value);
+              setSelectedStaffId("ALL");
+            }}
+            type="month"
+            value={month}
+          />
+        </label>
+        {canManagePayroll ? (
+          <label className="min-w-0 text-xs font-medium text-slate-700">
+            2. Cơ sở
             <select
-              aria-label="Chọn cơ sở payroll"
-              className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-              onChange={(event) => setBranchId(event.target.value)}
+              className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
+              disabled={!month}
+              onChange={(event) => {
+                setBranchId(event.target.value);
+                setSelectedStaffId("ALL");
+              }}
               value={branchId}
             >
+              <option value="">Chọn cơ sở</option>
               {branches.map((branch) => (
                 <option key={branch.id} value={branch.id}>
                   {branch.code} — {branch.name}
                 </option>
               ))}
             </select>
-          ) : null}
-          <input
-            aria-label="Tháng payroll"
-            className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-            onChange={(event) => setMonth(event.target.value)}
-            type="month"
-            value={month}
-          />
-          {isGeneralManager ? (
-            <button
-              className="rounded-lg bg-sky-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-              disabled={busy || !branchId}
-              onClick={() => void createPeriod()}
-              type="button"
-            >
-              Tạo kỳ
-            </button>
-          ) : null}
-        </div>
+          </label>
+        ) : null}
+        {canManagePayroll ? (
+          <label className="min-w-0 text-xs font-medium text-slate-700">
+            3. Nhân viên
+            <div className="mt-1 flex min-w-0 flex-col gap-2 sm:flex-row">
+              <input
+                aria-label="Tìm nhân viên Payroll"
+                className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                onChange={(event) => setEmployeeSearch(event.target.value)}
+                placeholder="Tìm theo mã hoặc tên"
+                value={employeeSearch}
+              />
+              <select
+                aria-label="Chọn nhân viên Payroll"
+                className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:bg-slate-100"
+                disabled={!period}
+                onChange={(event) => setSelectedStaffId(event.target.value)}
+                value={selectedStaffId}
+              >
+                <option value="ALL">Tất cả nhân viên</option>
+                {filteredEntries.map((entry) => (
+                  <option key={entry.staff.id} value={entry.staff.id}>
+                    {entry.staff.staffCode} — {entry.staff.fullName}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+        ) : null}
       </div>
 
       {error ? (
-        <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-          {error}
-        </div>
-      ) : null}
-      {loading ? <p className="mt-6 text-sm text-slate-500">Đang tải payroll…</p> : null}
-      {!loading && periods.length === 0 && !error ? (
-        <p className="mt-6 rounded-lg bg-slate-50 p-4 text-sm text-slate-500">
-          {isGeneralManager
-            ? "Chưa có kỳ lương cho cơ sở/tháng đã chọn."
-            : "Chưa có phiếu lương đã publish hoặc self-service chưa được bật."}
-        </p>
-      ) : null}
-
-      {periods.length > 0 ? (
-        <div className="mt-5 flex flex-wrap gap-2">
-          {periods.map((period) => (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+          <span className="min-w-0 break-words [overflow-wrap:anywhere]">{error}</span>
+          {/Quy định lương/.test(error) ? (
+            <a className="font-semibold underline" href="/rules">
+              Mở Quy định lương
+            </a>
+          ) : (
             <button
-              className={`rounded-full border px-3 py-1.5 text-sm ${
-                selected?.id === period.id
-                  ? "border-sky-600 bg-sky-50 text-sky-800"
-                  : "border-slate-200 text-slate-600"
-              }`}
-              key={period.id}
-              onClick={() => setSelectedId(period.id)}
+              className="font-semibold underline"
+              onClick={() => void loadWorkspace()}
               type="button"
             >
-              {period.branch.code} · R{period.revision} · {statusLabels[period.status]}
+              Tải lại
             </button>
-          ))}
+          )}
         </div>
       ) : null}
+      {notice ? (
+        <div className="mt-4 break-words rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 [overflow-wrap:anywhere]">
+          {notice}
+        </div>
+      ) : null}
+      {loading ? <p className="mt-6 text-sm text-slate-500">Đang chuẩn bị bảng lương…</p> : null}
 
-      {selected ? (
-        <>
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            {[
-              ["Nhân viên", String(selected.totals.staffCount)],
-              ["Gross", money(selected.totals.grossIncome)],
-              ["Tiền phạt", money(selected.totals.penalties)],
-              ["Tạm ứng", money(selected.totals.advance)],
-              ["Thực nhận", money(selected.totals.totalIncome)],
-            ].map(([label, value]) => (
-              <div className="rounded-xl border border-slate-200 p-3" key={label}>
-                <div className="text-xs text-slate-500">{label}</div>
-                <div className="mt-1 font-semibold">{value}</div>
-              </div>
-            ))}
-          </div>
-
-          {isGeneralManager ? (
-            <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <label className="block text-xs font-medium text-slate-600" htmlFor="payroll-reason">
-                Lý do mutation / export
-              </label>
-              <input
-                className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                id="payroll-reason"
-                maxLength={500}
-                onChange={(event) => setReason(event.target.value)}
-                value={reason}
-              />
-              <div className="mt-3 flex flex-wrap gap-2">
-                {selected.status === "DRAFT" ||
-                selected.status === "CALCULATED" ||
-                selected.status === "REVIEWED" ? (
-                  <button
-                    className="rounded-lg bg-sky-700 px-3 py-2 text-sm text-white disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void periodAction("calculate")}
-                    type="button"
-                  >
-                    Tính / tính lại
-                  </button>
-                ) : null}
-                {selected.status === "CALCULATED" ? (
-                  <button
-                    className="rounded-lg bg-indigo-700 px-3 py-2 text-sm text-white disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void periodAction("review")}
-                    type="button"
-                  >
-                    Xác nhận review
-                  </button>
-                ) : null}
-                {selected.status === "REVIEWED" ? (
-                  <button
-                    className="rounded-lg bg-amber-600 px-3 py-2 text-sm text-white disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void periodAction("lock")}
-                    type="button"
-                  >
-                    Khóa kỳ
-                  </button>
-                ) : null}
-                {selected.status === "LOCKED" ? (
-                  <button
-                    className="rounded-lg bg-emerald-700 px-3 py-2 text-sm text-white disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void periodAction("publish")}
-                    type="button"
-                  >
-                    Publish payslip
-                  </button>
-                ) : null}
-                {selected.status === "LOCKED" || selected.status === "PUBLISHED" ? (
-                  <button
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void createRevision()}
-                    type="button"
-                  >
-                    Tạo revision
-                  </button>
-                ) : null}
-                {selected.entries.length > 0 ? (
-                  <button
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void requestExport("BULK_ZIP")}
-                    type="button"
-                  >
-                    Export bulk ZIP
-                  </button>
-                ) : null}
-              </div>
-              {selected.entries.length > 0 ? (
-                <div className="mt-4 grid gap-2 md:grid-cols-[1fr_150px_180px_auto]">
-                  <select
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    onChange={(event) => setAdjustmentStaffId(event.target.value)}
-                    value={effectiveAdjustmentStaffId}
-                  >
-                    {selected.entries.map((entry) => (
-                      <option key={entry.staff.id} value={entry.staff.id}>
-                        {entry.staff.staffCode} — {entry.staff.fullName}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    onChange={(event) =>
-                      setAdjustmentType(event.target.value as typeof adjustmentType)
-                    }
-                    value={adjustmentType}
-                  >
-                    <option value="OTHER_BONUS">Thưởng khác</option>
-                    <option value="ADVANCE">Tạm ứng</option>
-                    <option value="CORRECTION">Điều chỉnh</option>
-                  </select>
-                  <input
-                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
-                    inputMode="numeric"
-                    onChange={(event) => setAdjustmentAmount(event.target.value)}
-                    value={adjustmentAmount}
-                  />
-                  <button
-                    className="rounded-lg border border-sky-600 bg-white px-3 py-2 text-sm text-sky-800 disabled:opacity-50"
-                    disabled={busy}
-                    onClick={() => void addAdjustment()}
-                    type="button"
-                  >
-                    Thêm adjustment
-                  </button>
-                </div>
-              ) : null}
+      {!loading && period && selectedStaffId === "ALL" ? (
+        <div className="mt-5">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm text-slate-600">
+              {period.branch.code} — {period.branch.name} · {period.entries.length} nhân viên
             </div>
-          ) : null}
-
-          <div className="mt-5 overflow-x-auto rounded-xl border border-slate-200">
-            <table className="min-w-full text-left text-sm">
-              <thead className="sticky top-0 bg-slate-100 text-xs uppercase tracking-wide text-slate-600">
+            {canManagePayroll && period.entries.length > 0 ? (
+              <div className="flex gap-2">
+                <button
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => void loadWorkspace(true)}
+                  type="button"
+                >
+                  Đồng bộ từ chấm công
+                </button>
+                <button
+                  className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => void requestExport("BULK_ZIP")}
+                  type="button"
+                >
+                  Xuất ZIP
+                </button>
+                <button
+                  className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                  disabled={busy || period.status === "PUBLISHED"}
+                  onClick={() => void sendPayslips()}
+                  type="button"
+                >
+                  Gửi phiếu lương
+                </button>
+              </div>
+            ) : null}
+          </div>
+          <div className="max-h-[58vh] overflow-auto rounded-xl border border-slate-200">
+            <table className="min-w-[1180px] text-left text-sm">
+              <thead className="sticky top-0 z-20 bg-slate-100 text-xs uppercase text-slate-600">
                 <tr>
-                  <th className="sticky left-0 bg-slate-100 px-3 py-3">Nhân viên</th>
-                  <th className="px-3 py-3">Công</th>
-                  <th className="px-3 py-3">OT</th>
-                  <th className="px-3 py-3">Lương công</th>
-                  <th className="px-3 py-3">Thưởng</th>
-                  <th className="px-3 py-3">Phạt</th>
+                  <th className="sticky left-0 z-30 bg-slate-100 px-3 py-3">Nhân viên</th>
+                  <th className="px-3 py-3">Lương cơ bản</th>
+                  <th className="px-3 py-3">Ngày làm việc</th>
+                  <th className="px-3 py-3">Tổng công</th>
+                  <th className="px-3 py-3">Tổng xu</th>
+                  <th className="px-3 py-3">Lương theo công</th>
+                  <th className="px-3 py-3">Tổng thưởng</th>
+                  <th className="px-3 py-3">Tổng phạt</th>
                   <th className="px-3 py-3">Tạm ứng</th>
                   <th className="px-3 py-3">Thực nhận</th>
-                  <th className="px-3 py-3">So lần trước</th>
-                  <th className="px-3 py-3">File</th>
+                  <th className="px-3 py-3">Trạng thái</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {selected.entries.map((entry) => {
+                {period.entries.map((entry) => {
                   const bonus =
-                    BigInt(entry.dailyRevenueBonus) +
-                    BigInt(entry.monthlyRevenueBonus) +
-                    BigInt(entry.attendanceBonus) +
-                    BigInt(entry.achievementBonus) +
-                    BigInt(entry.levelBonus) +
-                    BigInt(entry.overtimePay) +
-                    BigInt(entry.otherBonus);
+                    safeBigInt(entry.dailyRevenueBonus) +
+                    safeBigInt(entry.monthlyRevenueBonus) +
+                    safeBigInt(entry.attendanceBonus) +
+                    safeBigInt(entry.achievementBonus) +
+                    safeBigInt(entry.levelBonus) +
+                    safeBigInt(entry.overtimePay) +
+                    safeBigInt(entry.otherBonus);
                   return (
-                    <tr key={entry.id}>
+                    <tr
+                      className="cursor-pointer hover:bg-sky-50"
+                      key={entry.id}
+                      onClick={() => setSelectedStaffId(entry.staff.id)}
+                    >
                       <td className="sticky left-0 bg-white px-3 py-3">
                         <div className="font-medium">{entry.staff.fullName}</div>
-                        <div className="text-xs text-slate-500">
-                          {entry.staff.staffCode} · calc #{entry.calculationNo}
-                        </div>
-                        {entry.anomalyFlags.length > 0 ? (
-                          <div className="mt-1 text-xs text-amber-700">
-                            {entry.anomalyFlags.join(", ")}
-                          </div>
-                        ) : null}
+                        <div className="text-xs text-slate-500">{entry.staff.staffCode}</div>
                       </td>
+                      <td className="px-3 py-3">{money(entry.baseSalary)}</td>
+                      <td className="px-3 py-3">{entry.workedDayCount} ngày</td>
                       <td className="px-3 py-3">{entry.workUnits}</td>
-                      <td className="px-3 py-3">{entry.overtimeMinutes}′</td>
+                      <td className="px-3 py-3">
+                        {entry.currentMonthCoins === undefined
+                          ? "Đã ẩn"
+                          : coins(entry.currentMonthCoins)}
+                      </td>
                       <td className="px-3 py-3">{money(entry.proratedSalary)}</td>
-                      <td className="px-3 py-3">{money(bonus.toString())}</td>
+                      <td className="px-3 py-3 text-emerald-700">{money(bonus)}</td>
                       <td className="px-3 py-3 text-rose-700">{money(entry.penalties)}</td>
-                      <td className="px-3 py-3 text-rose-700">{money(entry.advance)}</td>
+                      <td className="px-3 py-3">{money(entry.advance)}</td>
                       <td className="px-3 py-3 font-semibold">{money(entry.totalIncome)}</td>
                       <td className="px-3 py-3">
-                        {entry.deltaFromPrevious === null ? "—" : money(entry.deltaFromPrevious)}
-                      </td>
-                      <td className="px-3 py-3">
-                        <div className="flex gap-1">
-                          <button
-                            className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-50"
-                            disabled={busy}
-                            onClick={() => void requestExport("PAYSLIP_XLSX", entry.staff.id)}
-                            type="button"
-                          >
-                            XLSX
-                          </button>
-                          <button
-                            className="rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-50"
-                            disabled={busy}
-                            onClick={() => void requestExport("PAYSLIP_PDF", entry.staff.id)}
-                            type="button"
-                          >
-                            PDF
-                          </button>
-                        </div>
+                        {entry.worksheetOverride ? "Đã lưu chỉnh sửa" : "Theo dữ liệu gốc"}
                       </td>
                     </tr>
                   );
@@ -547,93 +881,579 @@ export function PayrollWorkspace({
               </tbody>
             </table>
           </div>
+        </div>
+      ) : null}
 
-          {selected.entries.map((entry) => (
-            <details className="mt-3 rounded-xl border border-slate-200 p-4" key={entry.id}>
-              <summary className="cursor-pointer font-medium">
-                Breakdown · {entry.staff.staffCode} — {entry.staff.fullName}
-              </summary>
-              <div className="mt-3 grid gap-4 lg:grid-cols-2">
-                <div>
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Dòng tính
-                  </h3>
-                  <ul className="mt-2 divide-y divide-slate-100 text-sm">
-                    {entry.lines.map((line) => (
-                      <li className="flex justify-between gap-4 py-2" key={line.id}>
-                        <span>
-                          {lineLabels[line.type]} · {line.label}
-                        </span>
-                        <span
-                          className={
-                            line.type === "PENALTY" || line.type === "ADVANCE"
-                              ? "text-rose-700"
-                              : ""
-                          }
-                        >
-                          {money(line.amount)}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <div>
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Ngày công
-                  </h3>
-                  <ul className="mt-2 divide-y divide-slate-100 text-sm">
-                    {entry.dailyRows.map((row) => (
-                      <li
-                        className="grid grid-cols-[90px_1fr_auto] gap-2 py-2"
-                        key={row.businessDate}
-                      >
-                        <span>
-                          {row.businessDate.slice(8, 10)}/{row.businessDate.slice(5, 7)}
-                        </span>
-                        <span>
-                          {row.workUnits} công · OT {row.overtimeMinutes}′
-                        </span>
-                        <span>{money(row.dailyRevenueBonus)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+      {!loading && selectedEntry && period ? (
+        <div className="mt-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-3">
+            <div>
+              <div className="font-semibold text-slate-950">
+                {selectedEntry.staff.staffCode} — {selectedEntry.staff.fullName}
               </div>
-            </details>
-          ))}
-
-          {jobs.length > 0 ? (
-            <div className="mt-5">
-              <h3 className="text-sm font-semibold">Export jobs</h3>
-              <ul className="mt-2 divide-y divide-slate-100 rounded-xl border border-slate-200 px-4">
-                {jobs.map((job) => (
-                  <li
-                    className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
-                    key={job.id}
+              <div className="text-xs text-slate-500">
+                {period.branch.name} · kỳ {period.month.slice(5, 7)}/{period.month.slice(0, 4)}
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {canManagePayroll ? (
+                <>
+                  <button
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
+                    disabled={busy}
+                    onClick={() => void syncAttendance()}
+                    type="button"
                   >
-                    <span>
-                      {job.kind} · {job.status} · {job.progress}%
-                      {job.errorMessage ? ` · ${job.errorMessage}` : ""}
-                    </span>
-                    {job.status === "COMPLETED" ? (
-                      <button
-                        className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs text-white"
-                        onClick={() => void download(job.id)}
-                        type="button"
-                      >
-                        Tải {job.fileName}
-                      </button>
-                    ) : (
-                      <div className="h-2 w-36 overflow-hidden rounded-full bg-slate-100">
-                        <div className="h-full bg-sky-600" style={{ width: `${job.progress}%` }} />
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ul>
+                    Đồng bộ từ chấm công
+                  </button>
+                  <button
+                    className="rounded-lg bg-sky-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    disabled={busy || !dirty || reason.trim().length < 3}
+                    onClick={() => void saveWorksheet()}
+                    type="button"
+                  >
+                    {busy ? "Đang lưu…" : "Lưu thay đổi"}
+                  </button>
+                  <button
+                    className="rounded-lg bg-emerald-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    disabled={busy || dirty || period.status === "PUBLISHED"}
+                    onClick={() => void sendPayslips()}
+                    type="button"
+                  >
+                    Gửi phiếu lương
+                  </button>
+                </>
+              ) : null}
+              <button
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
+                disabled={busy}
+                onClick={() => void requestExport("PAYSLIP_XLSX", selectedEntry.staff.id)}
+                type="button"
+              >
+                XLSX
+              </button>
+              <button
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
+                disabled={busy}
+                onClick={() => void requestExport("PAYSLIP_PDF", selectedEntry.staff.id)}
+                type="button"
+              >
+                PDF
+              </button>
+            </div>
+          </div>
+
+          {canManagePayroll ? (
+            <div className="mt-3 grid gap-3 lg:grid-cols-[180px_230px_minmax(300px,1fr)]">
+              <label className="text-xs font-medium text-slate-700">
+                Ngày nghỉ chuẩn / tháng
+                <input
+                  className={`mt-1 block w-full rounded-lg border px-3 py-2 text-sm ${
+                    period.standardDaysOff.overrideValue !== null
+                      ? "border-amber-300 bg-amber-50"
+                      : "border-slate-300"
+                  }`}
+                  max={30}
+                  min={0}
+                  onChange={(event) => setStandardDaysOff(event.target.value)}
+                  type="number"
+                  value={standardDaysOff}
+                />
+                <span className="mt-1 block font-normal text-slate-500">
+                  Rule: {period.standardDaysOff.ruleValue ?? "chưa có"} · đang áp dụng:{" "}
+                  {standardDaysOff || "chưa có"}
+                </span>
+              </label>
+              <label className="text-xs font-medium text-slate-700">
+                Số ngày công chuẩn
+                <input
+                  className="mt-1 block w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm"
+                  readOnly
+                  value={
+                    standardDaysOff === ""
+                      ? (period.standardDaysOff.standardPayableDays ?? "")
+                      : period.standardDaysOff.daysInMonth - Number(standardDaysOff)
+                  }
+                />
+                <span className="mt-1 block font-normal text-slate-500">
+                  {period.standardDaysOff.daysInMonth} ngày trong tháng − ngày nghỉ
+                </span>
+              </label>
+              <label className="text-xs font-medium text-slate-700">
+                Lý do sửa
+                <input
+                  className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                  maxLength={500}
+                  onChange={(event) => setReason(event.target.value)}
+                  value={reason}
+                />
+              </label>
             </div>
           ) : null}
-        </>
+
+          <div className="mt-4 max-h-[52vh] overflow-auto rounded-xl border border-slate-200">
+            <table className="min-w-[1940px] text-left text-xs">
+              <thead className="sticky top-0 z-30 bg-slate-100 text-[11px] uppercase text-slate-600">
+                <tr>
+                  <th className="sticky left-0 z-40 w-[100px] bg-slate-100 px-2 py-3">Ngày</th>
+                  <th className="sticky left-[100px] z-40 w-[72px] bg-slate-100 px-2 py-3">Thứ</th>
+                  <th className="px-2 py-3">Trạng thái</th>
+                  <th className="px-2 py-3">Check-in</th>
+                  <th className="px-2 py-3">Check-out</th>
+                  <th className="px-2 py-3">Thời lượng Live</th>
+                  <th className="px-2 py-3">Thời lượng tăng ca</th>
+                  <th className="px-2 py-3">Tổng công</th>
+                  <th className="px-2 py-3">Doanh số (xu)</th>
+                  <th className="px-2 py-3">Mốc xu</th>
+                  <th className="px-2 py-3">Tiền thưởng</th>
+                  <th className="px-2 py-3">Phân loại lỗi</th>
+                  <th className="px-2 py-3">Chi tiết lỗi</th>
+                  <th className="px-2 py-3">Tiền phạt</th>
+                  <th className="px-2 py-3">Ghi chú</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {editableRows.map((row) => {
+                  const local = dayOverride(worksheet, row.businessDate);
+                  const value = (field: DayField) => displayedDayValue(row, worksheet, field);
+                  const reset = (field: DayField) => updateDay(row.businessDate, field, undefined);
+                  const isOverridden = (field: DayField) => own(local, field);
+                  return (
+                    <tr className="align-top" key={row.businessDate}>
+                      <td className="sticky left-0 z-20 w-[100px] bg-white px-2 py-2 font-semibold">
+                        {formatDate(row.businessDate)}
+                      </td>
+                      <td className="sticky left-[100px] z-20 w-[72px] bg-white px-2 py-2">
+                        {weekday(row.businessDate)}
+                      </td>
+                      <td className="px-2 py-2">
+                        <CellShell
+                          onReset={() => reset("status")}
+                          overridden={isOverridden("status")}
+                        >
+                          <select
+                            className={fieldClass(isOverridden("status"), "w-[100px]")}
+                            disabled={!canManagePayroll}
+                            onChange={(event) =>
+                              updateDay(
+                                row.businessDate,
+                                "status",
+                                event.target.value as DayOverride["status"],
+                              )
+                            }
+                            value={String(value("status") ?? "DRAFT")}
+                          >
+                            <option value="DRAFT">Nháp</option>
+                            <option value="PRESENT">Có mặt</option>
+                            <option value="ABSENT">Vắng</option>
+                            <option value="LEAVE">Nghỉ phép</option>
+                          </select>
+                        </CellShell>
+                      </td>
+                      {(["checkInTime", "checkOutTime"] as const).map((field) => (
+                        <td className="px-2 py-2" key={field}>
+                          <CellShell onReset={() => reset(field)} overridden={isOverridden(field)}>
+                            <input
+                              className={fieldClass(isOverridden(field), "w-[94px]")}
+                              disabled={!canManagePayroll}
+                              onChange={(event) =>
+                                updateDay(
+                                  row.businessDate,
+                                  field,
+                                  event.target.value === "" ? null : event.target.value,
+                                )
+                              }
+                              type="time"
+                              value={String(value(field) ?? "")}
+                            />
+                          </CellShell>
+                        </td>
+                      ))}
+                      {(["actualLiveMinutes", "overtimeMinutes"] as const).map((field) => (
+                        <td className="px-2 py-2" key={field}>
+                          <CellShell onReset={() => reset(field)} overridden={isOverridden(field)}>
+                            <PayrollDurationInput
+                              ariaLabel={`${field === "actualLiveMinutes" ? "Thời lượng Live" : "Thời lượng tăng ca"} ${row.businessDate}`}
+                              className={fieldClass(isOverridden(field), "w-[82px]")}
+                              disabled={!canManagePayroll}
+                              key={`${selectedEntry.staff.id}:${row.businessDate}:${field}:${String(value(field) ?? 0)}`}
+                              minutes={Number(value(field) ?? 0)}
+                              onCommit={(minutes) => updateDay(row.businessDate, field, minutes)}
+                            />
+                          </CellShell>
+                        </td>
+                      ))}
+                      <td className="px-2 py-2">
+                        <CellShell
+                          onReset={() => reset("workUnits")}
+                          overridden={isOverridden("workUnits")}
+                        >
+                          <input
+                            className={fieldClass(isOverridden("workUnits"), "w-[76px]")}
+                            disabled={!canManagePayroll}
+                            min={0}
+                            onChange={(event) =>
+                              updateDay(row.businessDate, "workUnits", event.target.value)
+                            }
+                            step="0.5"
+                            type="number"
+                            value={String(value("workUnits") ?? "0")}
+                          />
+                        </CellShell>
+                      </td>
+                      {(
+                        ["revenueAmount", "rewardThresholdAmount", "dailyRevenueBonus"] as const
+                      ).map((field) => (
+                        <td className="px-2 py-2" key={field}>
+                          <CellShell onReset={() => reset(field)} overridden={isOverridden(field)}>
+                            <input
+                              className={fieldClass(isOverridden(field), "w-[112px]")}
+                              disabled={!canManagePayroll}
+                              min={0}
+                              onChange={(event) =>
+                                updateDay(
+                                  row.businessDate,
+                                  field,
+                                  field === "rewardThresholdAmount" && event.target.value === ""
+                                    ? null
+                                    : event.target.value,
+                                )
+                              }
+                              type="number"
+                              value={String(value(field) ?? "")}
+                            />
+                          </CellShell>
+                        </td>
+                      ))}
+                      {(["violationCategory", "violationDetail"] as const).map((field) => (
+                        <td className="px-2 py-2" key={field}>
+                          <CellShell onReset={() => reset(field)} overridden={isOverridden(field)}>
+                            <input
+                              className={fieldClass(isOverridden(field), "w-[170px]")}
+                              disabled={!canManagePayroll}
+                              onChange={(event) =>
+                                updateDay(
+                                  row.businessDate,
+                                  field,
+                                  event.target.value === "" ? null : event.target.value,
+                                )
+                              }
+                              value={String(value(field) ?? "")}
+                            />
+                          </CellShell>
+                        </td>
+                      ))}
+                      <td className="px-2 py-2">
+                        <CellShell
+                          onReset={() => reset("penalties")}
+                          overridden={isOverridden("penalties")}
+                        >
+                          <input
+                            className={fieldClass(isOverridden("penalties"), "w-[112px]")}
+                            disabled={!canManagePayroll}
+                            min={0}
+                            onChange={(event) =>
+                              updateDay(row.businessDate, "penalties", event.target.value)
+                            }
+                            type="number"
+                            value={String(value("penalties") ?? "0")}
+                          />
+                        </CellShell>
+                      </td>
+                      <td className="px-2 py-2">
+                        <CellShell onReset={() => reset("note")} overridden={isOverridden("note")}>
+                          <input
+                            className={fieldClass(isOverridden("note"), "w-[190px]")}
+                            disabled={!canManagePayroll}
+                            onChange={(event) =>
+                              updateDay(
+                                row.businessDate,
+                                "note",
+                                event.target.value === "" ? null : event.target.value,
+                              )
+                            }
+                            value={String(value("note") ?? "")}
+                          />
+                        </CellShell>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot className="sticky bottom-0 z-20 bg-sky-100 font-semibold text-slate-900">
+                <tr>
+                  <td className="sticky left-0 z-30 bg-sky-100 px-2 py-3" colSpan={2}>
+                    TỔNG
+                  </td>
+                  <td className="px-2 py-3" colSpan={3} />
+                  <td className="px-2 py-3">
+                    {formatDuration(
+                      editableRows.reduce(
+                        (total, row) =>
+                          total +
+                          Number(displayedDayValue(row, worksheet, "actualLiveMinutes") ?? 0),
+                        0,
+                      ),
+                    )}
+                  </td>
+                  <td className="px-2 py-3">{formatDuration(overtimeMinutes)}</td>
+                  <td className="px-2 py-3">
+                    {(Number(workUnits.numerator) / Number(workUnits.scale)).toLocaleString(
+                      "vi-VN",
+                    )}
+                  </td>
+                  <td className="px-2 py-3">{coins(totalCoins)}</td>
+                  <td />
+                  <td className="px-2 py-3">{money(dailyBonusFromRows)}</td>
+                  <td colSpan={2} />
+                  <td className="px-2 py-3 text-rose-700">{money(penaltiesFromRows)}</td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <div className="mt-5 overflow-hidden rounded-xl border border-slate-200">
+            <div className="bg-violet-100 px-4 py-2 text-center text-sm font-bold">
+              CƠ SỞ TÍNH LƯƠNG THỬ VIỆC / CHÍNH THỨC
+            </div>
+            <div className="grid gap-px bg-slate-200 text-sm sm:grid-cols-2 xl:grid-cols-4">
+              <div className="bg-white px-3 py-3">
+                <p className="text-xs text-slate-500">Ngày gia nhập</p>
+                <p className="font-semibold">
+                  {formatOptionalDate(selectedEntry.employmentSalary.joinedDate)}
+                </p>
+              </div>
+              <div className="bg-white px-3 py-3">
+                <p className="text-xs text-slate-500">Ngày lên chính thức</p>
+                <p className="font-semibold">
+                  {formatOptionalDate(selectedEntry.employmentSalary.officialDate)}
+                </p>
+              </div>
+              <div className="bg-white px-3 py-3">
+                <p className="text-xs text-slate-500">
+                  Công thử việc ·{" "}
+                  {new Intl.NumberFormat("vi-VN", {
+                    maximumFractionDigits: 2,
+                  }).format(selectedEntry.employmentSalary.probationSalaryRateBps / 100)}
+                  %
+                </p>
+                <p className="font-semibold">
+                  {selectedEntry.employmentSalary.probationWorkUnits} công ·{" "}
+                  {money(selectedEntry.employmentSalary.probationSalaryAmount)}
+                </p>
+              </div>
+              <div className="bg-white px-3 py-3">
+                <p className="text-xs text-slate-500">Công chính thức · 100%</p>
+                <p className="font-semibold">
+                  {selectedEntry.employmentSalary.officialWorkUnits} công ·{" "}
+                  {money(selectedEntry.employmentSalary.officialSalaryAmount)}
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 bg-violet-50 px-4 py-3 text-sm">
+              <span>
+                Hệ thống tính:{" "}
+                <strong>{money(selectedEntry.employmentSalary.calculatedProratedSalary)}</strong>
+              </span>
+              {selectedEntry.employmentSalary.excludedBeforeJoinWorkUnits !== "0" ? (
+                <span className="font-medium text-amber-800">
+                  Có {selectedEntry.employmentSalary.excludedBeforeJoinWorkUnits} công trước ngày
+                  gia nhập không được tính vào lương cứng.
+                </span>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(360px,0.8fr)_minmax(480px,1.2fr)]">
+            <div className="rounded-xl border border-slate-200">
+              <div className="rounded-t-xl bg-sky-100 px-4 py-2 text-center text-sm font-bold">
+                A. TĂNG TRƯỞNG BẬC
+              </div>
+              <div className="grid grid-cols-[1fr_180px] gap-px bg-slate-200 text-sm">
+                <div className="bg-white px-3 py-2">Tổng xu tháng trước</div>
+                <div className="bg-white px-3 py-2 text-right font-semibold">
+                  {selectedEntry.monthlyLevel.previousMonthCoinsSource === "NONE" ||
+                  selectedEntry.monthlyLevel.previousMonthCoinsSource === "MANUAL_BASELINE" ? (
+                    <CellShell
+                      onReset={() => updateTopLevel("previousMonthCoins", undefined)}
+                      overridden={own(worksheet, "previousMonthCoins")}
+                    >
+                      <div className="flex items-center gap-1">
+                        <input
+                          aria-label="Tổng xu tháng trước nhập thủ công"
+                          className={fieldClass(
+                            own(worksheet, "previousMonthCoins"),
+                            "h-full min-w-0 flex-1 text-right",
+                          )}
+                          disabled={!canManagePayroll}
+                          min={0}
+                          onChange={(event) =>
+                            updateTopLevel(
+                              "previousMonthCoins",
+                              event.target.value === "" ? null : event.target.value,
+                            )
+                          }
+                          placeholder="Nhập số xu"
+                          type="number"
+                          value={
+                            own(worksheet, "previousMonthCoins")
+                              ? (worksheet.previousMonthCoins ?? "")
+                              : (selectedEntry.monthlyLevel.previousMonthCoins ?? "")
+                          }
+                        />
+                        <span className="text-xs text-slate-500">xu</span>
+                      </div>
+                    </CellShell>
+                  ) : (
+                    coins(selectedEntry.monthlyLevel.previousMonthCoins)
+                  )}
+                </div>
+                <div className="bg-white px-3 py-2">Nguồn tháng trước</div>
+                <div className="bg-white px-3 py-2 text-right text-xs">
+                  {previousCoinSourceLabels[selectedEntry.monthlyLevel.previousMonthCoinsSource]}
+                </div>
+                <div className="bg-white px-3 py-2">Bậc tháng trước</div>
+                <div className="bg-white px-3 py-2 text-right font-semibold">
+                  {selectedEntry.monthlyLevel.previousLevelName ??
+                    selectedEntry.monthlyLevel.previousLevelCode ??
+                    "Chưa có"}
+                </div>
+                <div className="bg-white px-3 py-2">Tổng xu tháng này</div>
+                <div className="bg-white px-3 py-2 text-right font-semibold text-sky-700">
+                  {coins(selectedEntry.monthlyLevel.currentMonthCoins)}
+                </div>
+                <div className="bg-white px-3 py-2">Bậc tháng này</div>
+                <div className="bg-white px-3 py-2 text-right font-semibold">
+                  {selectedEntry.monthlyLevel.currentLevelName ??
+                    selectedEntry.monthlyLevel.currentLevelCode ??
+                    "Chưa đạt bậc"}
+                </div>
+                <div className="bg-white px-3 py-2">Ngày làm việc / điều kiện</div>
+                <div className="bg-white px-3 py-2 text-right">
+                  <span
+                    className={
+                      selectedEntry.monthlyLevel.attendanceEligible
+                        ? "font-semibold text-emerald-700"
+                        : "text-slate-700"
+                    }
+                  >
+                    {selectedEntry.monthlyLevel.workedDayCount}/
+                    {selectedEntry.monthlyLevel.attendanceRequiredDays ?? "—"} ngày
+                  </span>
+                </div>
+                <div className="bg-white px-3 py-2">Trạng thái</div>
+                <div className="bg-white px-3 py-2 text-right font-semibold">
+                  {transitionLabels[selectedEntry.monthlyLevel.transition]}
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-slate-200">
+              <div className="bg-emerald-100 px-4 py-2 text-center text-sm font-bold">
+                B. CÁC KHOẢN THU NHẬP / KHẤU TRỪ
+              </div>
+              <div className="grid grid-cols-[minmax(220px,1fr)_180px] gap-px bg-slate-200 text-sm">
+                <div className="bg-white px-3 py-2 font-semibold">Lương cơ bản</div>
+                <CellShell
+                  onReset={() => updateTopLevel("baseSalaryAmount", undefined)}
+                  overridden={own(worksheet, "baseSalaryAmount")}
+                >
+                  <input
+                    aria-label="Lương cơ bản áp dụng"
+                    className={fieldClass(own(worksheet, "baseSalaryAmount"), "h-full w-full")}
+                    disabled={!canManagePayroll}
+                    min={0}
+                    onChange={(event) => updateTopLevel("baseSalaryAmount", event.target.value)}
+                    type="number"
+                    value={worksheet.baseSalaryAmount ?? selectedEntry.sourceBaseSalary}
+                  />
+                </CellShell>
+                {componentRows.map((row) => {
+                  const overridden = own(worksheet.components, row.key);
+                  const calculated = calculatedComponent(row.key);
+                  return (
+                    <div className="contents" key={row.key}>
+                      <div className={`bg-white px-3 py-2 ${row.subtract ? "text-rose-700" : ""}`}>
+                        {row.label}
+                        <span className="ml-2 text-xs text-slate-400">
+                          Tự tính {money(calculated)}
+                        </span>
+                      </div>
+                      <CellShell
+                        onReset={() => updateComponent(row.key, undefined)}
+                        overridden={overridden}
+                      >
+                        <input
+                          className={fieldClass(overridden, "h-full w-full text-right")}
+                          disabled={!canManagePayroll}
+                          min={row.signed ? undefined : 0}
+                          onChange={(event) => updateComponent(row.key, event.target.value)}
+                          type="number"
+                          value={effectiveComponent(row.key)}
+                        />
+                      </CellShell>
+                    </div>
+                  );
+                })}
+                <div className="bg-sky-100 px-3 py-3 font-bold uppercase">Tổng thu nhập</div>
+                <div className="bg-sky-100 px-3 py-3 text-right font-bold">
+                  {money(previewTotal)}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {dirty ? (
+            <div className="sticky bottom-3 z-40 mt-4 flex items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 shadow-lg">
+              <span className="text-sm font-medium text-amber-900">
+                Có thay đổi chưa lưu. Ô màu vàng là giá trị đang ghi đè.
+              </span>
+              {canManagePayroll ? (
+                <button
+                  className="rounded-lg bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                  disabled={busy || reason.trim().length < 3}
+                  onClick={() => void saveWorksheet()}
+                  type="button"
+                >
+                  Lưu thay đổi
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!loading && !period && !error ? (
+        <div className="mt-6 rounded-xl bg-slate-50 p-5 text-sm text-slate-500">
+          {canManagePayroll
+            ? "Chọn kỳ lương và cơ sở để hệ thống tự mở bảng lương."
+            : "Chưa có phiếu lương đã gửi trong kỳ này."}
+        </div>
+      ) : null}
+
+      {jobs.length > 0 ? (
+        <div className="mt-5 rounded-xl border border-slate-200 p-3">
+          <div className="text-sm font-semibold">File xuất gần đây</div>
+          <ul className="mt-2 divide-y divide-slate-100 text-sm">
+            {jobs.map((job) => (
+              <li className="flex items-center justify-between gap-3 py-2" key={job.id}>
+                <span>
+                  {job.kind} · {job.status} · {job.progress}%
+                </span>
+                {job.status === "COMPLETED" ? (
+                  <button
+                    className="rounded bg-slate-900 px-3 py-1.5 text-xs text-white"
+                    onClick={() => void download(job.id)}
+                    type="button"
+                  >
+                    Tải file
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
     </section>
   );

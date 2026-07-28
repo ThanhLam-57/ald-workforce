@@ -7,6 +7,21 @@ Mọi service lấy `companyId`, role và danh sách branch đang hiệu lực t
 Training Manager chỉ được truy cập branch được phân công; employee chỉ xem dữ liệu đã
 publish của chính mình. Export/query/file dùng cùng authorization với màn hình.
 
+### Ma trận Training Manager
+
+| Route                                             | Quyền                                                                              |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `/dashboard`                                      | Chỉ số vận hành của tất cả cơ sở đang được phân công; không có payroll             |
+| `/attendance`                                     | Đọc/sửa nhân viên Live trong cơ sở được phân công; không sửa bản thân hoặc manager |
+| `/branch-overview`                                | Chỉ xem; không sửa và không export                                                 |
+| `/company-report`                                 | Chỉ xem projection vận hành theo scope; DTO không chứa lương/payroll               |
+| `/manager-kpi`                                    | Chỉ KPI bản thân đã publish khi company setting bật                                |
+| `/rules`                                          | Chỉ xem quy định hiện hành; không mutation/version editor                          |
+| `/payroll`, `/data-governance`, `/administration` | Bị chặn ở page, API và service                                                     |
+
+Cờ `canManagePayroll` cũ không cấp quyền cho `TRAINING_MANAGER`. Chỉ
+`GENERAL_MANAGER` được gọi payroll service/API/export.
+
 DTO loại trường nhạy cảm ở server. Employee error report không query/serialize revenue.
 Response có session scope dùng `private, no-store`.
 

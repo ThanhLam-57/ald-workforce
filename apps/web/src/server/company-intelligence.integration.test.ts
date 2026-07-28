@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 
 import { prisma } from "@ald/db";
 import type { ActorContext, DomainError } from "@ald/domain";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getCompanyDashboard } from "./company-dashboard-service";
 import {
   companyReportTotalsEqualBranches,
   getCompanyMonthlyReport,
+  getManagerCompanyReport,
 } from "./company-report-service";
 import {
   createManagerKpiEvaluation,
@@ -308,6 +309,40 @@ beforeAll(async () => {
   });
 });
 
+afterAll(async () => {
+  if (!companyId) return;
+  await prisma.$transaction(async (tx) => {
+    const guardedTables = [
+      ["manager_kpi_criterion_lines", "manager_kpi_criterion_lines_guard"],
+      ["manager_kpi_evaluations", "manager_kpi_evaluations_guard"],
+      ["rule_versions", "rule_versions_published_immutable"],
+      ["staff_employment_history", "staff_employment_history_no_delete"],
+    ] as const;
+    for (const [table, trigger] of guardedTables) {
+      await tx.$executeRawUnsafe(`ALTER TABLE "${table}" DISABLE TRIGGER "${trigger}"`);
+    }
+    await tx.$executeRawUnsafe("SET LOCAL ald.audit_cleanup = 'on'");
+    await tx.managerKpiCriterionLine.deleteMany({ where: { companyId } });
+    await tx.managerKpiEvaluation.deleteMany({ where: { companyId } });
+    await tx.ruleVersion.deleteMany({ where: { companyId } });
+    await tx.ruleSet.deleteMany({ where: { companyId } });
+    await tx.liveDailyMetric.deleteMany({ where: { companyId } });
+    await tx.attendanceDay.deleteMany({ where: { companyId } });
+    await tx.auditLog.deleteMany({ where: { companyId } });
+    await tx.branchAssignment.deleteMany({ where: { companyId } });
+    await tx.staffEmploymentHistory.deleteMany({ where: { companyId } });
+    await tx.session.deleteMany({ where: { user: { companyId } } });
+    await tx.account.deleteMany({ where: { user: { companyId } } });
+    await tx.user.deleteMany({ where: { companyId } });
+    await tx.staffMember.deleteMany({ where: { companyId } });
+    await tx.branch.deleteMany({ where: { companyId } });
+    await tx.company.deleteMany({ where: { id: companyId } });
+    for (const [table, trigger] of [...guardedTables].reverse()) {
+      await tx.$executeRawUnsafe(`ALTER TABLE "${table}" ENABLE TRIGGER "${trigger}"`);
+    }
+  });
+});
+
 describe("company report and GM dashboard", () => {
   it("reconciles company totals to branches and preserves historical assignments", async () => {
     const report = await getCompanyMonthlyReport(gm, { month });
@@ -329,7 +364,7 @@ describe("company report and GM dashboard", () => {
     expect(formerOnly.totals.revenueAmount).toBe("2000");
   });
 
-  it("provides branch drill-down and denies non-GM company access", async () => {
+  it("provides branch drill-down and keeps the full company projection GM-only", async () => {
     const dashboard = await getCompanyDashboard(gm, { month }, new Date("2026-10-02T00:00:00Z"));
 
     expect(dashboard.branches).toHaveLength(2);
@@ -342,6 +377,31 @@ describe("company report and GM dashboard", () => {
     } satisfies Partial<DomainError>);
     await expect(getCompanyDashboard(employee, { month })).rejects.toMatchObject({
       code: "FORBIDDEN",
+    } satisfies Partial<DomainError>);
+  });
+
+  it("returns a payroll-free manager report scoped to active assigned branches", async () => {
+    const report = await getManagerCompanyReport(
+      manager,
+      { month },
+      new Date("2026-09-30T12:00:00.000Z"),
+    );
+
+    expect(report.branches.map((branch) => branch.branch.id)).toEqual([branchAId]);
+    expect(report.totals.revenueAmount).toBe("1000");
+    expect(report.branches[0]?.staff.map((row) => row.staff.staffCode)).toEqual(["LIVE-A"]);
+
+    const serialized = JSON.stringify(report);
+    expect(serialized).not.toMatch(/payroll/i);
+    expect(serialized).not.toMatch(/baseSalary/i);
+    expect(serialized).not.toMatch(/totalIncome/i);
+    expect(serialized).not.toMatch(/revenueBonus/i);
+    expect(serialized).not.toMatch(/monthlyBonus/i);
+
+    await expect(
+      getManagerCompanyReport(manager, { month, branchId: branchBId }),
+    ).rejects.toMatchObject({
+      code: "NOT_FOUND",
     } satisfies Partial<DomainError>);
   });
 });

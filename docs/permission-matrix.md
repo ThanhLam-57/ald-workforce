@@ -15,29 +15,31 @@ Client không được quyết định scope. `branchId`, `companyId`, `staffId`
 
 ## 2. Ma trận chức năng đích
 
-| Tài nguyên / hành động    | GENERAL_MANAGER                           | TRAINING_MANAGER                                           | LIVE_EMPLOYEE                              |
-| ------------------------- | ----------------------------------------- | ---------------------------------------------------------- | ------------------------------------------ |
-| Company settings          | Đọc/sửa, có audit + lý do                 | Không                                                      | Không                                      |
-| Branch                    | CRUD/archive toàn công ty, có audit       | Đọc branch được phân công                                  | Không                                      |
-| Staff                     | CRUD toàn công ty                         | Đọc staff trong branch; cập nhật trường nghiệp vụ được cấp | Chỉ đọc hồ sơ bản thân được phép           |
-| User/account              | CRUD/disable/reset toàn công ty, có audit | Không                                                      | Đổi thông tin cá nhân/mật khẩu theo policy |
-| Branch assignment         | CRUD toàn công ty, có audit               | Đọc assignment của mình và staff trong scope               | Không                                      |
-| Level history             | CRUD toàn công ty                         | Đọc trong scope                                            | Đọc level bản thân đã publish              |
-| Attendance nhân viên Live | CRUD trong công ty                        | CRUD trong branch scope                                    | Đọc bản thân đã publish                    |
-| Violation/evidence        | CRUD/archive trong công ty                | CRUD trong branch scope                                    | Đọc bản thân đã publish                    |
-| Attendance TM             | CRUD                                      | Không                                                      | Không                                      |
-| KPI TM                    | CRUD/publish                              | Chỉ đọc KPI bản thân đã publish                            | Không                                      |
-| Active rules              | CRUD/version/publish                      | Chỉ đọc rule hiệu lực                                      | Chỉ đọc rule hiệu lực                      |
-| Payroll                   | Calculate/review/lock/publish/export      | Không                                                      | Chỉ payslip bản thân đã publish            |
-| Báo cáo công ty           | Đọc/export                                | Không                                                      | Không                                      |
-| Báo cáo branch            | Đọc/export                                | Đọc/export branch scope                                    | Không                                      |
-| Audit                     | Đọc toàn công ty                          | Không mặc định                                             | Không                                      |
-| Import/export center      | Toàn công ty                              | Chỉ loại job được cấp và branch scope                      | Không                                      |
+| Tài nguyên / hành động    | GENERAL_MANAGER                           | TRAINING_MANAGER                                       | LIVE_EMPLOYEE                              |
+| ------------------------- | ----------------------------------------- | ------------------------------------------------------ | ------------------------------------------ |
+| Company settings          | Đọc/sửa, có audit + lý do                 | Không                                                  | Không                                      |
+| Branch                    | CRUD/archive toàn công ty, có audit       | Đọc branch được phân công                              | Không                                      |
+| Staff                     | CRUD toàn công ty                         | Chỉ đọc nhân viên Live trong branch đang phân công     | Chỉ đọc hồ sơ bản thân được phép           |
+| User/account              | CRUD/disable/reset toàn công ty, có audit | Không                                                  | Đổi thông tin cá nhân/mật khẩu theo policy |
+| Branch assignment         | CRUD toàn công ty, có audit               | Đọc assignment của mình và staff trong scope           | Không                                      |
+| Level history             | CRUD toàn công ty                         | Đọc trong scope                                        | Đọc level bản thân đã publish              |
+| Attendance nhân viên Live | CRUD trong công ty                        | CRUD trong branch scope                                | Đọc bản thân đã publish                    |
+| Violation/evidence        | CRUD/archive trong công ty                | CRUD trong branch scope                                | Đọc bản thân đã publish                    |
+| Attendance TM             | CRUD                                      | Không                                                  | Không                                      |
+| KPI TM                    | CRUD/publish                              | Chỉ đọc KPI bản thân đã publish                        | Không                                      |
+| Active rules              | CRUD/version/publish                      | Chỉ đọc rule hiệu lực                                  | Chỉ đọc rule hiệu lực                      |
+| Payroll                   | Calculate/review/lock/publish/export      | Không                                                  | Chỉ payslip bản thân đã publish            |
+| Báo cáo công ty           | Đọc/export, gồm dữ liệu tài chính         | Chỉ đọc số liệu vận hành của các branch được phân công | Không                                      |
+| Báo cáo branch            | Đọc/sửa/export                            | Chỉ đọc branch scope                                   | Không                                      |
+| Audit                     | Đọc toàn công ty                          | Không mặc định                                         | Không                                      |
+| Import/export center      | Toàn công ty                              | Không                                                  | Không                                      |
 
 `CRUD` không đồng nghĩa hard-delete. Dữ liệu lịch sử/tài chính chỉ được archive, đóng khoảng hiệu lực hoặc tạo revision.
 
-Company dashboard/report và export XLSX/PDF luôn kiểm tra GM ở server; không có
-branch query parameter nào mở rộng quyền. KPI manager chỉ trả bản thân +
+Dashboard và company report của Training Manager dùng DTO vận hành riêng, chỉ truy vấn
+`activeBranchIds` và loại toàn bộ payroll, lương cơ bản, thưởng lương, tổng thu nhập ở server.
+Export company/branch report chỉ dành cho GM; không có `branchId` query parameter nào mở
+rộng quyền. KPI manager chỉ trả bản thân +
 `PUBLISHED` khi `managerKpiSelfServiceEnabled` đang bật; draft không bao giờ được
 trả cho manager.
 
@@ -90,13 +92,15 @@ Server tự lấy company/branch scope từ actor context. Penalty item phải t
 
 ### Endpoint branch overview (Prompt 3)
 
-| Endpoint/action                                   | GM                              | TM                                                | Employee |
-| ------------------------------------------------- | ------------------------------- | ------------------------------------------------- | -------- |
-| `GET /api/branch-overview?branchId&month&filters` | Chọn mọi branch trong company   | Chỉ branch nằm trong `activeBranchIds`            | Không    |
-| `PATCH /api/branch-overview`                      | Edit Live staff toàn company    | Edit Live staff trong branch, không phải bản thân | Không    |
-| `GET /api/exports/branch-monthly-overview`        | Export mọi branch trong company | Export branch trong scope                         | Không    |
+| Endpoint/action                                   | GM                              | TM                                     | Employee |
+| ------------------------------------------------- | ------------------------------- | -------------------------------------- | -------- |
+| `GET /api/branch-overview?branchId&month&filters` | Chọn mọi branch trong company   | Chỉ branch nằm trong `activeBranchIds` | Không    |
+| `PATCH /api/branch-overview`                      | Edit Live staff toàn company    | Không                                  | Không    |
+| `GET /api/exports/branch-monthly-overview`        | Export mọi branch trong company | Không                                  | Không    |
 
-`branchId` trong query/body chỉ là target cần authorize. Server giao company/branch/staff scope vào projection và attendance source service; workbook chỉ nhận DTO đã scope. Cell edit dùng version của attendance nguồn, không cập nhật một bảng tổng riêng.
+`branchId` trong query/body chỉ là target cần authorize. Server giao company/branch/staff
+scope vào projection. Training Manager sửa dữ liệu nguồn tại `/attendance`, không sửa hoặc
+export từ grid tổng quan cơ sở.
 
 ## 5. Test bắt buộc
 
@@ -110,16 +114,15 @@ Server tự lấy company/branch scope từ actor context. Penalty item phải t
 
 ### Import, Export Center và Audit (Prompt 7)
 
-| Endpoint/action                  | GM                         | Training Manager                                                       | Employee |
-| -------------------------------- | -------------------------- | ---------------------------------------------------------------------- | -------- |
-| Upload/map/preview/commit import | Mọi template trong company | Chỉ staff, assignment, attendance/live; bắt buộc branch đang phân công | Không    |
-| Xem/tải file lỗi import          | Mọi job company            | Job thuộc branch scope hoặc job chính mình tạo                         | Không    |
-| Tạo Export Center job            | Mọi template               | Employee error và branch monthly trong branch scope                    | Không    |
-| Download private export          | Job trong company          | Job thuộc branch scope                                                 | Không    |
-| Đọc/export audit                 | Có                         | Không                                                                  | Không    |
+| Endpoint/action                  | GM                         | Training Manager | Employee |
+| -------------------------------- | -------------------------- | ---------------- | -------- |
+| Upload/map/preview/commit import | Mọi template trong company | Không            | Không    |
+| Xem/tải file lỗi import          | Mọi job company            | Không            | Không    |
+| Tạo Export Center job            | Mọi template               | Không            | Không    |
+| Download private export          | Job trong company          | Không            | Không    |
+| Đọc/export audit                 | Có                         | Không            | Không    |
 
-Server resolve branch code trong từng dòng import rồi so với `activeBranchIds`; không tin
-`branchId` hoặc column mapping do client gửi. Employee error export không query live
-metric/revenue. Payslip, company report và audit export bị chặn cho manager kể cả đoán ID.
-Với staff/assignment/attendance import, server còn kiểm tra staff là Live, không phải chính
-manager và có assignment `MEMBER` hiệu lực tại branch/ngày của từng dòng ở cả preview lẫn commit.
+Mọi endpoint Import, Export Center và Audit bị chặn cho Training Manager kể cả đoán URL/ID.
+Employee error export từ màn chấm công vẫn dùng projection riêng không query live
+metric/revenue. Payslip, company report, branch overview và audit export đều bị chặn cho
+manager.

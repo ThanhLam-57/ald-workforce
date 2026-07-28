@@ -4,7 +4,7 @@ import { PageHeader } from "../../page-header";
 import { requirePageActor } from "../../page-access";
 
 export default async function ConfiguredRulesPage() {
-  const actor = await requirePageActor(["GENERAL_MANAGER", "TRAINING_MANAGER"]);
+  await requirePageActor(["GENERAL_MANAGER"]);
 
   return (
     <>
@@ -13,7 +13,7 @@ export default async function ConfiguredRulesPage() {
         eyebrow="Rule Center"
         title="Thưởng, level, lương & KPI"
       />
-      <ConfiguredRuleCenter isGeneralManager={actor.role === "GENERAL_MANAGER"} />
+      <ConfiguredRuleCenter isGeneralManager />
     </>
   );
 }

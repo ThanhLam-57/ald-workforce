@@ -1,5 +1,12 @@
 export const AUTH_ROLES = ["GENERAL_MANAGER", "TRAINING_MANAGER", "LIVE_EMPLOYEE"] as const;
 
+export {
+  evaluateAutomaticPenalty,
+  formatDurationForRule,
+  type AutomaticPenaltyCondition,
+  type AutomaticPenaltyEvaluation,
+} from "./automatic-penalties.js";
+
 export type AuthRole = (typeof AUTH_ROLES)[number];
 
 export type ActorContext = Readonly<{
@@ -8,6 +15,7 @@ export type ActorContext = Readonly<{
   staffId: string | null;
   role: AuthRole;
   activeBranchIds: readonly string[];
+  canManagePayroll?: boolean;
   name?: string;
   username?: string | null;
   mustChangePassword?: boolean;
@@ -27,7 +35,6 @@ export type ResourceAction =
   | "staff:read"
   | "attendance:read"
   | "attendance:write"
-  | "attendance:archive"
   | "attendance:export"
   | "rule:read"
   | "rule:write"
@@ -82,7 +89,6 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
       action === "staff:read" ||
       action === "attendance:read" ||
       action === "attendance:write" ||
-      action === "attendance:archive" ||
       action === "attendance:export" ||
       action === "rule:read" ||
       action === "violation:read" ||
@@ -91,12 +97,7 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
       action === "evidence:upload" ||
       action === "evidence:read" ||
       action === "branch-overview:read" ||
-      action === "branch-overview:write" ||
-      action === "branch-overview:export" ||
-      action === "import:read" ||
-      action === "import:write" ||
-      action === "export-center:read" ||
-      action === "export-center:write" ||
+      action === "company-report:read" ||
       action === "manager-kpi:read"
     );
   }
@@ -598,6 +599,60 @@ export function calculateDailyReward(
   return matchRevenueBand(revenueAmount, tiers)?.rewardAmount ?? "0";
 }
 
+export type PenaltyOccurrencePolicy = Readonly<{
+  penaltyStartsAt: number;
+  countingWindow: "CALENDAR_MONTH" | "LIFETIME";
+  countingKey: string;
+}>;
+
+export type PenaltyOccurrenceResult = Readonly<{
+  occurrenceNo: number;
+  computedAmount: string;
+  isChargeable: boolean;
+  remainingReminderCount: number;
+}>;
+
+export function calculatePenaltyOccurrence(
+  policy: PenaltyOccurrencePolicy,
+  occurrenceNo: number,
+  defaultAmount: string,
+): PenaltyOccurrenceResult {
+  if (!Number.isInteger(occurrenceNo) || occurrenceNo <= 0) {
+    throw new DomainError("VALIDATION_ERROR", "Số lần vi phạm phải là số nguyên dương.");
+  }
+  if (!Number.isInteger(policy.penaltyStartsAt) || policy.penaltyStartsAt <= 0) {
+    throw new DomainError("VALIDATION_ERROR", "Mốc bắt đầu phạt phải là số nguyên dương.");
+  }
+  const amount = BigInt(defaultAmount);
+  if (amount < 0n) {
+    throw new DomainError("VALIDATION_ERROR", "Tiền phạt không được âm.");
+  }
+  const isChargeable = occurrenceNo >= policy.penaltyStartsAt;
+  return {
+    occurrenceNo,
+    computedAmount: isChargeable ? amount.toString() : "0",
+    isChargeable,
+    remainingReminderCount: Math.max(policy.penaltyStartsAt - occurrenceNo, 0),
+  };
+}
+
+export function penaltyCountingPeriod(
+  businessDate: string,
+  window: PenaltyOccurrencePolicy["countingWindow"],
+): Readonly<{ start: string; end: string | null }> {
+  const date = new Date(`${businessDate}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== businessDate) {
+    throw new DomainError("VALIDATION_ERROR", "Ngày vi phạm không hợp lệ.");
+  }
+  if (window === "LIFETIME") {
+    return { start: "1970-01-01", end: null };
+  }
+  const start = `${businessDate.slice(0, 7)}-01`;
+  const end = new Date(`${start}T00:00:00.000Z`);
+  end.setUTCMonth(end.getUTCMonth() + 1);
+  return { start, end: end.toISOString().slice(0, 10) };
+}
+
 export type MonthlyLevelTier = Omit<RevenueBand, "priority"> &
   Readonly<{
     name: string;
@@ -617,21 +672,31 @@ export type MonthlyLevelResult = Readonly<{
   amount: string;
   attendanceEligible: boolean;
   achievementEligible: boolean;
-  transition: "NONE" | "RETAIN" | "JUMP";
+  transition: "NONE" | "RETAIN" | "JUMP" | "DOWN";
 }>;
 
 export function calculateMonthlyLevelResult(
   input: Readonly<{
-    revenueAmount: string;
-    workUnits: string;
-    actualLiveMinutes: number;
-    currentLevelOrder: number | null;
-    currentLevelCode: string | null;
+    monthlyCoins: string;
+    workedDayCount: number;
+    attendanceRequiredDays: number;
+    previousLevelOrder: number | null;
+    previousLevelCode: string | null;
   }>,
   levels: readonly MonthlyLevelTier[],
 ): MonthlyLevelResult {
+  if (
+    !Number.isInteger(input.workedDayCount) ||
+    input.workedDayCount < 0 ||
+    !Number.isInteger(input.attendanceRequiredDays) ||
+    input.attendanceRequiredDays < 1 ||
+    input.attendanceRequiredDays > 31
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "Điều kiện số ngày chuyên cần không hợp lệ.");
+  }
+  assertUnsignedInteger(input.monthlyCoins, "Tổng xu tháng");
   const level = matchRevenueBand(
-    input.revenueAmount,
+    input.monthlyCoins,
     levels.map((item) => ({ ...item, priority: item.displayOrder })),
   );
   if (!level) {
@@ -643,21 +708,17 @@ export function calculateMonthlyLevelResult(
       transition: "NONE",
     };
   }
-  const attendanceEligible =
-    level.attendanceMinWorkUnits === null ||
-    decimalHundredths(input.workUnits) >= decimalHundredths(level.attendanceMinWorkUnits);
-  const achievementEligible =
-    level.achievementMinLiveMinutes === null ||
-    input.actualLiveMinutes >= level.achievementMinLiveMinutes;
+  const attendanceEligible = input.workedDayCount >= input.attendanceRequiredDays;
+  const achievementEligible = true;
   const transition =
-    input.currentLevelCode === level.code
+    input.previousLevelCode === level.code
       ? "RETAIN"
-      : input.currentLevelOrder !== null &&
-          level.displayOrder - input.currentLevelOrder >= level.jumpMinLevelSteps
+      : input.previousLevelOrder !== null && level.displayOrder > input.previousLevelOrder
         ? "JUMP"
-        : "NONE";
+        : input.previousLevelOrder !== null && level.displayOrder < input.previousLevelOrder
+          ? "DOWN"
+          : "NONE";
   const amount =
-    BigInt(level.monthlyRevenueBonus) +
     (attendanceEligible ? BigInt(level.attendanceBonus) : 0n) +
     (achievementEligible ? BigInt(level.achievementBonus) : 0n) +
     (transition === "RETAIN" ? BigInt(level.retainLevelBonus) : 0n) +
@@ -704,6 +765,8 @@ function roundMoney(
 export type SalaryRule = Readonly<{
   baseSalary: string;
   standardWorkdays: string;
+  standardDaysOffPerMonth?: number;
+  probationSalaryRateBps?: number;
   standardDailyMinutes: number;
   overtime: Readonly<{
     multiplierBps: number;
@@ -721,6 +784,39 @@ export type SalaryRule = Readonly<{
     applyAt: "COMPONENT" | "TOTAL";
   }>;
 }>;
+
+export function daysInPayrollMonth(month: string): number {
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    throw new DomainError("VALIDATION_ERROR", "Tháng tính lương không hợp lệ.");
+  }
+  const [yearValue, monthValue] = month.split("-");
+  const year = Number(yearValue);
+  const monthNumber = Number(monthValue);
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(monthNumber) ||
+    monthNumber < 1 ||
+    monthNumber > 12
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "Tháng tính lương không hợp lệ.");
+  }
+  return new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+}
+
+export function standardPayableDays(month: string, standardDaysOffPerMonth: number): number {
+  if (
+    !Number.isInteger(standardDaysOffPerMonth) ||
+    standardDaysOffPerMonth < 0 ||
+    standardDaysOffPerMonth > 30
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "Số ngày nghỉ chuẩn phải từ 0 đến 30.");
+  }
+  const payableDays = daysInPayrollMonth(month) - standardDaysOffPerMonth;
+  if (payableDays <= 0) {
+    throw new DomainError("VALIDATION_ERROR", "Số ngày công chuẩn phải lớn hơn 0.");
+  }
+  return payableDays;
+}
 
 export type SalaryAttendanceValue = Readonly<{
   status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
@@ -836,11 +932,35 @@ export type PayrollLineType = (typeof PAYROLL_LINE_TYPES)[number];
 export type PayrollAttendanceInput = Readonly<{
   attendanceId: string;
   businessDate: string;
+  checkInTime?: string | null;
+  checkOutTime?: string | null;
   status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
   workUnits: string;
   overtimeMinutes: number;
   actualLiveMinutes: number;
   revenueAmount: string;
+  rewardThresholdAmount?: string | null;
+  dailyRevenueBonusOverride?: string;
+  penaltiesOverride?: string;
+  violationCategory?: string | null;
+  violationDetail?: string | null;
+  note?: string | null;
+  overriddenFields?: readonly string[];
+  source?: Readonly<{
+    checkInTime: string | null;
+    checkOutTime: string | null;
+    status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+    workUnits: string;
+    overtimeMinutes: number;
+    actualLiveMinutes: number;
+    revenueAmount: string;
+    rewardThresholdAmount: string | null;
+    dailyRevenueBonus: string;
+    violationCategory: string | null;
+    violationDetail: string | null;
+    penalties: string;
+    note: string | null;
+  }>;
   dailyRewardRule: Readonly<{
     ruleVersionId: string;
     tiers: readonly DailyRewardTier[];
@@ -852,6 +972,14 @@ export type PayrollAttendanceInput = Readonly<{
     itemName: string;
   }>[];
 }>;
+
+export function countWorkedDays(attendance: readonly PayrollAttendanceInput[]): number {
+  return new Set(
+    attendance
+      .filter((row) => row.status === "PRESENT" && decimalHundredths(row.workUnits) > 0n)
+      .map((row) => row.businessDate),
+  ).size;
+}
 
 export type PayrollAdjustmentInput = Readonly<{
   adjustmentId: string;
@@ -873,6 +1001,13 @@ export type PayrollLine = Readonly<{
 
 export type PayrollCalculationInput = Readonly<{
   staffId: string;
+  baseSalaryAmount: string;
+  sourceBaseSalaryAmount?: string;
+  employment?: Readonly<{
+    joinedDate: string | null;
+    officialDate: string | null;
+    category: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+  }>;
   period: Readonly<{
     month: string;
     from: string;
@@ -883,23 +1018,56 @@ export type PayrollCalculationInput = Readonly<{
   salaryRule: Readonly<{
     ruleVersionId: string;
     configuration: SalaryRule;
+    sourceStandardDaysOffPerMonth?: number | null;
   }>;
   monthlyLevelRule: Readonly<{
     ruleVersionId: string;
+    attendanceRequiredDays: number;
     levels: readonly MonthlyLevelTier[];
   }> | null;
+  previousMonth: Readonly<{
+    coins: string | null;
+    source: "PUBLISHED_PAYROLL" | "ATTENDANCE_LIVE" | "MANUAL_BASELINE" | "NONE";
+    level: Readonly<{
+      code: string;
+      name: string;
+      displayOrder: number;
+    }> | null;
+  }>;
   currentLevel: Readonly<{
     code: string;
     displayOrder: number;
   }> | null;
+  levelDisplay?: Readonly<{
+    previousLevelCode: string | null;
+    sourceCurrentLevelCode?: string | null;
+    sourceCurrentLevelName?: string | null;
+    currentLevelCode: string | null;
+    currentLevelName: string | null;
+  }>;
+  componentOverrides?: Readonly<{
+    proratedSalary?: string;
+    dailyRevenueBonus?: string;
+    monthlyRevenueBonus?: string;
+    attendanceBonus?: string;
+    achievementBonus?: string;
+    retainLevelBonus?: string;
+    jumpLevelBonus?: string;
+    overtimePay?: string;
+    otherBonus?: string;
+    penalties?: string;
+    advance?: string;
+  }>;
   adjustments: readonly PayrollAdjustmentInput[];
 }>;
 
 export type PayrollCalculationOutput = Readonly<{
   aggregates: Readonly<{
     workUnits: string;
+    workedDayCount: number;
     overtimeMinutes: number;
     revenueAmount: string;
+    currentMonthCoins: string;
     actualLiveMinutes: number;
     penalties: string;
     violationCount: number;
@@ -911,12 +1079,64 @@ export type PayrollCalculationOutput = Readonly<{
     monthlyRevenueBonus: string;
     attendanceBonus: string;
     achievementBonus: string;
+    retainLevelBonus: string;
+    jumpLevelBonus: string;
     levelBonus: string;
     overtimePay: string;
     otherBonus: string;
     penalties: string;
     advance: string;
     totalIncome: string;
+  }>;
+  calculatedComponents: Readonly<{
+    proratedSalary: string;
+    dailyRevenueBonus: string;
+    monthlyRevenueBonus: string;
+    attendanceBonus: string;
+    achievementBonus: string;
+    retainLevelBonus: string;
+    jumpLevelBonus: string;
+    overtimePay: string;
+    otherBonus: string;
+    penalties: string;
+    advance: string;
+    totalIncome: string;
+  }>;
+  salaryBasis: Readonly<{
+    daysInMonth: number;
+    standardDaysOffPerMonth: number | null;
+    standardPayableDays: number;
+  }>;
+  employmentSalary: Readonly<{
+    joinedDate: string | null;
+    officialDate: string | null;
+    probationSalaryRateBps: number;
+    probationWorkUnits: string;
+    officialWorkUnits: string;
+    excludedBeforeJoinWorkUnits: string;
+    probationSalaryAmount: string;
+    officialSalaryAmount: string;
+    calculatedProratedSalary: string;
+    fallbackMode:
+      | "OFFICIAL_DATE"
+      | "PROBATION_WITHOUT_OFFICIAL_DATE"
+      | "LEGACY_OFFICIAL_WITHOUT_OFFICIAL_DATE"
+      | "NON_PROBATION_CATEGORY";
+  }>;
+  monthlyLevel: Readonly<{
+    workedDayCount: number;
+    attendanceRequiredDays: number | null;
+    attendanceEligible: boolean;
+    previousMonthCoins: string | null;
+    previousMonthCoinsSource: "PUBLISHED_PAYROLL" | "ATTENDANCE_LIVE" | "MANUAL_BASELINE" | "NONE";
+    previousLevelCode: string | null;
+    previousLevelName: string | null;
+    previousLevelOrder: number | null;
+    currentMonthCoins: string;
+    currentLevelCode: string | null;
+    currentLevelName: string | null;
+    currentLevelOrder: number | null;
+    transition: "NONE" | "RETAIN" | "JUMP" | "DOWN";
   }>;
   suggestedLevelCode: string | null;
   selectedRuleVersionIds: readonly string[];
@@ -935,6 +1155,153 @@ function compareStableText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+type EmploymentSalaryProjection = Readonly<{
+  baseSalaryAmount: string;
+  overtimeAmount: string;
+  totalAmount: string;
+  joinedDate: string | null;
+  officialDate: string | null;
+  probationSalaryRateBps: number;
+  probationWorkUnits: string;
+  officialWorkUnits: string;
+  excludedBeforeJoinWorkUnits: string;
+  probationWeight: bigint;
+  officialWeight: bigint;
+  fallbackMode: PayrollCalculationOutput["employmentSalary"]["fallbackMode"];
+}>;
+
+function calculateEmploymentSalaryProjection(
+  rule: SalaryRule,
+  attendance: readonly PayrollAttendanceInput[],
+  employment: PayrollCalculationInput["employment"],
+): EmploymentSalaryProjection {
+  const standardDays = decimalHundredths(rule.standardWorkdays);
+  if (standardDays <= 0n) {
+    throw new DomainError("VALIDATION_ERROR", "Số ngày công chuẩn phải lớn hơn 0.");
+  }
+  const probationSalaryRateBps = rule.probationSalaryRateBps ?? 8_500;
+  if (
+    !Number.isInteger(probationSalaryRateBps) ||
+    probationSalaryRateBps < 0 ||
+    probationSalaryRateBps > 10_000
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "Tỷ lệ lương thử việc phải từ 0% đến 100%.");
+  }
+
+  const employmentInput = employment ?? {
+    joinedDate: null,
+    officialDate: null,
+    category: "OFFICIAL" as const,
+  };
+  const { joinedDate, officialDate, category } = employmentInput;
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  if (
+    (joinedDate !== null && !datePattern.test(joinedDate)) ||
+    (officialDate !== null && !datePattern.test(officialDate)) ||
+    (joinedDate !== null && officialDate !== null && officialDate < joinedDate)
+  ) {
+    throw new DomainError("VALIDATION_ERROR", "Ngày gia nhập hoặc ngày chính thức không hợp lệ.");
+  }
+
+  const fallbackMode: EmploymentSalaryProjection["fallbackMode"] = officialDate
+    ? "OFFICIAL_DATE"
+    : category === "PROBATION"
+      ? "PROBATION_WITHOUT_OFFICIAL_DATE"
+      : category === "OFFICIAL"
+        ? "LEGACY_OFFICIAL_WITHOUT_OFFICIAL_DATE"
+        : "NON_PROBATION_CATEGORY";
+  const eligible = attendance.filter((row) =>
+    rule.attendancePolicy.eligibleStatuses.includes(row.status),
+  );
+  let probationWorkUnits = 0n;
+  let officialWorkUnits = 0n;
+  let excludedBeforeJoinWorkUnits = 0n;
+  for (const row of eligible) {
+    const workUnits =
+      rule.attendancePolicy.prorateMode === "WORK_UNITS" ? decimalHundredths(row.workUnits) : 100n;
+    if (joinedDate && row.businessDate < joinedDate) {
+      excludedBeforeJoinWorkUnits += workUnits;
+    } else if (
+      (officialDate && row.businessDate < officialDate) ||
+      (!officialDate && category === "PROBATION")
+    ) {
+      probationWorkUnits += workUnits;
+    } else {
+      officialWorkUnits += workUnits;
+    }
+  }
+
+  const fullThreshold = rule.attendancePolicy.minimumWorkUnitsForFullSalary;
+  const includedWorkUnits = probationWorkUnits + officialWorkUnits;
+  if (
+    fullThreshold !== null &&
+    includedWorkUnits >= decimalHundredths(fullThreshold) &&
+    includedWorkUnits < standardDays
+  ) {
+    const additionalWorkUnits = standardDays - includedWorkUnits;
+    if (officialWorkUnits > 0n || fallbackMode !== "PROBATION_WITHOUT_OFFICIAL_DATE") {
+      officialWorkUnits += additionalWorkUnits;
+    } else {
+      probationWorkUnits += additionalWorkUnits;
+    }
+  }
+  if (
+    rule.attendancePolicy.capAtStandardWorkdays &&
+    probationWorkUnits + officialWorkUnits > standardDays
+  ) {
+    probationWorkUnits = probationWorkUnits > standardDays ? standardDays : probationWorkUnits;
+    officialWorkUnits =
+      officialWorkUnits > standardDays - probationWorkUnits
+        ? standardDays - probationWorkUnits
+        : officialWorkUnits;
+  }
+
+  const baseSalary = BigInt(rule.baseSalary);
+  const probationWeight = probationWorkUnits * BigInt(probationSalaryRateBps);
+  const officialWeight = officialWorkUnits * 10_000n;
+  const baseNumerator = baseSalary * (probationWeight + officialWeight);
+  const baseDenominator = standardDays * 10_000n;
+  const overtimeMinutes = eligible.reduce(
+    (total, row) => total + Math.max(0, row.overtimeMinutes - rule.overtime.eligibleAfterMinutes),
+    0,
+  );
+  const overtimeNumerator =
+    baseSalary * 100n * BigInt(overtimeMinutes) * BigInt(rule.overtime.multiplierBps);
+  const overtimeDenominator = standardDays * BigInt(rule.standardDailyMinutes) * 10_000n;
+  const { unit, mode, applyAt } = rule.roundingPolicy;
+
+  let baseSalaryAmount: bigint;
+  let overtimeAmount: bigint;
+  let totalAmount: bigint;
+  if (applyAt === "COMPONENT") {
+    baseSalaryAmount = roundMoney(baseNumerator, baseDenominator, unit, mode);
+    overtimeAmount = roundMoney(overtimeNumerator, overtimeDenominator, unit, mode);
+    totalAmount = baseSalaryAmount + overtimeAmount;
+  } else {
+    const commonDenominator = baseDenominator * overtimeDenominator;
+    const totalNumerator =
+      baseNumerator * overtimeDenominator + overtimeNumerator * baseDenominator;
+    baseSalaryAmount = roundRational(baseNumerator, baseDenominator);
+    overtimeAmount = roundRational(overtimeNumerator, overtimeDenominator);
+    totalAmount = roundMoney(totalNumerator, commonDenominator, unit, mode);
+  }
+
+  return {
+    baseSalaryAmount: baseSalaryAmount.toString(),
+    overtimeAmount: overtimeAmount.toString(),
+    totalAmount: totalAmount.toString(),
+    joinedDate,
+    officialDate,
+    probationSalaryRateBps,
+    probationWorkUnits: hundredthsDecimal(probationWorkUnits),
+    officialWorkUnits: hundredthsDecimal(officialWorkUnits),
+    excludedBeforeJoinWorkUnits: hundredthsDecimal(excludedBeforeJoinWorkUnits),
+    probationWeight,
+    officialWeight,
+    fallbackMode,
+  };
+}
+
 /**
  * Pure payroll calculator. The caller resolves effective-dated rules and snapshots
  * the returned input/output; this function never reads a clock, database or environment.
@@ -947,6 +1314,20 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
   ) {
     throw new DomainError("VALIDATION_ERROR", "Kỳ lương không hợp lệ.");
   }
+  const baseSalaryAmount = assertUnsignedInteger(input.baseSalaryAmount, "Lương cơ bản");
+  const configuredDaysOff = input.salaryRule.configuration.standardDaysOffPerMonth ?? null;
+  const payableDays =
+    configuredDaysOff === null
+      ? Number(input.salaryRule.configuration.standardWorkdays)
+      : standardPayableDays(input.period.month, configuredDaysOff);
+  if (!Number.isFinite(payableDays) || payableDays <= 0) {
+    throw new DomainError("VALIDATION_ERROR", "Số ngày công chuẩn phải lớn hơn 0.");
+  }
+  const effectiveSalaryRule: SalaryRule = {
+    ...input.salaryRule.configuration,
+    baseSalary: baseSalaryAmount.toString(),
+    standardWorkdays: payableDays.toString(),
+  };
 
   const attendance = [...input.attendance].sort((left, right) =>
     compareStableText(left.attendanceId, right.attendanceId),
@@ -965,13 +1346,29 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
         `Attendance ${row.attendanceId} nằm ngoài kỳ lương.`,
       );
     }
-    assertUnsignedInteger(row.revenueAmount, "Doanh số");
+    assertUnsignedInteger(row.revenueAmount, "Số xu");
+    if (row.dailyRevenueBonusOverride !== undefined) {
+      assertUnsignedInteger(row.dailyRevenueBonusOverride, "Thưởng ngày điều chỉnh");
+    }
+    if (row.penaltiesOverride !== undefined) {
+      assertUnsignedInteger(row.penaltiesOverride, "Tiền phạt điều chỉnh");
+    }
     for (const violation of row.violations) {
       if (seenViolations.has(violation.violationId)) {
         throw new DomainError("VALIDATION_ERROR", `Violation ${violation.violationId} bị trùng.`);
       }
       seenViolations.add(violation.violationId);
       assertUnsignedInteger(violation.amount, "Tiền phạt");
+    }
+  }
+  for (const [key, value] of Object.entries(input.componentOverrides ?? {})) {
+    if (value === undefined) continue;
+    if (key === "otherBonus") {
+      if (!/^-?\d+$/.test(value)) {
+        throw new DomainError("VALIDATION_ERROR", "Thưởng khác điều chỉnh phải là số nguyên VND.");
+      }
+    } else {
+      assertUnsignedInteger(value, `${key} điều chỉnh`);
     }
   }
   for (const adjustment of input.adjustments) {
@@ -996,33 +1393,45 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
       workUnits: row.workUnits,
       actualLiveMinutes: row.actualLiveMinutes,
       overtimeMinutes: row.overtimeMinutes,
-      penaltyAmount: row.violations
-        .reduce((total, violation) => total + BigInt(violation.amount), 0n)
-        .toString(),
+      penaltyAmount:
+        row.penaltiesOverride ??
+        row.violations
+          .reduce((total, violation) => total + BigInt(violation.amount), 0n)
+          .toString(),
     })),
   );
-  const salary = calculateSalaryProjection(
-    input.salaryRule.configuration,
-    attendance.map((row) => ({
-      status: row.status,
-      workUnits: row.workUnits,
-      overtimeMinutes: row.overtimeMinutes,
-    })),
+  const workedDayCount = countWorkedDays(attendance);
+  const salary = calculateEmploymentSalaryProjection(
+    effectiveSalaryRule,
+    attendance,
+    input.employment,
   );
   const salaryTotal = BigInt(salary.totalAmount);
   const rawProratedSalary = BigInt(salary.baseSalaryAmount);
   const rawOvertimePay = BigInt(salary.overtimeAmount);
   const rawSalaryTotal = rawProratedSalary + rawOvertimePay;
-  const proratedSalary =
+  const calculatedProratedSalary =
     input.salaryRule.configuration.roundingPolicy.applyAt === "TOTAL"
       ? rawSalaryTotal === 0n
         ? 0n
         : roundRational(salaryTotal * rawProratedSalary, rawSalaryTotal)
       : rawProratedSalary;
-  const overtimePay =
+  const calculatedOvertimePay =
     input.salaryRule.configuration.roundingPolicy.applyAt === "TOTAL"
-      ? salaryTotal - proratedSalary
+      ? salaryTotal - calculatedProratedSalary
       : rawOvertimePay;
+  const totalSalaryWeight = salary.probationWeight + salary.officialWeight;
+  const calculatedProbationSalary =
+    totalSalaryWeight === 0n
+      ? 0n
+      : roundRational(calculatedProratedSalary * salary.probationWeight, totalSalaryWeight);
+  const calculatedOfficialSalary = calculatedProratedSalary - calculatedProbationSalary;
+  const proratedSalary = BigInt(
+    input.componentOverrides?.proratedSalary ?? calculatedProratedSalary.toString(),
+  );
+  const overtimePay = BigInt(
+    input.componentOverrides?.overtimePay ?? calculatedOvertimePay.toString(),
+  );
 
   const lines: PayrollLine[] = [];
   const pushLine = (line: PayrollLine): void => {
@@ -1030,13 +1439,14 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
   };
   pushLine({
     type: "BASE_SALARY",
-    amount: input.salaryRule.configuration.baseSalary,
-    sourceType: "RULE_VERSION",
-    sourceId: input.salaryRule.ruleVersionId,
+    amount: input.baseSalaryAmount,
+    sourceType: "STAFF_MEMBER",
+    sourceId: input.staffId,
     ruleVersionId: input.salaryRule.ruleVersionId,
-    label: "Lương cơ bản tham chiếu",
+    label: "Lương cơ bản nhân viên",
     calculationDetails: {
-      standardWorkdays: input.salaryRule.configuration.standardWorkdays,
+      standardWorkdays: effectiveSalaryRule.standardWorkdays,
+      standardDaysOffPerMonth: configuredDaysOff,
       includedInTotal: false,
     },
     includedInTotal: false,
@@ -1050,8 +1460,18 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     label: "Lương theo công",
     calculationDetails: {
       workUnits: aggregate.workUnits,
-      standardWorkdays: input.salaryRule.configuration.standardWorkdays,
+      standardWorkdays: effectiveSalaryRule.standardWorkdays,
       prorateMode: input.salaryRule.configuration.attendancePolicy.prorateMode,
+      joinedDate: salary.joinedDate,
+      officialDate: salary.officialDate,
+      probationSalaryRateBps: salary.probationSalaryRateBps,
+      probationWorkUnits: salary.probationWorkUnits,
+      officialWorkUnits: salary.officialWorkUnits,
+      excludedBeforeJoinWorkUnits: salary.excludedBeforeJoinWorkUnits,
+      probationSalaryAmount: calculatedProbationSalary.toString(),
+      officialSalaryAmount: calculatedOfficialSalary.toString(),
+      fallbackMode: salary.fallbackMode,
+      overridden: input.componentOverrides?.proratedSalary !== undefined,
     },
     includedInTotal: true,
   });
@@ -1066,14 +1486,19 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
       overtimeMinutes: aggregate.overtimeMinutes,
       multiplierBps: input.salaryRule.configuration.overtime.multiplierBps,
       roundingApplyAt: input.salaryRule.configuration.roundingPolicy.applyAt,
+      overridden: input.componentOverrides?.overtimePay !== undefined,
     },
     includedInTotal: true,
   });
 
+  let calculatedDailyRevenueBonus = 0n;
   let dailyRevenueBonus = 0n;
   for (const row of attendance) {
-    if (!row.dailyRewardRule) continue;
-    const amount = BigInt(calculateDailyReward(row.revenueAmount, row.dailyRewardRule.tiers));
+    const calculatedAmount = row.dailyRewardRule
+      ? BigInt(calculateDailyReward(row.revenueAmount, row.dailyRewardRule.tiers))
+      : 0n;
+    calculatedDailyRevenueBonus += calculatedAmount;
+    const amount = BigInt(row.dailyRevenueBonusOverride ?? calculatedAmount.toString());
     if (amount === 0n) continue;
     dailyRevenueBonus += amount;
     pushLine({
@@ -1081,12 +1506,26 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
       amount: amount.toString(),
       sourceType: "ATTENDANCE_DAY",
       sourceId: row.attendanceId,
-      ruleVersionId: row.dailyRewardRule.ruleVersionId,
-      label: `Thưởng doanh số ngày ${row.businessDate}`,
+      ruleVersionId: row.dailyRewardRule?.ruleVersionId ?? null,
+      label: `Thưởng xu ngày ${row.businessDate}`,
       calculationDetails: {
         businessDate: row.businessDate,
-        revenueAmount: row.revenueAmount,
+        dailyCoins: row.revenueAmount,
+        overridden: row.dailyRevenueBonusOverride !== undefined,
       },
+      includedInTotal: input.componentOverrides?.dailyRevenueBonus === undefined,
+    });
+  }
+  if (input.componentOverrides?.dailyRevenueBonus !== undefined) {
+    dailyRevenueBonus = BigInt(input.componentOverrides.dailyRevenueBonus);
+    pushLine({
+      type: "DAILY_REVENUE_BONUS",
+      amount: dailyRevenueBonus.toString(),
+      sourceType: "PAYROLL_WORKSHEET_OVERRIDE",
+      sourceId: `${input.staffId}:${input.period.month}:daily-bonus`,
+      ruleVersionId: null,
+      label: "Tổng thưởng xu ngày đã chỉnh",
+      calculationDetails: { overridden: true },
       includedInTotal: true,
     });
   }
@@ -1094,59 +1533,129 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
   let monthlyRevenueBonus = 0n;
   let attendanceBonus = 0n;
   let achievementBonus = 0n;
-  let levelBonus = 0n;
+  let retainLevelBonus = 0n;
+  let jumpLevelBonus = 0n;
   let suggestedLevelCode: string | null = null;
+  let suggestedLevelName: string | null = null;
+  let monthlyTransition: "NONE" | "RETAIN" | "JUMP" | "DOWN" = "NONE";
+  let attendanceEligible = false;
   if (input.monthlyLevelRule) {
     const result = calculateMonthlyLevelResult(
       {
-        revenueAmount: aggregate.revenueAmount,
-        workUnits: aggregate.workUnits,
-        actualLiveMinutes: aggregate.actualLiveMinutes,
-        currentLevelCode: input.currentLevel?.code ?? null,
-        currentLevelOrder: input.currentLevel?.displayOrder ?? null,
+        monthlyCoins: aggregate.revenueAmount,
+        workedDayCount,
+        attendanceRequiredDays: input.monthlyLevelRule.attendanceRequiredDays,
+        previousLevelCode: input.previousMonth.level?.code ?? null,
+        previousLevelOrder: input.previousMonth.level?.displayOrder ?? null,
       },
       input.monthlyLevelRule.levels,
     );
     const level = result.suggestedLevel;
+    monthlyTransition = result.transition;
+    attendanceEligible = result.attendanceEligible;
     if (level) {
       suggestedLevelCode = level.code;
-      monthlyRevenueBonus = BigInt(level.monthlyRevenueBonus);
+      suggestedLevelName = level.name;
       attendanceBonus = result.attendanceEligible ? BigInt(level.attendanceBonus) : 0n;
-      achievementBonus = result.achievementEligible ? BigInt(level.achievementBonus) : 0n;
-      levelBonus =
-        result.transition === "RETAIN"
-          ? BigInt(level.retainLevelBonus)
-          : result.transition === "JUMP"
-            ? BigInt(level.jumpLevelBonus)
-            : 0n;
-      const monthlyComponents = [
-        ["MONTHLY_REVENUE_BONUS", monthlyRevenueBonus, "Thưởng doanh số tháng"],
-        ["ATTENDANCE_BONUS", attendanceBonus, "Thưởng chuyên cần"],
-        ["ACHIEVEMENT_BONUS", achievementBonus, "Thưởng thành tích"],
-        ["LEVEL_BONUS", levelBonus, "Thưởng level"],
-      ] as const;
-      for (const [type, amount, label] of monthlyComponents) {
-        if (amount === 0n) continue;
-        pushLine({
-          type,
-          amount: amount.toString(),
-          sourceType: "MONTHLY_LEVEL",
-          sourceId: `${input.staffId}:${input.period.month}`,
-          ruleVersionId: input.monthlyLevelRule.ruleVersionId,
-          label,
-          calculationDetails: {
-            levelCode: level.code,
-            transition: result.transition,
-            revenueAmount: aggregate.revenueAmount,
-          },
-          includedInTotal: true,
-        });
-      }
+      achievementBonus = BigInt(level.achievementBonus);
+      retainLevelBonus = result.transition === "RETAIN" ? BigInt(level.retainLevelBonus) : 0n;
+      jumpLevelBonus = result.transition === "JUMP" ? BigInt(level.jumpLevelBonus) : 0n;
     }
   }
 
+  const calculatedMonthlyRevenueBonus = monthlyRevenueBonus;
+  const calculatedAttendanceBonus = attendanceBonus;
+  const calculatedAchievementBonus = achievementBonus;
+  const calculatedRetainLevelBonus = retainLevelBonus;
+  const calculatedJumpLevelBonus = jumpLevelBonus;
+  monthlyRevenueBonus = BigInt(
+    input.componentOverrides?.monthlyRevenueBonus ?? monthlyRevenueBonus.toString(),
+  );
+  attendanceBonus = BigInt(input.componentOverrides?.attendanceBonus ?? attendanceBonus.toString());
+  achievementBonus = BigInt(
+    input.componentOverrides?.achievementBonus ?? achievementBonus.toString(),
+  );
+  retainLevelBonus = BigInt(
+    input.componentOverrides?.retainLevelBonus ?? retainLevelBonus.toString(),
+  );
+  jumpLevelBonus = BigInt(input.componentOverrides?.jumpLevelBonus ?? jumpLevelBonus.toString());
+  const levelBonus = retainLevelBonus + jumpLevelBonus;
+  const monthlyComponents = [
+    [
+      "MONTHLY_REVENUE_BONUS",
+      monthlyRevenueBonus,
+      "Thưởng xu tháng (cũ)",
+      input.componentOverrides?.monthlyRevenueBonus !== undefined,
+    ],
+    [
+      "ATTENDANCE_BONUS",
+      attendanceBonus,
+      "Thưởng chuyên cần",
+      input.componentOverrides?.attendanceBonus !== undefined,
+    ],
+    [
+      "ACHIEVEMENT_BONUS",
+      achievementBonus,
+      "Thưởng thành tích",
+      input.componentOverrides?.achievementBonus !== undefined,
+    ],
+    [
+      "LEVEL_BONUS",
+      retainLevelBonus,
+      "Thưởng giữ bậc",
+      input.componentOverrides?.retainLevelBonus !== undefined,
+    ],
+    [
+      "LEVEL_BONUS",
+      jumpLevelBonus,
+      "Thưởng nhảy bậc",
+      input.componentOverrides?.jumpLevelBonus !== undefined,
+    ],
+  ] as const;
+  for (const [type, amount, label, overridden] of monthlyComponents) {
+    if (amount === 0n && !overridden) continue;
+    pushLine({
+      type,
+      amount: amount.toString(),
+      sourceType: overridden ? "PAYROLL_WORKSHEET_OVERRIDE" : "MONTHLY_LEVEL",
+      sourceId: `${input.staffId}:${input.period.month}`,
+      ruleVersionId: overridden ? null : (input.monthlyLevelRule?.ruleVersionId ?? null),
+      label,
+      calculationDetails: {
+        levelCode: suggestedLevelCode,
+        monthlyCoins: aggregate.revenueAmount,
+        workedDayCount,
+        attendanceRequiredDays: input.monthlyLevelRule?.attendanceRequiredDays ?? null,
+        transition: monthlyTransition,
+        overridden,
+      },
+      includedInTotal: true,
+    });
+  }
+
+  let calculatedPenalties = 0n;
   let penalties = 0n;
   for (const row of attendance) {
+    const rowCalculated = row.violations.reduce(
+      (total, violation) => total + BigInt(violation.amount),
+      0n,
+    );
+    calculatedPenalties += rowCalculated;
+    if (row.penaltiesOverride !== undefined) {
+      const amount = BigInt(row.penaltiesOverride);
+      penalties += amount;
+      pushLine({
+        type: "PENALTY",
+        amount: amount.toString(),
+        sourceType: "PAYROLL_WORKSHEET_OVERRIDE",
+        sourceId: `${input.staffId}:${row.businessDate}:penalty`,
+        ruleVersionId: null,
+        label: `Phạt ngày ${row.businessDate} đã chỉnh`,
+        calculationDetails: { businessDate: row.businessDate, overridden: true },
+        includedInTotal: input.componentOverrides?.penalties === undefined,
+      });
+      continue;
+    }
     for (const violation of [...row.violations].sort((left, right) =>
       compareStableText(left.violationId, right.violationId),
     )) {
@@ -1160,9 +1669,22 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
         ruleVersionId: violation.ruleVersionId,
         label: violation.itemName,
         calculationDetails: { businessDate: row.businessDate },
-        includedInTotal: true,
+        includedInTotal: input.componentOverrides?.penalties === undefined,
       });
     }
+  }
+  if (input.componentOverrides?.penalties !== undefined) {
+    penalties = BigInt(input.componentOverrides.penalties);
+    pushLine({
+      type: "PENALTY",
+      amount: penalties.toString(),
+      sourceType: "PAYROLL_WORKSHEET_OVERRIDE",
+      sourceId: `${input.staffId}:${input.period.month}:penalty`,
+      ruleVersionId: null,
+      label: "Tổng tiền phạt đã chỉnh",
+      calculationDetails: { overridden: true },
+      includedInTotal: true,
+    });
   }
 
   let otherBonus = 0n;
@@ -1181,7 +1703,7 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
         ruleVersionId: null,
         label: "Tạm ứng",
         calculationDetails: { reason: adjustment.reason },
-        includedInTotal: true,
+        includedInTotal: input.componentOverrides?.advance === undefined,
       });
     } else {
       otherBonus += amount;
@@ -1193,9 +1715,37 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
         ruleVersionId: null,
         label: adjustment.type === "CORRECTION" ? "Điều chỉnh" : "Thưởng khác",
         calculationDetails: { reason: adjustment.reason },
-        includedInTotal: true,
+        includedInTotal: input.componentOverrides?.otherBonus === undefined,
       });
     }
+  }
+  const calculatedOtherBonus = otherBonus;
+  const calculatedAdvance = advance;
+  otherBonus = BigInt(input.componentOverrides?.otherBonus ?? otherBonus.toString());
+  advance = BigInt(input.componentOverrides?.advance ?? advance.toString());
+  if (input.componentOverrides?.otherBonus !== undefined) {
+    pushLine({
+      type: "OTHER_BONUS",
+      amount: otherBonus.toString(),
+      sourceType: "PAYROLL_WORKSHEET_OVERRIDE",
+      sourceId: `${input.staffId}:${input.period.month}:other-bonus`,
+      ruleVersionId: null,
+      label: "Thưởng khác đã chỉnh",
+      calculationDetails: { overridden: true },
+      includedInTotal: true,
+    });
+  }
+  if (input.componentOverrides?.advance !== undefined) {
+    pushLine({
+      type: "ADVANCE",
+      amount: advance.toString(),
+      sourceType: "PAYROLL_WORKSHEET_OVERRIDE",
+      sourceId: `${input.staffId}:${input.period.month}:advance`,
+      ruleVersionId: null,
+      label: "Tạm ứng đã chỉnh",
+      calculationDetails: { overridden: true },
+      includedInTotal: true,
+    });
   }
 
   const totalIncome =
@@ -1209,6 +1759,18 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     otherBonus -
     penalties -
     advance;
+  const calculatedTotalIncome =
+    calculatedProratedSalary +
+    calculatedOvertimePay +
+    calculatedDailyRevenueBonus +
+    calculatedMonthlyRevenueBonus +
+    calculatedAttendanceBonus +
+    calculatedAchievementBonus +
+    calculatedRetainLevelBonus +
+    calculatedJumpLevelBonus +
+    calculatedOtherBonus -
+    calculatedPenalties -
+    calculatedAdvance;
   pushLine({
     type: "TOTAL_INCOME",
     amount: totalIncome.toString(),
@@ -1232,19 +1794,23 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
   return {
     aggregates: {
       workUnits: aggregate.workUnits,
+      workedDayCount,
       overtimeMinutes: aggregate.overtimeMinutes,
       revenueAmount: aggregate.revenueAmount,
+      currentMonthCoins: aggregate.revenueAmount,
       actualLiveMinutes: aggregate.actualLiveMinutes,
       penalties: penalties.toString(),
       violationCount: seenViolations.size,
     },
     components: {
-      baseSalary: input.salaryRule.configuration.baseSalary,
+      baseSalary: input.baseSalaryAmount,
       proratedSalary: proratedSalary.toString(),
       dailyRevenueBonus: dailyRevenueBonus.toString(),
       monthlyRevenueBonus: monthlyRevenueBonus.toString(),
       attendanceBonus: attendanceBonus.toString(),
       achievementBonus: achievementBonus.toString(),
+      retainLevelBonus: retainLevelBonus.toString(),
+      jumpLevelBonus: jumpLevelBonus.toString(),
       levelBonus: levelBonus.toString(),
       overtimePay: overtimePay.toString(),
       otherBonus: otherBonus.toString(),
@@ -1252,11 +1818,60 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
       advance: advance.toString(),
       totalIncome: totalIncome.toString(),
     },
+    calculatedComponents: {
+      proratedSalary: calculatedProratedSalary.toString(),
+      dailyRevenueBonus: calculatedDailyRevenueBonus.toString(),
+      monthlyRevenueBonus: calculatedMonthlyRevenueBonus.toString(),
+      attendanceBonus: calculatedAttendanceBonus.toString(),
+      achievementBonus: calculatedAchievementBonus.toString(),
+      retainLevelBonus: calculatedRetainLevelBonus.toString(),
+      jumpLevelBonus: calculatedJumpLevelBonus.toString(),
+      overtimePay: calculatedOvertimePay.toString(),
+      otherBonus: calculatedOtherBonus.toString(),
+      penalties: calculatedPenalties.toString(),
+      advance: calculatedAdvance.toString(),
+      totalIncome: calculatedTotalIncome.toString(),
+    },
+    salaryBasis: {
+      daysInMonth: daysInPayrollMonth(input.period.month),
+      standardDaysOffPerMonth: configuredDaysOff,
+      standardPayableDays: payableDays,
+    },
+    employmentSalary: {
+      joinedDate: salary.joinedDate,
+      officialDate: salary.officialDate,
+      probationSalaryRateBps: salary.probationSalaryRateBps,
+      probationWorkUnits: salary.probationWorkUnits,
+      officialWorkUnits: salary.officialWorkUnits,
+      excludedBeforeJoinWorkUnits: salary.excludedBeforeJoinWorkUnits,
+      probationSalaryAmount: calculatedProbationSalary.toString(),
+      officialSalaryAmount: calculatedOfficialSalary.toString(),
+      calculatedProratedSalary: calculatedProratedSalary.toString(),
+      fallbackMode: salary.fallbackMode,
+    },
+    monthlyLevel: {
+      workedDayCount,
+      attendanceRequiredDays: input.monthlyLevelRule?.attendanceRequiredDays ?? null,
+      attendanceEligible,
+      previousMonthCoins: input.previousMonth.coins,
+      previousMonthCoinsSource: input.previousMonth.source,
+      previousLevelCode: input.previousMonth.level?.code ?? null,
+      previousLevelName: input.previousMonth.level?.name ?? null,
+      previousLevelOrder: input.previousMonth.level?.displayOrder ?? null,
+      currentMonthCoins: aggregate.revenueAmount,
+      currentLevelCode: suggestedLevelCode,
+      currentLevelName: suggestedLevelName,
+      currentLevelOrder:
+        input.monthlyLevelRule?.levels.find((level) => level.code === suggestedLevelCode)
+          ?.displayOrder ?? null,
+      transition: monthlyTransition,
+    },
     suggestedLevelCode,
     selectedRuleVersionIds,
     anomalyFlags: [
       ...(attendance.length === 0 ? ["NO_ATTENDANCE"] : []),
       ...(attendance.some((row) => row.status === "DRAFT") ? ["DRAFT_ATTENDANCE"] : []),
+      ...(salary.excludedBeforeJoinWorkUnits !== "0" ? ["WORK_BEFORE_JOIN_DATE"] : []),
       ...(input.monthlyLevelRule === null ? ["MISSING_MONTHLY_LEVEL_RULE"] : []),
       ...(totalIncome < 0n ? ["NEGATIVE_TOTAL"] : []),
     ],

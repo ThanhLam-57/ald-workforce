@@ -157,6 +157,9 @@ export async function listAdminStaff(
         email: true,
         phone: true,
         jobTitle: true,
+        baseSalaryAmount: true,
+        joinedDate: true,
+        officialDate: true,
         employmentCategory: true,
         employmentStatus: true,
         version: true,
@@ -191,18 +194,23 @@ export async function listAdminStaff(
   ]);
 
   return {
-    items: items.map(({ assignments, levelHistories, ...staff }) => ({
-      ...staff,
-      currentAssignments: assignments.map((assignment) => ({
-        id: assignment.id,
-        branchId: assignment.branchId,
-        branchCode: assignment.branch.code,
-        branchName: assignment.branch.name,
-        assignmentType: assignment.assignmentType,
-      })),
-      level: levelHistories[0]?.performanceLevel ?? null,
-      updatedAt: staff.updatedAt.toISOString(),
-    })),
+    items: items.map(
+      ({ assignments, levelHistories, baseSalaryAmount, joinedDate, officialDate, ...staff }) => ({
+        ...staff,
+        baseSalaryAmount: baseSalaryAmount.toString(),
+        joinedDate: joinedDate?.toISOString().slice(0, 10) ?? null,
+        officialDate: officialDate?.toISOString().slice(0, 10) ?? null,
+        currentAssignments: assignments.map((assignment) => ({
+          id: assignment.id,
+          branchId: assignment.branchId,
+          branchCode: assignment.branch.code,
+          branchName: assignment.branch.name,
+          assignmentType: assignment.assignmentType,
+        })),
+        level: levelHistories[0]?.performanceLevel ?? null,
+        updatedAt: staff.updatedAt.toISOString(),
+      }),
+    ),
     page: query.page,
     pageSize: query.pageSize,
     total,
@@ -349,6 +357,7 @@ export async function listAdminUsers(
         username: true,
         email: true,
         role: true,
+        canManagePayroll: true,
         active: true,
         mustChangePassword: true,
         version: true,

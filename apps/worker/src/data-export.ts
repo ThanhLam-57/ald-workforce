@@ -245,7 +245,7 @@ async function branchMonthlyData(job: {
       "Số công",
       "Tăng ca",
       "Phút Live",
-      "Doanh số",
+      "Doanh số (xu)",
       "Tiền phạt",
     ],
     rows: attendance.map((item) => [
@@ -369,7 +369,7 @@ async function companyMonthlyData(job: {
       "Nhân viên",
       "Số công",
       "Phút Live",
-      "Doanh số",
+      "Tổng xu",
       "Tiền phạt",
       "Thưởng",
       "Thực nhận",

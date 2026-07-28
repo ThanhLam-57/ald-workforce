@@ -1,6 +1,11 @@
 "use client";
 
-import type { PenaltyItemDto, PenaltyRuleVersionDto, ViolationDto } from "@ald/contracts";
+import type {
+  PenaltyItemDto,
+  PenaltyRuleVersionDto,
+  ViolationDto,
+  ViolationPreviewDto,
+} from "@ald/contracts";
 import { useState, type ChangeEvent, type FormEvent } from "react";
 
 type ApiPayload = Readonly<{
@@ -20,6 +25,16 @@ function money(value: string): string {
     currency: "VND",
     maximumFractionDigits: 0,
   }).format(BigInt(value));
+}
+
+function isManualPenaltyItem(item: PenaltyItemDto): boolean {
+  const condition = item.metadata?.automaticCondition;
+  return (
+    typeof condition !== "object" ||
+    condition === null ||
+    !("type" in condition) ||
+    condition.type === "MANUAL"
+  );
 }
 
 async function sha256Base64(file: File): Promise<string> {
@@ -90,10 +105,33 @@ export function AttendanceViolations({
   const [note, setNote] = useState("");
   const [amountOverride, setAmountOverride] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
+  const [preview, setPreview] = useState<ViolationPreviewDto | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
 
   const selectedItem = items.find((item) => item.id === selectedItemId);
+  const activeViolationCount = violations.filter(
+    (violation) => violation.status === "ACTIVE",
+  ).length;
+
+  async function loadPreview(penaltyItemId: string) {
+    if (!attendanceId || !penaltyItemId) {
+      setPreview(null);
+      return;
+    }
+    const response = await fetch(
+      `/api/violations/preview?attendanceId=${encodeURIComponent(attendanceId)}&penaltyItemId=${encodeURIComponent(penaltyItemId)}`,
+      { cache: "no-store" },
+    );
+    const payload = (await response.json()) as ApiPayload;
+    if (!response.ok) {
+      setPreview(null);
+      setMessage(errorMessage(payload));
+      return;
+    }
+    setPreview(payload.data as ViolationPreviewDto);
+  }
 
   async function openEditor() {
     if (!attendanceId) {
@@ -113,13 +151,14 @@ export function AttendanceViolations({
     }
     const versions = payload.data as readonly PenaltyRuleVersionDto[];
     const activeItems = versions.flatMap((version) =>
-      version.items.filter((item) => item.isActive),
+      version.items.filter((item) => item.isActive && isManualPenaltyItem(item)),
     );
     setItems(activeItems);
     const first = activeItems[0];
     setSelectedItemId(first?.id ?? "");
     setDetail(first?.description ?? "");
     setEditing(true);
+    if (first) void loadPreview(first.id);
     setMessage(activeItems.length === 0 ? "Không có loại lỗi hiệu lực ngày này." : null);
   }
 
@@ -129,6 +168,7 @@ export function AttendanceViolations({
     setDetail(item?.description ?? "");
     setAmountOverride("");
     setOverrideReason("");
+    void loadPreview(id);
   }
 
   async function create(event: FormEvent<HTMLFormElement>) {
@@ -248,168 +288,259 @@ export function AttendanceViolations({
   }
 
   return (
-    <div className="min-w-80">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="font-medium">Phạt: {money(activePenaltyTotal)}</span>
-        <button
-          className="text-sky-700 underline"
-          disabled={pending || !attendanceId}
-          onClick={() => void openEditor()}
-          type="button"
+    <>
+      <button
+        aria-label={`Mở lỗi và evidence ngày ${businessDate}`}
+        className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border transition ${
+          activeViolationCount > 0
+            ? "border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100"
+            : "border-slate-300 bg-white text-slate-500 hover:bg-slate-100"
+        }`}
+        onClick={() => setPanelOpen(true)}
+        title={`Lỗi & evidence ngày ${businessDate}`}
+        type="button"
+      >
+        <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
+          <path
+            d="M12 9v4m0 4h.01M10.3 4.5 2.6 18a2 2 0 0 0 1.74 3h15.32a2 2 0 0 0 1.74-3L13.7 4.5a2 2 0 0 0-3.4 0Z"
+            stroke="currentColor"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="1.8"
+          />
+        </svg>
+      </button>
+
+      {panelOpen ? (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto bg-slate-950/40 p-2 sm:p-4"
+          role="presentation"
         >
-          Thêm lỗi
-        </button>
-      </div>
-      <div className="mt-2 space-y-2">
-        {violations.length === 0 ? (
-          <p className="text-xs text-slate-400">Chưa có lỗi.</p>
-        ) : (
-          violations.map((violation) => (
-            <div
-              className={`rounded-lg border p-2 text-xs ${
-                violation.status === "CANCELLED" ? "opacity-50" : ""
-              }`}
-              key={violation.id}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className="rounded-full px-2 py-1 font-medium text-white"
-                  style={{ backgroundColor: violation.displayColor }}
+          <div
+            aria-label={`Lỗi và evidence ngày ${businessDate}`}
+            aria-modal="true"
+            className="flex max-h-[calc(100dvh-1rem)] w-full max-w-2xl min-w-0 flex-col overflow-hidden rounded-2xl bg-white shadow-2xl sm:max-h-[calc(100dvh-2rem)]"
+            role="dialog"
+          >
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-200 p-4 sm:p-5">
+              <div className="min-w-0">
+                <h3 className="break-words text-lg font-semibold [overflow-wrap:anywhere]">
+                  Lỗi & evidence
+                </h3>
+                <p className="break-words text-sm text-slate-500 [overflow-wrap:anywhere]">
+                  Ngày {businessDate}
+                </p>
+              </div>
+              <button
+                className="shrink-0 rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50"
+                onClick={() => setPanelOpen(false)}
+                type="button"
+              >
+                Đóng
+              </button>
+            </div>
+
+            <div className="min-h-0 min-w-0 overflow-y-auto overscroll-contain p-4 [overflow-wrap:anywhere] sm:p-5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">Phạt: {money(activePenaltyTotal)}</span>
+                <button
+                  className="text-sky-700 underline"
+                  disabled={pending || !attendanceId}
+                  onClick={() => void openEditor()}
+                  type="button"
                 >
-                  {violation.itemName}
-                </span>
-                <span>{money(violation.amount)}</span>
-                {violation.status === "CANCELLED" ? <span>Đã hủy</span> : null}
+                  Thêm lỗi
+                </button>
               </div>
-              <p className="mt-1">{violation.detail}</p>
-              {violation.note ? <p className="mt-1 text-slate-500">{violation.note}</p> : null}
-              <div className="mt-2 flex flex-wrap gap-2">
-                {violation.evidence
-                  .filter((evidence) => evidence.status === "READY")
-                  .map((evidence) => (
-                    <EvidenceThumbnail
-                      evidenceId={evidence.id}
-                      key={evidence.id}
-                      name={evidence.originalFileName}
-                    />
-                  ))}
+              <div className="mt-2 space-y-2">
+                {violations.length === 0 ? (
+                  <p className="text-xs text-slate-400">Chưa có lỗi.</p>
+                ) : (
+                  violations.map((violation) => (
+                    <div
+                      className={`rounded-lg border p-2 text-xs ${
+                        violation.status === "CANCELLED" ? "opacity-50" : ""
+                      }`}
+                      key={violation.id}
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className="max-w-full whitespace-normal break-words rounded-full px-2 py-1 font-medium text-white [overflow-wrap:anywhere]"
+                          style={{ backgroundColor: violation.displayColor }}
+                        >
+                          {violation.itemName}
+                        </span>
+                        <span>{money(violation.amount)}</span>
+                        <span className="font-medium text-slate-600">
+                          {violation.isChargeable
+                            ? `Lần ${violation.occurrenceNo}`
+                            : `Nhắc lần ${violation.occurrenceNo}/${violation.penaltyStartsAt - 1}`}
+                        </span>
+                        {violation.status === "CANCELLED" ? <span>Đã hủy</span> : null}
+                        {violation.origin === "AUTOMATIC" ? (
+                          <span className="rounded-full bg-sky-100 px-2 py-1 text-sky-800">
+                            {violation.automaticSnapshot?.triggerType === "CHECK_IN_LATE"
+                              ? "Tự động từ check-in"
+                              : "Tự động từ thời lượng Live"}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                        {violation.detail}
+                      </p>
+                      {violation.note ? (
+                        <p className="mt-1 whitespace-pre-wrap break-words text-slate-500 [overflow-wrap:anywhere]">
+                          {violation.note}
+                        </p>
+                      ) : null}
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {violation.evidence
+                          .filter((evidence) => evidence.status === "READY")
+                          .map((evidence) => (
+                            <EvidenceThumbnail
+                              evidenceId={evidence.id}
+                              key={evidence.id}
+                              name={evidence.originalFileName}
+                            />
+                          ))}
+                      </div>
+                      {violation.status === "ACTIVE" ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-3">
+                          <label className="cursor-pointer text-sky-700 underline">
+                            Thêm ảnh
+                            <input
+                              accept="image/jpeg,image/png,image/webp"
+                              className="sr-only"
+                              disabled={pending}
+                              onChange={(event) => void uploadEvidence(violation, event)}
+                              type="file"
+                            />
+                          </label>
+                          {violation.origin === "MANUAL" ? (
+                            <button
+                              className="text-rose-700 underline"
+                              disabled={pending}
+                              onClick={() => void cancel(violation)}
+                              type="button"
+                            >
+                              Hủy lỗi
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                )}
               </div>
-              {violation.status === "ACTIVE" ? (
-                <div className="mt-2 flex flex-wrap items-center gap-3">
-                  <label className="cursor-pointer text-sky-700 underline">
-                    Thêm ảnh
-                    <input
-                      accept="image/jpeg,image/png,image/webp"
-                      className="sr-only"
-                      disabled={pending}
-                      onChange={(event) => void uploadEvidence(violation, event)}
-                      type="file"
+
+              {editing ? (
+                <form
+                  className="mt-3 grid gap-2 rounded-xl border border-sky-200 bg-sky-50 p-3"
+                  onSubmit={(event) => void create(event)}
+                >
+                  <label className="grid gap-1 text-xs">
+                    Loại lỗi hiệu lực ngày {businessDate}
+                    <select
+                      aria-label={`Loại lỗi ${businessDate}`}
+                      className="w-full min-w-0 text-ellipsis"
+                      onChange={(event) => selectItem(event.target.value)}
+                      required
+                      style={{
+                        borderLeftColor: selectedItem?.displayColor,
+                        borderLeftWidth: "0.45rem",
+                      }}
+                      value={selectedItemId}
+                    >
+                      {items.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.code} — {item.name} — {money(item.defaultAmount)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedItem ? (
+                    <span
+                      className="max-w-full whitespace-normal break-words rounded-full px-2 py-1 text-xs font-medium text-white [overflow-wrap:anywhere]"
+                      style={{ backgroundColor: selectedItem.displayColor }}
+                    >
+                      {selectedItem.name} · {money(selectedItem.defaultAmount)}
+                    </span>
+                  ) : null}
+                  {preview ? (
+                    <div
+                      className={`break-words rounded-lg border px-3 py-2 text-xs font-medium [overflow-wrap:anywhere] ${
+                        preview.isChargeable
+                          ? "border-rose-200 bg-rose-50 text-rose-800"
+                          : "border-amber-200 bg-amber-50 text-amber-800"
+                      }`}
+                    >
+                      {preview.message}
+                    </div>
+                  ) : null}
+                  <label className="grid gap-1 text-xs">
+                    Chi tiết thực tế
+                    <textarea
+                      aria-label={`Chi tiết lỗi ${businessDate}`}
+                      onChange={(event) => setDetail(event.target.value)}
+                      required
+                      rows={2}
+                      value={detail}
                     />
                   </label>
-                  <button
-                    className="text-rose-700 underline"
-                    disabled={pending}
-                    onClick={() => void cancel(violation)}
-                    type="button"
-                  >
-                    Hủy lỗi
-                  </button>
-                </div>
+                  <input
+                    onChange={(event) => setNote(event.target.value)}
+                    placeholder="Ghi chú thêm"
+                    value={note}
+                  />
+                  {canOverrideAmount ? (
+                    <>
+                      <input
+                        min="0"
+                        onChange={(event) => setAmountOverride(event.target.value)}
+                        placeholder="Override tiền phạt (không bắt buộc)"
+                        type="number"
+                        value={amountOverride}
+                      />
+                      {amountOverride ? (
+                        <input
+                          onChange={(event) => setOverrideReason(event.target.value)}
+                          placeholder="Lý do override"
+                          required
+                          value={overrideReason}
+                        />
+                      ) : null}
+                    </>
+                  ) : null}
+                  <div className="flex gap-3">
+                    <button
+                      className="font-medium text-sky-700 underline"
+                      disabled={pending || items.length === 0}
+                      type="submit"
+                    >
+                      Ghi lỗi
+                    </button>
+                    <button
+                      className="text-slate-500 underline"
+                      onClick={() => setEditing(false)}
+                      type="button"
+                    >
+                      Đóng
+                    </button>
+                  </div>
+                </form>
+              ) : null}
+              {message ? (
+                <p
+                  aria-live="polite"
+                  className="mt-2 whitespace-pre-wrap break-words text-xs text-slate-600 [overflow-wrap:anywhere]"
+                >
+                  {message}
+                </p>
               ) : null}
             </div>
-          ))
-        )}
-      </div>
-
-      {editing ? (
-        <form
-          className="mt-3 grid gap-2 rounded-xl border border-sky-200 bg-sky-50 p-3"
-          onSubmit={(event) => void create(event)}
-        >
-          <label className="grid gap-1 text-xs">
-            Loại lỗi hiệu lực ngày {businessDate}
-            <select
-              aria-label={`Loại lỗi ${businessDate}`}
-              onChange={(event) => selectItem(event.target.value)}
-              required
-              style={{
-                borderLeftColor: selectedItem?.displayColor,
-                borderLeftWidth: "0.45rem",
-              }}
-              value={selectedItemId}
-            >
-              {items.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.code} — {item.name} — {money(item.defaultAmount)}
-                </option>
-              ))}
-            </select>
-          </label>
-          {selectedItem ? (
-            <span
-              className="w-fit rounded-full px-2 py-1 text-xs font-medium text-white"
-              style={{ backgroundColor: selectedItem.displayColor }}
-            >
-              {selectedItem.name} · {money(selectedItem.defaultAmount)}
-            </span>
-          ) : null}
-          <label className="grid gap-1 text-xs">
-            Chi tiết thực tế
-            <textarea
-              aria-label={`Chi tiết lỗi ${businessDate}`}
-              onChange={(event) => setDetail(event.target.value)}
-              required
-              rows={2}
-              value={detail}
-            />
-          </label>
-          <input
-            onChange={(event) => setNote(event.target.value)}
-            placeholder="Ghi chú thêm"
-            value={note}
-          />
-          {canOverrideAmount ? (
-            <>
-              <input
-                min="0"
-                onChange={(event) => setAmountOverride(event.target.value)}
-                placeholder="Override tiền phạt (không bắt buộc)"
-                type="number"
-                value={amountOverride}
-              />
-              {amountOverride ? (
-                <input
-                  onChange={(event) => setOverrideReason(event.target.value)}
-                  placeholder="Lý do override"
-                  required
-                  value={overrideReason}
-                />
-              ) : null}
-            </>
-          ) : null}
-          <div className="flex gap-3">
-            <button
-              className="font-medium text-sky-700 underline"
-              disabled={pending || items.length === 0}
-              type="submit"
-            >
-              Ghi lỗi
-            </button>
-            <button
-              className="text-slate-500 underline"
-              onClick={() => setEditing(false)}
-              type="button"
-            >
-              Đóng
-            </button>
           </div>
-        </form>
+        </div>
       ) : null}
-      {message ? (
-        <p aria-live="polite" className="mt-2 text-xs text-slate-600">
-          {message}
-        </p>
-      ) : null}
-    </div>
+    </>
   );
 }

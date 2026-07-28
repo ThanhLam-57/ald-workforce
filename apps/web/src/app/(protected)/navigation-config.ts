@@ -46,9 +46,9 @@ const navigationItems: readonly NavigationItem[] = [
     href: "/company-report",
     label: "Báo cáo công ty",
     shortLabel: "BC",
-    description: "Dashboard GM và báo cáo toàn công ty",
+    description: "Báo cáo tổng hợp trong phạm vi được phân công",
     section: "Vận hành",
-    roles: ["GENERAL_MANAGER"],
+    roles: ["GENERAL_MANAGER", "TRAINING_MANAGER"],
   },
   {
     href: "/manager-kpi",
@@ -59,20 +59,12 @@ const navigationItems: readonly NavigationItem[] = [
     roles: ["GENERAL_MANAGER", "TRAINING_MANAGER"],
   },
   {
-    href: "/rules/configured",
-    label: "Thưởng, level, lương & KPI",
-    shortLabel: "TL",
-    description: "Rule có phiên bản và lịch hiệu lực",
+    href: "/rules",
+    label: "Thưởng & phạt",
+    shortLabel: "QP",
+    description: "Thiết lập nhanh mốc thưởng và mức phạt",
     section: "Quy định",
     roles: ["GENERAL_MANAGER", "TRAINING_MANAGER"],
-  },
-  {
-    href: "/rules/penalties",
-    label: "Rule phạt",
-    shortLabel: "RP",
-    description: "Danh mục lỗi, mức phạt và lịch sử version",
-    section: "Quy định",
-    roles: ["GENERAL_MANAGER"],
   },
   {
     href: "/payroll",
@@ -99,14 +91,6 @@ const navigationItems: readonly NavigationItem[] = [
     roles: ["GENERAL_MANAGER"],
   },
   {
-    href: "/data-governance",
-    label: "Import & Export",
-    shortLabel: "DL",
-    description: "Nhập và xuất dữ liệu trong phạm vi cơ sở",
-    section: "Dữ liệu",
-    roles: ["TRAINING_MANAGER"],
-  },
-  {
     href: "/administration",
     label: "Quản trị nền tảng",
     shortLabel: "QT",
@@ -124,7 +108,11 @@ const navigationItems: readonly NavigationItem[] = [
   },
 ] as const;
 
-export function navigationForRole(role: AuthRole): readonly Omit<NavigationItem, "roles">[] {
+export function navigationForRole(
+  role: AuthRole,
+  _canManagePayroll = role === "GENERAL_MANAGER",
+): readonly Omit<NavigationItem, "roles">[] {
+  void _canManagePayroll;
   return navigationItems
     .filter((item) => item.roles.includes(role))
     .map((item) => ({
@@ -136,7 +124,20 @@ export function navigationForRole(role: AuthRole): readonly Omit<NavigationItem,
     }));
 }
 
-export function roleCanOpenPath(role: AuthRole, pathname: string): boolean {
+export function roleCanOpenPath(
+  role: AuthRole,
+  pathname: string,
+  _canManagePayroll = role === "GENERAL_MANAGER",
+): boolean {
+  void _canManagePayroll;
+  if (
+    role === "TRAINING_MANAGER" &&
+    ["/rules/configured", "/rules/penalties"].some(
+      (path) => pathname === path || pathname.startsWith(`${path}/`),
+    )
+  ) {
+    return false;
+  }
   return navigationItems.some(
     (item) =>
       item.roles.includes(role) && (pathname === item.href || pathname.startsWith(`${item.href}/`)),

@@ -22,6 +22,7 @@ import {
 import { parseBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
+import { activateDueSimpleRules } from "./simple-rule-service";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -38,6 +39,7 @@ const ruleVersionSelect = {
   createdAt: true,
   publishedAt: true,
   items: {
+    where: { archivedAt: null },
     select: {
       id: true,
       code: true,
@@ -173,7 +175,11 @@ export async function listPenaltyRuleSets(
   const businessDate = toBusinessDateString(now);
   const date = parseBusinessDate(businessDate);
   const ruleSets = await prisma.ruleSet.findMany({
-    where: { companyId: actor.companyId, type: "PENALTY" },
+    where: {
+      companyId: actor.companyId,
+      type: "PENALTY",
+      managementMode: "VERSIONED",
+    },
     select: {
       id: true,
       name: true,
@@ -216,13 +222,43 @@ export async function listActivePenaltyVersions(
   const versions = await prisma.ruleVersion.findMany({
     where: {
       companyId: actor.companyId,
-      ruleSet: { type: "PENALTY" },
+      ruleSet: {
+        companyId: actor.companyId,
+        type: "PENALTY",
+        managementMode: "VERSIONED",
+      },
       status: { not: "DRAFT" },
       effectiveFrom: { lte: date },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: date } }],
     },
     select: ruleVersionSelect,
     orderBy: [{ ruleSetId: "asc" }, { versionNo: "desc" }],
+  });
+  return versions.map((version) => versionDto(version, businessDate));
+}
+
+export async function listActiveSimplePenaltyVersions(
+  actor: ActorContext,
+  businessDate: string,
+): Promise<readonly PenaltyRuleVersionDto[]> {
+  requirePermission(actor, "rule:read");
+  await activateDueSimpleRules(actor.companyId);
+  const date = parseBusinessDate(businessDate);
+  const versions = await prisma.ruleVersion.findMany({
+    where: {
+      companyId: actor.companyId,
+      isSimpleCurrent: true,
+      supersededAt: null,
+      status: "ACTIVE",
+      effectiveFrom: { lte: date },
+      effectiveTo: null,
+      ruleSet: {
+        companyId: actor.companyId,
+        type: "PENALTY",
+        managementMode: "SIMPLE_MUTABLE",
+      },
+    },
+    select: ruleVersionSelect,
   });
   return versions.map((version) => versionDto(version, businessDate));
 }
@@ -238,6 +274,7 @@ export async function createPenaltyRuleSet(
       data: {
         companyId: actor.companyId,
         type: "PENALTY",
+        managementMode: "VERSIONED",
         name: input.name,
         createdByUserId: actor.userId,
       },
@@ -291,6 +328,7 @@ export async function createPenaltyRuleDraft(
         id: input.ruleSetId,
         companyId: actor.companyId,
         type: "PENALTY",
+        managementMode: "VERSIONED",
       },
     });
     if (!ruleSet) {
@@ -378,7 +416,15 @@ export async function updatePenaltyRuleDraft(
   });
   return prisma.$transaction(async (tx) => {
     const before = await tx.ruleVersion.findFirst({
-      where: { id, companyId: actor.companyId },
+      where: {
+        id,
+        companyId: actor.companyId,
+        ruleSet: {
+          companyId: actor.companyId,
+          type: "PENALTY",
+          managementMode: "VERSIONED",
+        },
+      },
       select: ruleVersionSelect,
     });
     if (!before) {
@@ -461,7 +507,15 @@ export async function publishPenaltyRuleVersion(
   try {
     return await prisma.$transaction(async (tx) => {
       const before = await tx.ruleVersion.findFirst({
-        where: { id, companyId: actor.companyId },
+        where: {
+          id,
+          companyId: actor.companyId,
+          ruleSet: {
+            companyId: actor.companyId,
+            type: "PENALTY",
+            managementMode: "VERSIONED",
+          },
+        },
         select: ruleVersionSelect,
       });
       if (!before) {
@@ -549,7 +603,15 @@ export async function retirePenaltyRuleVersion(
   const effectiveTo = parseBusinessDate(input.effectiveTo);
   return prisma.$transaction(async (tx) => {
     const before = await tx.ruleVersion.findFirst({
-      where: { id, companyId: actor.companyId },
+      where: {
+        id,
+        companyId: actor.companyId,
+        ruleSet: {
+          companyId: actor.companyId,
+          type: "PENALTY",
+          managementMode: "VERSIONED",
+        },
+      },
       select: ruleVersionSelect,
     });
     if (!before) {
@@ -612,6 +674,11 @@ export async function comparePenaltyRuleVersions(
     where: {
       companyId: actor.companyId,
       id: { in: [fromVersionId, toVersionId] },
+      ruleSet: {
+        companyId: actor.companyId,
+        type: "PENALTY",
+        managementMode: "VERSIONED",
+      },
     },
     select: ruleVersionSelect,
   });

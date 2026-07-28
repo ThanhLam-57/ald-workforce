@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  calculatePenaltyOccurrence,
   comparePenaltyItems,
   effectiveIntervalsOverlap,
   effectiveRuleStatus,
   isDateInEffectiveInterval,
+  penaltyCountingPeriod,
   sumPenaltyAmounts,
 } from "./index";
 
@@ -59,6 +61,40 @@ describe("penalty snapshot helpers", () => {
       addedCodes: ["NEW"],
       removedCodes: ["OLD"],
       changedCodes: ["LATE"],
+    });
+  });
+});
+
+describe("phạt theo số lần", () => {
+  const policy = {
+    penaltyStartsAt: 4,
+    countingWindow: "CALENDAR_MONTH" as const,
+    countingKey: "LATE",
+  };
+
+  it.each([
+    [1, "0", false, 3],
+    [2, "0", false, 2],
+    [3, "0", false, 1],
+    [4, "50000", true, 0],
+    [5, "50000", true, 0],
+  ])("tính lần %i", (occurrenceNo, amount, chargeable, remaining) => {
+    expect(calculatePenaltyOccurrence(policy, occurrenceNo, "50000")).toEqual({
+      occurrenceNo,
+      computedAmount: amount,
+      isChargeable: chargeable,
+      remainingReminderCount: remaining,
+    });
+  });
+
+  it("tách chu kỳ tháng và toàn thời gian", () => {
+    expect(penaltyCountingPeriod("2026-07-24", "CALENDAR_MONTH")).toEqual({
+      start: "2026-07-01",
+      end: "2026-08-01",
+    });
+    expect(penaltyCountingPeriod("2026-07-24", "LIFETIME")).toEqual({
+      start: "1970-01-01",
+      end: null,
     });
   });
 });

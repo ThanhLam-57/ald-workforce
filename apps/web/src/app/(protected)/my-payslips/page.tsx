@@ -13,7 +13,7 @@ export default async function MyPayslipsPage() {
         eyebrow="Thu nhập cá nhân"
         title="Phiếu lương của tôi"
       />
-      <PayrollWorkspace branches={[]} isGeneralManager={false} />
+      <PayrollWorkspace branches={[]} canManagePayroll={false} />
     </>
   );
 }

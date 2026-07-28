@@ -187,6 +187,44 @@
 - Không thêm production dependency: parser/generator dùng ExcelJS, AWS SDK và pg-boss
   đã có từ các phase trước.
 
+## ADR-019 — Payroll worksheet chỉnh sửa được nhưng không sửa dữ liệu nguồn
+
+- Trạng thái: Accepted.
+- `/payroll` dùng một kỳ làm việc mới nhất theo `(company, branch, month)` và tự tạo
+  idempotent khi chưa có. Revision vẫn tồn tại trong ledger để bảo toàn lịch sử,
+  nhưng không còn là thao tác người dùng. Khi sửa kỳ đã gửi, backend tự tạo working
+  revision, copy snapshot/override liên quan và giữ nguyên kỳ đã publish.
+- Giá trị sửa tay lưu trong `PayrollWorksheetOverride` theo `(period, staff)`, có
+  optimistic version. Attendance, LiveDailyMetric và Violation không bị cập nhật
+  ngược. Snapshot luôn giữ cả dữ liệu nguồn, giá trị tính và giá trị cuối cùng.
+- `standardDaysOffPerMonth` nằm trong salary rule. Mỗi branch/month có thể đặt
+  `standardDaysOffOverride`; số ngày công chuẩn là số ngày dương lịch thực tế của
+  tháng trừ số ngày nghỉ. Lương cơ bản vẫn lấy từ hồ sơ từng nhân viên.
+- Chỉ `GENERAL_MANAGER` được xem, sửa và export payroll. Trường
+  `canManagePayroll` cũ không còn mở quyền cho `TRAINING_MANAGER`; service/API/export
+  đều kiểm tra role fail-closed. `LIVE_EMPLOYEE` chỉ có self-service payslip đã publish.
+- Gửi phiếu là publish snapshot mới nhất. Sửa sau khi gửi không làm thay đổi bản
+  nhân viên đang xem cho tới khi working revision được gửi lại.
+- Không thêm production dependency.
+
+## ADR-020 — Doanh số Live là xu và thưởng tháng dựa trên ngày làm việc
+
+- Trạng thái: Accepted.
+- `revenueAmount` trong schema cũ được giữ để tương thích dữ liệu và migration, nhưng
+  contract/UI nghiệp vụ gọi rõ là `dailyCoins`/`monthlyCoins`. Giá trị là số xu nguyên,
+  không phải VND và không có phép quy đổi ngầm.
+- `MONTHLY_LEVEL_RULES` là nguồn duy nhất cho bảng mốc xu tháng. UI đơn giản ánh xạ vào
+  cùng cấu hình typed hiện có; không tạo bảng hay rule type trùng lặp.
+- Thưởng chuyên cần đếm ngày nghiệp vụ khác nhau có `PRESENT` và `workUnits > 0`.
+  Work unit, thời lượng Live và tăng ca không được dùng để suy ra số ngày.
+- Nguồn so bậc tháng trước ưu tiên snapshot payroll đã publish, rồi Attendance/Live,
+  sau cùng mới dùng số xu nền nhập tay của worksheet. Dữ liệu nhập tay không sửa nguồn.
+- Payroll snapshot giữ tổng xu, nguồn tháng trước, bậc hai tháng, số ngày và trạng thái
+  `NONE/RETAIN/JUMP/DOWN`. Thưởng duy trì và thưởng nhảy bậc loại trừ nhau.
+- Khi `employeeRevenueVisible=false`, API/DTO và file nhân viên loại toàn bộ giá trị
+  doanh số/xu; việc ẩn ở UI không được coi là kiểm soát quyền.
+- Không thêm production dependency và không cần reset/seed dữ liệu.
+
 # Production hardening (Prompt 8)
 
 - Giữ Better Auth 1.6.24 và pg-boss 12.26.2 hiện có; không thêm production dependency.

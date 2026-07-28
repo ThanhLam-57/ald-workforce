@@ -730,14 +730,19 @@ export function DataGovernanceWorkspace({
               <p className="text-sm text-slate-500">Không có audit phù hợp.</p>
             ) : (
               audits.map((log) => (
-                <details className="rounded-xl border border-slate-200 p-4" key={log.id}>
-                  <summary className="cursor-pointer">
-                    <span className="font-semibold">{log.action}</span>
-                    <span className="ml-2 text-sm text-slate-500">
+                <details
+                  className="min-w-0 rounded-xl border border-slate-200 p-4 [overflow-wrap:anywhere]"
+                  key={log.id}
+                >
+                  <summary className="cursor-pointer break-words">
+                    <span className="break-words font-semibold">{log.action}</span>
+                    <span className="ml-2 break-words text-sm text-slate-500">
                       {log.entityType} · {log.actor?.name ?? "SYSTEM"} · {dateTime(log.occurredAt)}
                     </span>
                   </summary>
-                  <p className="mt-3 text-sm">{log.reason}</p>
+                  <p className="mt-3 whitespace-pre-wrap break-words text-sm">
+                    {log.reason}
+                  </p>
                   <div className="mt-3 overflow-x-auto">
                     <table className="min-w-full text-left text-xs">
                       <thead>

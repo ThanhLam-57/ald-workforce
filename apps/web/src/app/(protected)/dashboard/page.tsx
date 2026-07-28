@@ -1,21 +1,28 @@
 import type {
-  BranchMonthlyOverviewDto,
   CompanyDashboardDto,
+  ManagerCompanyReportDto,
   PayrollPeriodDto,
 } from "@ald/contracts";
 import { DomainError, toBusinessDateString } from "@ald/domain";
 import Link from "next/link";
 
-import { getBranchMonthlyOverview } from "@/server/branch-overview-service";
+import { DashboardFreshness } from "@/app/dashboard/dashboard-freshness";
 import { getCompanyDashboard } from "@/server/company-dashboard-service";
+import { getManagerCompanyReport } from "@/server/company-report-service";
 import { listPayrollPeriods } from "@/server/payroll-service";
-import { listBranches, listStaff } from "@/server/services";
 
 import { PageHeader } from "../page-header";
 import { requirePageActor } from "../page-access";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 function money(value: string): string {
   return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} ₫`;
+}
+
+function coins(value: string): string {
+  return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} xu`;
 }
 
 function decimal(value: string): string {
@@ -46,10 +53,16 @@ function SummaryCard({
         ? "border-emerald-200 bg-emerald-50"
         : "border-slate-200 bg-white";
   return (
-    <article className={`rounded-2xl border p-5 shadow-sm ${toneClass}`}>
-      <p className="text-sm font-medium text-slate-600">{label}</p>
-      <p className="mt-3 text-2xl font-semibold tracking-tight text-slate-950">{value}</p>
-      {hint ? <p className="mt-2 text-xs leading-5 text-slate-500">{hint}</p> : null}
+    <article
+      className={`min-w-0 rounded-2xl border p-5 shadow-sm [overflow-wrap:anywhere] ${toneClass}`}
+    >
+      <p className="break-words text-sm font-medium text-slate-600">{label}</p>
+      <p className="mt-3 break-words text-2xl font-semibold tracking-tight text-slate-950">
+        {value}
+      </p>
+      {hint ? (
+        <p className="mt-2 break-words text-xs leading-5 text-slate-500">{hint}</p>
+      ) : null}
     </article>
   );
 }
@@ -61,11 +74,13 @@ function ActionLink({
 }: Readonly<{ href: string; label: string; description: string }>) {
   return (
     <Link
-      className="group rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-sky-200 hover:shadow-md"
+      className="group min-w-0 rounded-2xl border border-slate-200 bg-white p-5 [overflow-wrap:anywhere] shadow-sm transition hover:-translate-y-0.5 hover:border-sky-200 hover:shadow-md"
       href={href}
     >
-      <p className="font-semibold text-slate-950 group-hover:text-sky-800">{label}</p>
-      <p className="mt-2 text-sm leading-6 text-slate-600">{description}</p>
+      <p className="break-words font-semibold text-slate-950 group-hover:text-sky-800">
+        {label}
+      </p>
+      <p className="mt-2 break-words text-sm leading-6 text-slate-600">{description}</p>
       <span className="mt-4 inline-block text-sm font-semibold text-sky-700">Mở chức năng →</span>
     </Link>
   );
@@ -77,7 +92,7 @@ async function GeneralManagerDashboard({
   return (
     <>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        <SummaryCard label="Doanh số tháng" value={money(dashboard.totals.revenueAmount)} />
+        <SummaryCard label="Tổng xu tháng" value={coins(dashboard.totals.revenueAmount)} />
         <SummaryCard label="Tổng công" value={decimal(dashboard.totals.workUnits)} />
         <SummaryCard
           label="Tiền phạt"
@@ -98,14 +113,17 @@ async function GeneralManagerDashboard({
         />
       </div>
 
-      <div className="mt-6 grid gap-6 xl:grid-cols-[1.35fr_1fr]">
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <div className="flex items-center justify-between gap-4">
-            <div>
+      <div className="mt-6 grid min-w-0 gap-6 xl:grid-cols-[1.35fr_1fr]">
+        <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0">
               <h2 className="font-semibold text-slate-950">Tình hình theo cơ sở</h2>
               <p className="mt-1 text-sm text-slate-500">Tháng {dashboard.month}</p>
             </div>
-            <Link className="text-sm font-semibold text-sky-700" href="/company-report">
+            <Link
+              className="max-w-full break-words text-sm font-semibold text-sky-700 [overflow-wrap:anywhere]"
+              href="/company-report"
+            >
               Xem báo cáo đầy đủ
             </Link>
           </div>
@@ -128,7 +146,7 @@ async function GeneralManagerDashboard({
                         <span className="ml-2 text-slate-500">{branch.name}</span>
                       </td>
                       <td className="border-b border-slate-100 px-3 py-3 text-right">
-                        {money(branch.revenueAmount)}
+                        {coins(branch.revenueAmount)}
                       </td>
                       <td className="border-b border-slate-100 px-3 py-3 text-right">
                         {branch.missingAttendance}
@@ -174,50 +192,88 @@ async function GeneralManagerDashboard({
 }
 
 function ManagerDashboard({
-  branch,
-  branchCount,
-  staffCount,
+  report,
 }: Readonly<{
-  branch: BranchMonthlyOverviewDto | null;
-  branchCount: number;
-  staffCount: number;
+  report: ManagerCompanyReportDto;
 }>) {
-  const today = toBusinessDateString(new Date());
-  const missingAttendance =
-    branch?.rows.reduce(
-      (total, row) =>
-        total +
-        row.days.filter((day) => day.businessDate <= today && day.attendanceId === null).length,
-      0,
-    ) ?? 0;
+  const staffIds = new Set(
+    report.branches.flatMap((branch) => branch.staff.map((row) => row.staff.id)),
+  );
+  const totals = report.totals;
 
   return (
     <>
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
-        <SummaryCard label="Cơ sở được phân công" value={String(branchCount)} />
-        <SummaryCard label="Nhân sự trong phạm vi" value={String(staffCount)} />
-        <SummaryCard label="Doanh số tháng" value={money(branch?.totals.revenueAmount ?? "0")} />
-        <SummaryCard label="Tổng công" value={decimal(branch?.totals.workUnits ?? "0")} />
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-8">
+        <SummaryCard label="Cơ sở được phân công" value={String(report.branches.length)} />
+        <SummaryCard label="Nhân sự trong phạm vi" value={String(staffIds.size)} />
+        <SummaryCard label="Tổng xu tháng" value={coins(totals.revenueAmount)} />
+        <SummaryCard label="Tổng công" value={decimal(totals.workUnits)} />
+        <SummaryCard label="Live" value={minutes(totals.actualLiveMinutes)} />
+        <SummaryCard label="Tăng ca" value={minutes(totals.overtimeMinutes)} />
         <SummaryCard
-          label="Thời lượng Live"
-          value={minutes(branch?.totals.actualLiveMinutes ?? 0)}
+          label="Phạt đang hiệu lực"
+          tone={BigInt(totals.penalties) > 0n ? "danger" : "default"}
+          value={money(totals.penalties)}
         />
         <SummaryCard
           label="Thiếu chấm công"
-          tone={missingAttendance > 0 ? "danger" : "success"}
-          value={String(missingAttendance)}
+          tone={totals.missingAttendance > 0 ? "danger" : "success"}
+          value={String(totals.missingAttendance)}
         />
       </div>
-      {branch ? (
-        <p className="mt-4 text-sm text-slate-500">
-          Số liệu nhanh đang hiển thị cơ sở <strong>{branch.branch.name}</strong>, tháng{" "}
-          {branch.month}. Dùng trang Tổng quan cơ sở để đổi cơ sở hoặc lọc chi tiết.
-        </p>
-      ) : (
+      {report.branches.length === 0 ? (
         <p className="mt-4 rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
-          Chưa có cơ sở hiệu lực trong phạm vi tài khoản này.
+          Bạn chưa được phân công cơ sở.
         </p>
-      )}
+      ) : null}
+
+      {report.branches.length > 0 ? (
+        <section className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4">
+            <div>
+              <h2 className="font-semibold text-slate-950">Tình hình theo cơ sở</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Chỉ hiển thị dữ liệu vận hành trong phạm vi đang được phân công.
+              </p>
+            </div>
+            <Link className="text-sm font-semibold text-sky-700" href="/company-report">
+              Xem báo cáo chi tiết
+            </Link>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-4 py-3">Cơ sở</th>
+                  <th className="px-4 py-3 text-right">Nhân viên</th>
+                  <th className="px-4 py-3 text-right">Tổng xu</th>
+                  <th className="px-4 py-3 text-right">Tổng công</th>
+                  <th className="px-4 py-3 text-right">Live</th>
+                  <th className="px-4 py-3 text-right">Phạt</th>
+                </tr>
+              </thead>
+              <tbody>
+                {report.branches.map((branch) => (
+                  <tr className="border-t border-slate-100" key={branch.branch.id}>
+                    <td className="px-4 py-3">
+                      <span className="font-semibold">{branch.branch.code}</span>
+                      <span className="ml-2 text-slate-500">{branch.branch.name}</span>
+                    </td>
+                    <td className="px-4 py-3 text-right">{branch.staff.length}</td>
+                    <td className="px-4 py-3 text-right">{coins(branch.totals.revenueAmount)}</td>
+                    <td className="px-4 py-3 text-right">{decimal(branch.totals.workUnits)}</td>
+                    <td className="px-4 py-3 text-right">
+                      {minutes(branch.totals.actualLiveMinutes)}
+                    </td>
+                    <td className="px-4 py-3 text-right">{money(branch.totals.penalties)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
       <div className="mt-6 grid gap-4 md:grid-cols-2">
         <ActionLink
           description="Cập nhật attendance, Live, công, tăng ca và ghi nhận lỗi theo từng ngày."
@@ -287,20 +343,14 @@ export default async function DashboardPage() {
           eyebrow="Trung tâm điều hành"
           title="Tổng quan công ty"
         />
+        <DashboardFreshness />
         <GeneralManagerDashboard dashboard={dashboard} />
       </>
     );
   }
 
   if (actor.role === "TRAINING_MANAGER") {
-    const [branches, staff] = await Promise.all([
-      listBranches(actor),
-      listStaff(actor, new Date()),
-    ]);
-    const firstBranch = branches[0];
-    const branch = firstBranch
-      ? await getBranchMonthlyOverview(actor, { branchId: firstBranch.id, month })
-      : null;
+    const report = await getManagerCompanyReport(actor, { month });
     return (
       <>
         <PageHeader
@@ -308,7 +358,8 @@ export default async function DashboardPage() {
           eyebrow="Không gian quản lý"
           title="Tổng quan cơ sở"
         />
-        <ManagerDashboard branch={branch} branchCount={branches.length} staffCount={staff.length} />
+        <DashboardFreshness />
+        <ManagerDashboard report={report} />
       </>
     );
   }
@@ -326,6 +377,7 @@ export default async function DashboardPage() {
         eyebrow="Không gian cá nhân"
         title="Tổng quan của tôi"
       />
+      <DashboardFreshness />
       <EmployeeDashboard period={recentPeriod} />
     </>
   );

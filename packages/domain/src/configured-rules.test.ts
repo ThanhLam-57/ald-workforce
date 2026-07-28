@@ -74,11 +74,11 @@ describe("configured reward rules", () => {
   it("calculates monthly bonuses and transition bonuses from typed inputs", () => {
     const result = calculateMonthlyLevelResult(
       {
-        revenueAmount: "200",
-        workUnits: "26",
-        actualLiveMinutes: 8_000,
-        currentLevelCode: "LOW",
-        currentLevelOrder: 1,
+        monthlyCoins: "200",
+        workedDayCount: 26,
+        attendanceRequiredDays: 26,
+        previousLevelCode: "LOW",
+        previousLevelOrder: 1,
       },
       [
         {
@@ -103,7 +103,77 @@ describe("configured reward rules", () => {
 
     expect(result.suggestedLevel?.code).toBe("HIGH");
     expect(result.transition).toBe("JUMP");
-    expect(result.amount).toBe("200");
+    expect(result.amount).toBe("100");
+  });
+
+  it("uses monthly coin thresholds and keeps retain, jump and down mutually exclusive", () => {
+    const levels = [
+      {
+        code: "START",
+        name: "Khởi động",
+        displayOrder: 1,
+        minRevenue: "80000",
+        maxRevenue: "150000",
+        minInclusive: true,
+        maxInclusive: false,
+        monthlyRevenueBonus: "0",
+        attendanceBonus: "500000",
+        achievementBonus: "0",
+        retainLevelBonus: "0",
+        jumpLevelBonus: "0",
+        attendanceMinWorkUnits: null,
+        achievementMinLiveMinutes: null,
+        jumpMinLevelSteps: 1,
+      },
+      {
+        code: "CREATE",
+        name: "Kiến tạo",
+        displayOrder: 2,
+        minRevenue: "150000",
+        maxRevenue: null,
+        minInclusive: true,
+        maxInclusive: false,
+        monthlyRevenueBonus: "0",
+        attendanceBonus: "500000",
+        achievementBonus: "100000",
+        retainLevelBonus: "200000",
+        jumpLevelBonus: "300000",
+        attendanceMinWorkUnits: null,
+        achievementMinLiveMinutes: null,
+        jumpMinLevelSteps: 1,
+      },
+    ] as const;
+    const calculate = (
+      monthlyCoins: string,
+      previousLevelCode: string | null,
+      previousLevelOrder: number | null,
+    ) =>
+      calculateMonthlyLevelResult(
+        {
+          monthlyCoins,
+          workedDayCount: 26,
+          attendanceRequiredDays: 26,
+          previousLevelCode,
+          previousLevelOrder,
+        },
+        levels,
+      );
+
+    expect(calculate("79999", null, null).suggestedLevel).toBeNull();
+    expect(calculate("80000", null, null).suggestedLevel?.code).toBe("START");
+    expect(calculate("149999", null, null).suggestedLevel?.code).toBe("START");
+    expect(calculate("150000", "START", 1)).toMatchObject({
+      transition: "JUMP",
+      amount: "900000",
+    });
+    expect(calculate("999999", "CREATE", 2)).toMatchObject({
+      transition: "RETAIN",
+      amount: "800000",
+    });
+    expect(calculate("80000", "CREATE", 2)).toMatchObject({
+      transition: "DOWN",
+      amount: "500000",
+    });
   });
 
   it("calculates salary with integer rational arithmetic and explicit rounding", () => {

@@ -268,9 +268,9 @@ function MonthlyEditor({
   }>[] = [
     { key: "code", label: "Mã" },
     { key: "name", label: "Tên" },
-    { key: "minRevenue", label: "Doanh số từ" },
-    { key: "maxRevenue", label: "Doanh số đến" },
-    { key: "monthlyRevenueBonus", label: "Thưởng doanh số" },
+    { key: "minRevenue", label: "Mốc xu từ" },
+    { key: "maxRevenue", label: "Mốc xu đến" },
+    { key: "monthlyRevenueBonus", label: "Thưởng xu tháng (cũ)" },
     { key: "attendanceBonus", label: "Thưởng chuyên cần" },
     { key: "achievementBonus", label: "Thưởng thành tích" },
     { key: "retainLevelBonus", label: "Thưởng giữ level" },
@@ -474,6 +474,24 @@ function SalaryEditor({
           disabled={disabled}
           value={value.standardWorkdays}
           onChange={(event) => onChange({ ...value, standardWorkdays: event.target.value })}
+        />
+      </label>
+      <label className="text-sm">
+        Tỷ lệ lương thử việc (%)
+        <input
+          className={`${inputClass} mt-1 w-full`}
+          disabled={disabled}
+          max={100}
+          min={0}
+          step="0.01"
+          type="number"
+          value={(value.probationSalaryRateBps ?? 8_500) / 100}
+          onChange={(event) =>
+            onChange({
+              ...value,
+              probationSalaryRateBps: Math.round(Number(event.target.value) * 100),
+            })
+          }
         />
       </label>
       <label className="text-sm">
@@ -1275,7 +1293,7 @@ export function ConfiguredRuleCenter({
                 <thead className="bg-slate-100">
                   <tr>
                     <th className="p-2">Nhân viên</th>
-                    <th className="p-2">Doanh số</th>
+                    <th className="p-2">Tổng xu</th>
                     <th className="p-2">Đề xuất</th>
                     <th className="p-2">Hiệu lực</th>
                     <th className="p-2">Trạng thái</th>

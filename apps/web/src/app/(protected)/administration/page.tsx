@@ -16,6 +16,18 @@ export default async function AdministrationPage() {
         title="Quản trị nền tảng"
       />
       <AdministrationWorkspace
+        activeBranchOptions={branches
+          .filter((branch) => branch.isActive)
+          .map((branch) => ({
+            id: branch.id,
+            label: `${branch.code} — ${branch.name}`,
+          }))}
+        assignableStaffOptions={staff
+          .filter((person) => person.employmentStatus !== "TERMINATED")
+          .map((person) => ({
+            id: person.id,
+            label: `${person.staffCode} — ${person.fullName}`,
+          }))}
         branchOptions={branches.map((branch) => ({
           id: branch.id,
           label: `${branch.code} — ${branch.name}`,

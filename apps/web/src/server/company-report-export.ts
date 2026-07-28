@@ -68,9 +68,9 @@ export async function createCompanyReportWorkbook(
   summary.getCell("A2").alignment = { horizontal: "center" };
   summary.getCell("A2").font = { italic: true, color: { argb: "FF475569" } };
   summary.getRow(4).values = [
-    "Doanh số",
+    "Tổng xu",
     excelNumber(report.totals.revenueAmount),
-    "Thưởng doanh số",
+    "Thưởng xu",
     excelNumber(report.totals.revenueBonus),
     "Thưởng tháng",
     excelNumber(report.totals.monthlyBonus),
@@ -85,8 +85,8 @@ export async function createCompanyReportWorkbook(
   summary.getRow(6).values = [
     "Mã cơ sở",
     "Cơ sở",
-    "Doanh số",
-    "Thưởng doanh số",
+    "Tổng xu",
+    "Thưởng xu",
     "Thưởng tháng",
     "Lương cơ bản",
     "Phạt",
@@ -155,8 +155,8 @@ export async function createCompanyReportWorkbook(
     "Loại NV",
     "Level",
     ...report.weeks.map((week) => `Tuần ${week.weekNo}`),
-    "Doanh số tháng",
-    "Thưởng doanh số",
+    "Tổng xu tháng",
+    "Thưởng xu",
     "Thưởng tháng",
     "Lương cơ bản",
     "Tổng thu nhập",
@@ -212,8 +212,8 @@ export async function createCompanyReportWorkbook(
   checks.getRow(1).values = ["Kiểm tra", "Giá trị báo cáo", "Tổng cơ sở", "Trạng thái"];
   styleHeader(checks.getRow(1), "FF166534");
   const checkRows: Array<[string, keyof typeof report.totals, number]> = [
-    ["Doanh số", "revenueAmount", 3],
-    ["Thưởng doanh số", "revenueBonus", 4],
+    ["Tổng xu", "revenueAmount", 3],
+    ["Thưởng xu", "revenueBonus", 4],
     ["Thưởng tháng", "monthlyBonus", 5],
     ["Lương cơ bản", "baseSalary", 6],
     ["Tiền phạt", "penalties", 7],
@@ -338,8 +338,8 @@ export async function createCompanyReportPdf(
       ).format(generatedAt)}`,
     );
     const cards = [
-      ["Doanh số", report.totals.revenueAmount],
-      ["Thưởng doanh số", report.totals.revenueBonus],
+      ["Tổng xu", report.totals.revenueAmount],
+      ["Thưởng xu", report.totals.revenueBonus],
       ["Thưởng tháng", report.totals.monthlyBonus],
       ["Tiền phạt", report.totals.penalties],
       ["Tổng thu nhập", report.totals.totalIncome],
@@ -364,7 +364,7 @@ export async function createCompanyReportPdf(
       document.rect(32, y, document.page.width - 64, 22).fill("#0C4A6E");
       const headers = [
         ["Cơ sở", 32, 100],
-        ["Doanh số", 132, 120],
+        ["Tổng xu", 132, 120],
         ["Thưởng DS", 252, 105],
         ["Thưởng tháng", 357, 115],
         ["Lương cơ bản", 472, 115],
@@ -415,7 +415,7 @@ export async function createCompanyReportPdf(
         "Nhân viên",
         "Trạng thái",
         "Level",
-        "Doanh số",
+        "Tổng xu",
         "Thưởng",
         "Lương CB",
         "Thu nhập",

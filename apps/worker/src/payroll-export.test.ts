@@ -15,6 +15,7 @@ import {
 function fixture(): PayslipExportData {
   const input: PayrollCalculationInput = {
     staffId: "staff-demo",
+    baseSalaryAmount: "26000000",
     period: {
       month: "2026-07",
       from: "2026-07-01",
@@ -38,6 +39,7 @@ function fixture(): PayslipExportData {
       },
     },
     monthlyLevelRule: null,
+    previousMonth: { coins: null, source: "NONE", level: null },
     currentLevel: null,
     attendance: [
       {
@@ -103,18 +105,52 @@ describe("payroll export artifacts", () => {
     await workbook.xlsx.load(Uint8Array.from(buffer).buffer);
     const summary = workbook.getWorksheet("Phiếu lương")!;
     const daily = workbook.getWorksheet("Chi tiết ngày")!;
-    const totalCell = summary.getCell("B19");
+    const totalRow = summary
+      .getRows(1, summary.rowCount)!
+      .find((row) => row.getCell(1).value === "THỰC NHẬN");
+    expect(totalRow).toBeDefined();
+    const totalCell = totalRow!.getCell(2);
     expect(totalCell.value).toMatchObject({
       formula: expect.any(String),
       result: Number(data.output.components.totalIncome),
     });
+    expect(
+      summary
+        .getRows(1, summary.rowCount)!
+        .some((row) => String(row.getCell(1).value).startsWith("Lương thử việc (85%)")),
+    ).toBe(true);
+    expect(
+      summary
+        .getRows(1, summary.rowCount)!
+        .some((row) => row.getCell(1).value === "Lương chính thức (100%)"),
+    ).toBe(true);
     const headers = daily.getRow(2).values as unknown[];
     expect(headers).not.toContain("Doanh số");
+    expect(headers).not.toContain("Doanh số (xu)");
+    expect(headers).not.toContain("Mốc xu");
+    expect(summary.getCell("C6").value).toBeNull();
+    expect(summary.getCell("D6").value).toBeNull();
     expect(buffer.length).toBeGreaterThan(8_000);
     if (process.env.PAYROLL_QA_DIR) {
       await mkdir(process.env.PAYROLL_QA_DIR, { recursive: true });
       await writeFile(path.join(process.env.PAYROLL_QA_DIR, "payslip-demo.xlsx"), buffer);
     }
+  });
+
+  it("labels visible revenue as coins without formatting it as VND", async () => {
+    const hidden = fixture();
+    const data: PayslipExportData = { ...hidden, employeeRevenueVisible: true };
+    const buffer = await createPayslipWorkbook(data, new Date("2026-07-31T10:00:00.000Z"));
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(Uint8Array.from(buffer).buffer);
+    const summary = workbook.getWorksheet("Phiếu lương")!;
+    const daily = workbook.getWorksheet("Chi tiết ngày")!;
+    const headers = daily.getRow(2).values as unknown[];
+
+    expect(headers).toContain("Doanh số (xu)");
+    expect(headers).toContain("Mốc xu");
+    expect(summary.getCell("C6").value).toBe("Tổng xu tháng");
+    expect(String(summary.getCell("D6").value)).toContain("xu");
   });
 
   it("embeds a Vietnamese-capable font and creates a valid PDF", async () => {

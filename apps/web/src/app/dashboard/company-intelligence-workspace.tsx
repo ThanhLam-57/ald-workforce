@@ -6,7 +6,7 @@ import type {
   PerformanceLevelOptionDto,
 } from "@ald/contracts";
 import { Button } from "@ald/ui";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -19,6 +19,13 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+
+import {
+  compactChartNumber,
+  responsiveTooltipStyle,
+  truncateChartLabel,
+} from "./chart-format";
+import { useReportingAutoRefresh } from "./use-reporting-auto-refresh";
 
 type BranchOption = Readonly<{ id: string; code: string; name: string }>;
 
@@ -33,6 +40,10 @@ function currentMonth(): string {
 
 function money(value: string): string {
   return new Intl.NumberFormat("vi-VN").format(BigInt(value));
+}
+
+function coins(value: string): string {
+  return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} xu`;
 }
 
 async function responseData<T>(response: Response): Promise<T> {
@@ -59,6 +70,7 @@ export function CompanyIntelligenceWorkspace({
   const [report, setReport] = useState<CompanyMonthlyReportDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const loadSequence = useRef(0);
 
   const reportParams = useMemo(() => {
     const params = new URLSearchParams({ month });
@@ -69,9 +81,12 @@ export function CompanyIntelligenceWorkspace({
     return params;
   }, [branchId, employmentCategory, employmentStatus, levelId, month]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (silent = false) => {
+    const sequence = ++loadSequence.current;
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const dashboardParams = new URLSearchParams({ month });
       if (branchId) dashboardParams.set("branchId", branchId);
@@ -86,13 +101,15 @@ export function CompanyIntelligenceWorkspace({
           responseData<readonly PerformanceLevelOptionDto[]>,
         ),
       ]);
+      if (sequence !== loadSequence.current) return;
       setDashboard(dashboardData);
       setReport(reportData);
       setLevels(levelData);
     } catch (loadError) {
+      if (sequence !== loadSequence.current) return;
       setError(loadError instanceof Error ? loadError.message : "Không thể tải báo cáo.");
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [branchId, month, reportParams]);
 
@@ -100,6 +117,8 @@ export function CompanyIntelligenceWorkspace({
     const timeout = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timeout);
   }, [load]);
+
+  useReportingAutoRefresh(() => load(true));
 
   const branchChart =
     report?.charts.revenueByBranch.map((item) => ({
@@ -135,7 +154,15 @@ export function CompanyIntelligenceWorkspace({
             Projection trực tiếp từ attendance, live metrics và payroll snapshot.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            disabled={loading}
+            onClick={() => void load()}
+            type="button"
+            variant="outline-sky"
+          >
+            {loading ? "Đang cập nhật…" : "Cập nhật ngay"}
+          </Button>
           <a
             className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
             href={`/api/exports/company-report?${reportParams}&format=xlsx`}
@@ -150,6 +177,17 @@ export function CompanyIntelligenceWorkspace({
           </a>
         </div>
       </div>
+
+      <p className="mt-3 text-xs text-slate-500">
+        Tự động đồng bộ khi quay lại trang và mỗi 30 giây
+        {report
+          ? ` · Dữ liệu server lúc ${new Intl.DateTimeFormat("vi-VN", {
+              dateStyle: "short",
+              timeStyle: "medium",
+              timeZone: "Asia/Ho_Chi_Minh",
+            }).format(new Date(report.generatedAt))}`
+          : ""}
+      </p>
 
       <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
         <label className="grid gap-1 text-sm">
@@ -206,72 +244,115 @@ export function CompanyIntelligenceWorkspace({
       </div>
 
       {error ? (
-        <div className="mt-5 rounded-xl bg-rose-50 p-4 text-sm text-rose-700">{error}</div>
+        <div className="mt-5 break-words rounded-xl bg-rose-50 p-4 text-sm text-rose-700 [overflow-wrap:anywhere]">
+          {error}
+        </div>
       ) : loading || !dashboard || !report ? (
         <p className="mt-5 text-sm text-slate-500">Đang tổng hợp báo cáo…</p>
       ) : (
         <>
           <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
             {[
-              ["Doanh số", money(dashboard.totals.revenueAmount)],
+              ["Tổng xu", coins(dashboard.totals.revenueAmount)],
               ["Tổng công", dashboard.totals.workUnits],
               ["Tiền phạt", money(dashboard.totals.penalties)],
               ["Payroll", money(dashboard.totals.payrollTotal)],
               ["Thiếu chấm công", String(dashboard.totals.missingAttendance)],
               ["Payroll chưa review", String(dashboard.totals.unreviewedPayroll)],
             ].map(([label, value]) => (
-              <div className="rounded-xl bg-slate-50 p-4" key={label}>
-                <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-                <div className="mt-2 text-lg font-semibold">{value}</div>
+              <div
+                className="min-w-0 rounded-xl bg-slate-50 p-4 [overflow-wrap:anywhere]"
+                key={label}
+              >
+                <div className="break-words text-xs uppercase tracking-wide text-slate-500">
+                  {label}
+                </div>
+                <div className="mt-2 break-words text-lg font-semibold">{value}</div>
               </div>
             ))}
           </div>
 
           <div className="mt-6 grid gap-5 xl:grid-cols-2">
             {[
-              ["Doanh số theo cơ sở", branchChart, "bar"],
-              ["Top doanh số nhân viên", employeeChart, "bar"],
-              ["Xu hướng doanh số theo ngày", trendChart, "line"],
+              ["Tổng xu theo cơ sở", branchChart, "bar"],
+              ["Top xu nhân viên", employeeChart, "bar"],
+              ["Xu hướng xu theo ngày", trendChart, "line"],
               ["Thưởng và phạt theo cơ sở", bonusChart, "breakdown"],
             ].map(([title, data, kind]) => (
-              <div className="rounded-xl border border-slate-200 p-4" key={String(title)}>
-                <h3 className="font-medium">{String(title)}</h3>
-                <div className="mt-3 h-64">
+              <div
+                className="min-w-0 overflow-hidden rounded-xl border border-slate-200 p-4"
+                key={String(title)}
+              >
+                <h3 className="break-words font-medium [overflow-wrap:anywhere]">
+                  {String(title)}
+                </h3>
+                <div className="mt-3 h-64 min-w-0 overflow-hidden">
                   <ResponsiveContainer height="100%" width="100%">
                     {kind === "line" ? (
-                      <LineChart data={data as typeof trendChart}>
+                      <LineChart
+                        data={data as typeof trendChart}
+                        margin={{ top: 8, right: 8, bottom: 8, left: 8 }}
+                      >
                         <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="date" />
+                        <XAxis dataKey="date" minTickGap={12} tick={{ fontSize: 11 }} />
                         <YAxis
-                          tickFormatter={(value) => new Intl.NumberFormat("vi-VN").format(value)}
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={compactChartNumber}
+                          width={68}
                         />
                         <Tooltip
+                          contentStyle={responsiveTooltipStyle}
                           formatter={(value) =>
                             new Intl.NumberFormat("vi-VN").format(Number(value))
                           }
+                          itemStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          labelStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          wrapperStyle={{ maxWidth: "calc(100vw - 2rem)", zIndex: 60 }}
                         />
                         <Line dataKey="value" dot={false} stroke="#0284C7" strokeWidth={2} />
                       </LineChart>
                     ) : (
-                      <BarChart data={data as typeof bonusChart}>
+                      <BarChart
+                        data={data as typeof bonusChart}
+                        margin={{ top: 8, right: 8, bottom: 20, left: 8 }}
+                      >
                         <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="name" />
+                        <XAxis
+                          dataKey="name"
+                          height={48}
+                          interval="preserveStartEnd"
+                          minTickGap={16}
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={(value) => truncateChartLabel(value, 14)}
+                        />
                         <YAxis
-                          tickFormatter={(value) => new Intl.NumberFormat("vi-VN").format(value)}
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={compactChartNumber}
+                          width={68}
                         />
                         <Tooltip
+                          contentStyle={responsiveTooltipStyle}
                           formatter={(value) =>
                             new Intl.NumberFormat("vi-VN").format(Number(value))
                           }
+                          itemStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          labelStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          wrapperStyle={{ maxWidth: "calc(100vw - 2rem)", zIndex: 60 }}
                         />
                         {kind === "breakdown" ? (
                           <>
-                            <Legend />
+                            <Legend
+                              wrapperStyle={{
+                                maxWidth: "100%",
+                                overflowWrap: "anywhere",
+                                whiteSpace: "normal",
+                              }}
+                            />
                             <Bar dataKey="bonus" fill="#0EA5E9" name="Thưởng" />
                             <Bar dataKey="penalty" fill="#F43F5E" name="Phạt" />
                           </>
                         ) : (
-                          <Bar dataKey="value" fill="#0284C7" name="Doanh số" />
+                          <Bar dataKey="value" fill="#0284C7" name="Số xu" />
                         )}
                       </BarChart>
                     )}
@@ -286,7 +367,7 @@ export function CompanyIntelligenceWorkspace({
               <thead className="bg-slate-100 text-left">
                 <tr>
                   <th className="px-3 py-3">Cơ sở</th>
-                  <th className="px-3 py-3">Doanh số</th>
+                  <th className="px-3 py-3">Tổng xu</th>
                   <th className="px-3 py-3">Công</th>
                   <th className="px-3 py-3">Phạt</th>
                   <th className="px-3 py-3">Payroll</th>
@@ -299,13 +380,15 @@ export function CompanyIntelligenceWorkspace({
                   <tr className="border-t border-slate-100" key={branch.id}>
                     <td className="px-3 py-3">
                       <Button
-                        className="bg-transparent px-0 py-0 text-left text-sky-700 hover:bg-transparent"
+                        className="max-w-64 whitespace-normal break-words text-left [overflow-wrap:anywhere]"
                         onClick={() => setBranchId(branch.id)}
+                        size="compact"
+                        variant="link"
                       >
                         {branch.code} — {branch.name}
                       </Button>
                     </td>
-                    <td className="px-3 py-3">{money(branch.revenueAmount)}</td>
+                    <td className="px-3 py-3">{coins(branch.revenueAmount)}</td>
                     <td className="px-3 py-3">{branch.workUnits}</td>
                     <td className="px-3 py-3">{money(branch.penalties)}</td>
                     <td className="px-3 py-3">{money(branch.payrollTotal)}</td>
@@ -319,8 +402,11 @@ export function CompanyIntelligenceWorkspace({
 
           <div className="mt-6 space-y-4">
             {report.branches.map((branch) => (
-              <details className="rounded-xl border border-slate-200 p-4" key={branch.branch.id}>
-                <summary className="cursor-pointer font-medium">
+              <details
+                className="min-w-0 rounded-xl border border-slate-200 p-4 [overflow-wrap:anywhere]"
+                key={branch.branch.id}
+              >
+                <summary className="cursor-pointer break-words font-medium">
                   {branch.branch.code} — {branch.branch.name} · {branch.staff.length} nhân viên
                 </summary>
                 <div className="mt-4 overflow-x-auto">
@@ -333,8 +419,8 @@ export function CompanyIntelligenceWorkspace({
                             Tuần {week.weekNo}
                           </th>
                         ))}
-                        <th className="px-3 py-2 text-right">Doanh số tháng</th>
-                        <th className="px-3 py-2 text-right">Thưởng DS</th>
+                        <th className="px-3 py-2 text-right">Tổng xu tháng</th>
+                        <th className="px-3 py-2 text-right">Thưởng xu</th>
                         <th className="px-3 py-2 text-right">Thưởng tháng</th>
                         <th className="px-3 py-2 text-right">Lương CB</th>
                         <th className="px-3 py-2 text-right">Thu nhập</th>
@@ -352,11 +438,11 @@ export function CompanyIntelligenceWorkspace({
                           </td>
                           {row.weeks.map((week) => (
                             <td className="px-3 py-2 text-right" key={week.weekNo}>
-                              {money(week.revenueAmount)}
+                              {coins(week.revenueAmount)}
                             </td>
                           ))}
                           <td className="px-3 py-2 text-right">
-                            {money(row.totals.revenueAmount)}
+                            {coins(row.totals.revenueAmount)}
                           </td>
                           <td className="px-3 py-2 text-right">{money(row.totals.revenueBonus)}</td>
                           <td className="px-3 py-2 text-right">{money(row.totals.monthlyBonus)}</td>

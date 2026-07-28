@@ -47,7 +47,7 @@ function NavigationContent({
       {sections.map((section) => (
         <div className="mt-5" key={section}>
           {!collapsed ? (
-            <p className="px-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-400">
+            <p className="break-words px-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-400 [overflow-wrap:anywhere]">
               {section}
             </p>
           ) : (
@@ -69,6 +69,7 @@ function NavigationContent({
                           : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
                       }`}
                       href={item.href}
+                      prefetch={false}
                       title={collapsed ? item.label : item.description}
                       {...(onNavigate ? { onClick: onNavigate } : {})}
                     >
@@ -82,7 +83,11 @@ function NavigationContent({
                       >
                         {item.shortLabel}
                       </span>
-                      {!collapsed ? <span className="leading-5">{item.label}</span> : null}
+                      {!collapsed ? (
+                        <span className="min-w-0 break-words leading-5 [overflow-wrap:anywhere]">
+                          {item.label}
+                        </span>
+                      ) : null}
                     </Link>
                   </li>
                 );
@@ -170,6 +175,7 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
             aria-label="ALD Workforce — Tổng quan"
             className="flex items-center gap-3"
             href="/dashboard"
+            prefetch={false}
           >
             <span className="flex size-10 items-center justify-center rounded-xl bg-sky-700 text-xs font-bold tracking-wider text-white">
               ALD
@@ -210,20 +216,23 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
           <aside
             aria-label="Menu di động"
             aria-modal="true"
-            className="relative flex h-full w-[min(88vw,21rem)] flex-col bg-white shadow-2xl"
+            className="relative flex h-full w-[min(88vw,21rem)] min-w-0 flex-col overflow-hidden bg-white shadow-2xl"
             ref={drawerRef}
             role="dialog"
           >
-            <div className="flex h-20 items-center justify-between border-b border-slate-100 px-5">
+            <div className="flex min-h-20 shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 sm:px-5">
               <Link
-                className="flex items-center gap-3"
+                className="flex min-w-0 items-center gap-3"
                 href="/dashboard"
                 onClick={() => setMobileOpen(false)}
+                prefetch={false}
               >
                 <span className="flex size-10 items-center justify-center rounded-xl bg-sky-700 text-xs font-bold tracking-wider text-white">
                   ALD
                 </span>
-                <span className="text-sm font-bold tracking-[0.16em]">WORKFORCE</span>
+                <span className="min-w-0 break-words text-sm font-bold tracking-[0.16em] [overflow-wrap:anywhere]">
+                  WORKFORCE
+                </span>
               </Link>
               <button
                 className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600"
@@ -271,7 +280,10 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
                 <p className="max-w-48 truncate text-sm font-semibold text-slate-900">
                   {identity.name}
                 </p>
-                <p className="text-xs text-slate-500">
+                <p
+                  className="max-w-64 truncate text-xs text-slate-500"
+                  title={`${identity.roleLabel} · ${identity.scopeLabel}`}
+                >
                   {identity.roleLabel} · {identity.scopeLabel}
                 </p>
               </div>
@@ -280,7 +292,11 @@ export function ProtectedShell({ children, identity, navigation }: ProtectedShel
           </div>
         </header>
 
-        <main className="px-4 py-6 sm:px-6 lg:px-8" id="main-content" tabIndex={-1}>
+        <main
+          className="min-w-0 max-w-full overflow-x-clip px-4 py-6 sm:px-6 lg:px-8"
+          id="main-content"
+          tabIndex={-1}
+        >
           {children}
         </main>
       </div>

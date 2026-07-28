@@ -79,10 +79,12 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
   const staff = (await staffResponse.json()) as {
     data: Array<{ id: string; staffCode: string }>;
   };
+  const branchA = branches.data.find((item) => item.code === "DEMO");
   const branchB = branches.data.find((item) => item.code === "BRANCH-B");
   const staffB = staff.data.find((item) => item.staffCode === "LIVEB01");
   const staffA = staff.data.find((item) => item.staffCode === "LIVEDEMO");
   const staffAWithViolation = staff.data.find((item) => item.staffCode === "LIVEA02");
+  expect(branchA).toBeTruthy();
   expect(branchB).toBeTruthy();
   expect(staffB).toBeTruthy();
   expect(staffA).toBeTruthy();
@@ -127,6 +129,7 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
 
   const forbiddenResponses = await Promise.all([
     page.request.get(`/api/branches/${branchB!.id}`),
+    page.request.get(`/api/attendance/options?month=${month}&branchId=${branchB!.id}`),
     page.request.get(`/api/attendance?staffId=${staffB!.id}&month=${month}`),
     page.request.get(`/api/branch-overview?branchId=${branchB!.id}&month=${month}`),
     page.request.get(`/api/exports/branch-monthly-overview?branchId=${branchB!.id}&month=${month}`),
@@ -139,6 +142,20 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
     expect([403, 404]).toContain(response.status());
   }
 
+  const ownAttendanceOptionsResponse = await page.request.get(
+    `/api/attendance/options?month=${month}`,
+  );
+  expect(ownAttendanceOptionsResponse.ok()).toBe(true);
+  const ownAttendanceOptions = (await ownAttendanceOptionsResponse.json()) as {
+    data: {
+      branches: Array<{ id: string }>;
+      staff: Array<{ id: string }>;
+    };
+  };
+  expect(ownAttendanceOptions.data.branches.map((branch) => branch.id)).toEqual([branchA!.id]);
+  expect(ownAttendanceOptions.data.staff.some((person) => person.id === staffA!.id)).toBe(true);
+  expect(ownAttendanceOptions.data.staff.some((person) => person.id === staffB!.id)).toBe(false);
+
   const ownBranchAttendanceResponse = await page.request.get(
     `/api/attendance?staffId=${staffA!.id}&month=${month}`,
   );
@@ -146,6 +163,7 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
   const ownBranchAttendance = (await ownBranchAttendanceResponse.json()) as {
     data: {
       days: Array<{
+        businessDate: string;
         attendance: null | { id: string; version: number; note: string | null };
       }>;
     };
@@ -160,4 +178,63 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
     },
   });
   expect(editResponse.ok()).toBe(true);
+
+  const managerReportResponse = await page.request.get(`/api/company-report?month=${month}`);
+  expect(managerReportResponse.ok()).toBe(true);
+  const managerReport = (await managerReportResponse.json()) as {
+    data: { branches: Array<{ branch: { id: string } }> };
+  };
+  expect(managerReport.data.branches.map((item) => item.branch.id)).toEqual([branchA!.id]);
+  const serializedReport = JSON.stringify(managerReport);
+  expect(serializedReport).not.toMatch(/payroll/i);
+  expect(serializedReport).not.toMatch(/baseSalary/i);
+  expect(serializedReport).not.toMatch(/totalIncome/i);
+  expect(serializedReport).not.toMatch(/revenueBonus/i);
+
+  const editableDay = ownBranchAttendance.data.days.find((day) => day.attendance);
+  expect(editableDay?.attendance).toBeTruthy();
+  const validUnknownId = "00000000-0000-4000-8000-000000000000";
+  const deniedResponses = await Promise.all([
+    page.request.patch("/api/branch-overview", {
+      data: {
+        branchId: branchA!.id,
+        reason: "Security E2E branch overview read-only",
+        edits: [
+          {
+            clientId: "security-read-only",
+            staffId: staffA!.id,
+            businessDate: editableDay!.businessDate,
+            version: editableDay!.attendance!.version,
+            workUnits: "1",
+          },
+        ],
+      },
+    }),
+    page.request.get(`/api/exports/branch-monthly-overview?branchId=${branchA!.id}&month=${month}`),
+    page.request.get(`/api/exports/company-report?month=${month}&format=xlsx`),
+    page.request.get(`/api/company-report?month=${month}&branchId=${branchB!.id}`),
+    page.request.get(`/api/payroll/periods?month=${month}`),
+    page.request.get(`/api/payroll/periods/${validUnknownId}`),
+    page.request.post(`/api/payroll/periods/${validUnknownId}/calculate`, {
+      data: { version: 1, reason: "Security E2E payroll deny" },
+    }),
+    page.request.get(`/api/payroll/exports/${validUnknownId}`),
+    page.request.get(`/api/payroll/exports/${validUnknownId}/download`),
+    page.request.get("/api/imports/templates"),
+    page.request.get("/api/export-center"),
+    page.request.get("/api/audit"),
+    page.request.get("/api/administration/users"),
+    page.request.post("/api/rules/simple/rewards", {
+      data: {
+        effectiveFrom: `${month}-01`,
+        tiers: [{ thresholdAmount: "10000", rewardAmount: "50000" }],
+      },
+    }),
+  ]);
+  for (const response of deniedResponses) {
+    expect([403, 404]).toContain(response.status());
+  }
+
+  const visibleRules = await page.request.get("/api/rules/simple");
+  expect(visibleRules.ok()).toBe(true);
 });

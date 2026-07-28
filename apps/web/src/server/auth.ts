@@ -86,6 +86,12 @@ export const auth = betterAuth({
         defaultValue: true,
         input: true,
       },
+      canManagePayroll: {
+        type: "boolean",
+        required: true,
+        defaultValue: false,
+        input: true,
+      },
       version: {
         type: "number",
         required: true,

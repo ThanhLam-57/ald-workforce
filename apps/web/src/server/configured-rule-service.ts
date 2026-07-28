@@ -179,6 +179,7 @@ function defaultConfiguration(type: ConfiguredRuleType): ConfiguredRule {
       kind: type,
       baseSalary: "0",
       standardWorkdays: "26",
+      probationSalaryRateBps: 8_500,
       standardDailyMinutes: 480,
       overtime: { multiplierBps: 15_000, eligibleAfterMinutes: 0 },
       attendancePolicy: {
@@ -340,7 +341,11 @@ export async function listConfiguredRuleSets(
   const businessDate = toBusinessDateString(now);
   const date = parseBusinessDate(businessDate);
   const ruleSets = await prisma.ruleSet.findMany({
-    where: { companyId: actor.companyId, type: { not: "PENALTY" } },
+    where: {
+      companyId: actor.companyId,
+      type: { not: "PENALTY" },
+      managementMode: "VERSIONED",
+    },
     select: {
       id: true,
       name: true,
@@ -393,7 +398,11 @@ export async function listActiveConfiguredRules(
   const versions = await prisma.ruleVersion.findMany({
     where: {
       companyId: actor.companyId,
-      ruleSet: { type: type ?? { not: "PENALTY" } },
+      ruleSet: {
+        companyId: actor.companyId,
+        type: type ?? { not: "PENALTY" },
+        managementMode: "VERSIONED",
+      },
       status: { not: "DRAFT" },
       effectiveFrom: { lte: date },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: date } }],
@@ -420,6 +429,7 @@ export async function createConfiguredRuleSet(
       data: {
         companyId: actor.companyId,
         type: input.type,
+        managementMode: "VERSIONED",
         name: input.name,
         createdByUserId: actor.userId,
       },
@@ -466,7 +476,12 @@ export async function createConfiguredRuleDraft(
   });
   return prisma.$transaction(async (tx) => {
     const ruleSet = await tx.ruleSet.findFirst({
-      where: { id: input.ruleSetId, companyId: actor.companyId, type: { not: "PENALTY" } },
+      where: {
+        id: input.ruleSetId,
+        companyId: actor.companyId,
+        type: { not: "PENALTY" },
+        managementMode: "VERSIONED",
+      },
     });
     if (!ruleSet || !isConfiguredType(ruleSet.type)) {
       throw new DomainError("NOT_FOUND", "Không tìm thấy bộ rule cấu hình.");
@@ -534,7 +549,14 @@ export async function updateConfiguredRuleDraft(
   validateConfiguration(input.configuration);
   return prisma.$transaction(async (tx) => {
     const before = await tx.ruleVersion.findFirst({
-      where: { id, companyId: actor.companyId },
+      where: {
+        id,
+        companyId: actor.companyId,
+        ruleSet: {
+          companyId: actor.companyId,
+          managementMode: "VERSIONED",
+        },
+      },
       select: { ...versionSelect, ruleSet: { select: { type: true } } },
     });
     if (!before || !isConfiguredType(before.ruleSet.type)) {
@@ -633,7 +655,14 @@ export async function publishConfiguredRuleVersion(
   try {
     return await prisma.$transaction(async (tx) => {
       const before = await tx.ruleVersion.findFirst({
-        where: { id, companyId: actor.companyId },
+        where: {
+          id,
+          companyId: actor.companyId,
+          ruleSet: {
+            companyId: actor.companyId,
+            managementMode: "VERSIONED",
+          },
+        },
         select: { ...versionSelect, ruleSet: { select: { type: true } } },
       });
       if (!before || !isConfiguredType(before.ruleSet.type)) {
@@ -717,7 +746,14 @@ export async function retireConfiguredRuleVersion(
   const effectiveTo = parseBusinessDate(input.effectiveTo);
   return prisma.$transaction(async (tx) => {
     const before = await tx.ruleVersion.findFirst({
-      where: { id, companyId: actor.companyId },
+      where: {
+        id,
+        companyId: actor.companyId,
+        ruleSet: {
+          companyId: actor.companyId,
+          managementMode: "VERSIONED",
+        },
+      },
       select: { ...versionSelect, ruleSet: { select: { type: true } } },
     });
     if (!before || !isConfiguredType(before.ruleSet.type)) {
@@ -769,7 +805,14 @@ export async function compareConfiguredRuleVersions(
 ): Promise<ConfiguredRuleComparisonDto> {
   requirePermission(actor, "rule:write");
   const versions = await prisma.ruleVersion.findMany({
-    where: { companyId: actor.companyId, id: { in: [fromVersionId, toVersionId] } },
+    where: {
+      companyId: actor.companyId,
+      id: { in: [fromVersionId, toVersionId] },
+      ruleSet: {
+        companyId: actor.companyId,
+        managementMode: "VERSIONED",
+      },
+    },
     select: { ...versionSelect, ruleSet: { select: { type: true } } },
   });
   const from = versions.find((version) => version.id === fromVersionId);
@@ -843,6 +886,7 @@ type PreviewStaff = Prisma.StaffMemberGetPayload<{
     id: true;
     staffCode: true;
     fullName: true;
+    baseSalaryAmount: true;
     user: { select: { role: true } };
     attendanceDays: {
       select: {
@@ -902,11 +946,13 @@ function evaluateConfiguration(
     );
     const result = calculateMonthlyLevelResult(
       {
-        revenueAmount: totals.revenueAmount,
-        workUnits: totals.workUnits,
-        actualLiveMinutes: totals.actualLiveMinutes,
-        currentLevelCode: current?.performanceLevel.code ?? null,
-        currentLevelOrder: current?.performanceLevel.displayOrder ?? null,
+        monthlyCoins: totals.revenueAmount,
+        workedDayCount: staff.attendanceDays.filter(
+          (row) => row.status === "PRESENT" && Number(row.workUnits.toString()) > 0,
+        ).length,
+        attendanceRequiredDays: configuration.attendanceRequiredDays ?? 26,
+        previousLevelCode: current?.performanceLevel.code ?? null,
+        previousLevelOrder: current?.performanceLevel.displayOrder ?? null,
       },
       configuration.levels,
     );
@@ -921,8 +967,14 @@ function evaluateConfiguration(
     };
   }
   if (configuration.kind === "SALARY_RULES") {
+    const { standardDaysOffPerMonth, ...salaryConfiguration } = configuration;
     const result = calculateSalaryProjection(
-      configuration,
+      {
+        ...salaryConfiguration,
+        probationSalaryRateBps: salaryConfiguration.probationSalaryRateBps ?? 8_500,
+        ...(standardDaysOffPerMonth === undefined ? {} : { standardDaysOffPerMonth }),
+        baseSalary: staff.baseSalaryAmount.toString(),
+      },
       staff.attendanceDays.map((row) => ({
         status: row.status,
         workUnits: row.workUnits.toString(),
@@ -950,7 +1002,14 @@ export async function previewConfiguredRuleImpact(
   requirePermission(actor, "rule:write");
   const bounds = monthBounds(input.month);
   const draft = await prisma.ruleVersion.findFirst({
-    where: { id: input.ruleVersionId, companyId: actor.companyId },
+    where: {
+      id: input.ruleVersionId,
+      companyId: actor.companyId,
+      ruleSet: {
+        companyId: actor.companyId,
+        managementMode: "VERSIONED",
+      },
+    },
     select: { ...versionSelect, ruleSet: { select: { type: true } } },
   });
   if (!draft || draft.status !== "DRAFT" || !isConfiguredType(draft.ruleSet.type)) {
@@ -989,6 +1048,7 @@ export async function previewConfiguredRuleImpact(
       id: true,
       staffCode: true,
       fullName: true,
+      baseSalaryAmount: true,
       user: { select: { role: true } },
       attendanceDays: {
         where: {
@@ -1090,7 +1150,11 @@ export async function generateLevelProposals(
   const versions = await prisma.ruleVersion.findMany({
     where: {
       companyId: actor.companyId,
-      ruleSet: { type: "MONTHLY_LEVEL_RULES" },
+      ruleSet: {
+        companyId: actor.companyId,
+        type: "MONTHLY_LEVEL_RULES",
+        managementMode: "VERSIONED",
+      },
       status: { not: "DRAFT" },
       effectiveFrom: { lte: parseBusinessDate(bounds.last) },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: parseBusinessDate(bounds.last) } }],

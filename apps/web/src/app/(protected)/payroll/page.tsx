@@ -1,17 +1,18 @@
 import { PayrollWorkspace } from "@/app/dashboard/payroll-workspace";
-import { listBranches } from "@/server/services";
+
+import { listPayrollBranches } from "@/server/payroll-service";
 
 import { PageHeader } from "../page-header";
 import { requirePageActor } from "../page-access";
 
 export default async function PayrollPage() {
   const actor = await requirePageActor(["GENERAL_MANAGER"]);
-  const branches = await listBranches(actor);
+  const branches = await listPayrollBranches(actor);
 
   return (
     <>
       <PageHeader
-        description="Tính toán, review, điều chỉnh, khóa, publish và xuất bảng lương theo kỳ."
+        description="Chọn kỳ lương, cơ sở và nhân viên để chấm lương, điều chỉnh và gửi phiếu."
         eyebrow="Vận hành tài chính"
         title="Payroll"
       />
@@ -21,7 +22,7 @@ export default async function PayrollPage() {
           code: branch.code,
           name: branch.name,
         }))}
-        isGeneralManager
+        canManagePayroll
       />
     </>
   );

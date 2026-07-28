@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   configuredRuleSchema,
+  payrollWorksheetValuesSchema,
   type DailyRewardConfig,
   type MonthlyLevelConfig,
   type PayrollAdjustmentCreateInput,
@@ -12,14 +13,20 @@ import {
   type PayrollPeriodCreateInput,
   type PayrollPeriodDto,
   type PayrollPeriodListQuery,
+  type PayrollPeriodEnsureInput,
   type PayrollRevisionCreateInput,
+  type PayrollWorksheetSaveInput,
   type SalaryConfig,
 } from "@ald/contracts";
 import { prisma, type Prisma } from "@ald/db";
 import {
   calculatePayroll,
+  daysInPayrollMonth,
   DomainError,
+  matchRevenueBand,
   requirePermission,
+  standardPayableDays,
+  toBusinessDateString,
   type ActorContext,
   type PayrollCalculationInput,
   type PayrollCalculationOutput,
@@ -36,12 +43,16 @@ type ResolvedRule = Readonly<{
   id: string;
   effectiveFrom: Date;
   effectiveTo: Date | null;
+  managementMode: "VERSIONED" | "SIMPLE_MUTABLE";
   configuration: DailyRewardConfig | MonthlyLevelConfig | SalaryConfig;
 }>;
 
 const periodInclude = {
   branch: { select: { id: true, code: true, name: true } },
   company: { select: { employeeRevenueVisible: true } },
+  worksheetOverrides: {
+    select: { staffId: true, values: true, version: true },
+  },
   entries: {
     where: { included: true },
     include: {
@@ -149,6 +160,22 @@ function periodBounds(month: string): {
   };
 }
 
+function previousBusinessMonth(month: string): string {
+  const [yearText, monthText] = month.split("-");
+  const date = new Date(Date.UTC(Number(yearText), Number(monthText) - 2, 1));
+  return date.toISOString().slice(0, 7);
+}
+
+function timeInBusinessZone(value: Date | null): string | null {
+  if (!value) return null;
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(value);
+}
+
 function requirePayrollRead(actor: ActorContext): void {
   if (actor.role === "GENERAL_MANAGER") {
     requirePermission(actor, "payroll:read");
@@ -167,7 +194,7 @@ function requirePayrollRead(actor: ActorContext): void {
 function requirePayrollWrite(actor: ActorContext): void {
   requirePermission(actor, "payroll:write");
   if (actor.role !== "GENERAL_MANAGER") {
-    throw new DomainError("FORBIDDEN", "Chỉ Tổng quản lý được thao tác payroll.");
+    throw new DomainError("FORBIDDEN", "Chỉ Tổng quản lý được quản lý Payroll.");
   }
 }
 
@@ -214,6 +241,7 @@ async function loadPeriodForActor(
       status: true,
       version: true,
       latestCalculationNo: true,
+      standardDaysOffOverride: true,
       sourcePeriodId: true,
     },
   });
@@ -224,11 +252,100 @@ async function loadPeriodForActor(
 }
 
 function parseStoredOutput(value: Prisma.JsonValue): PayrollCalculationOutput {
-  return value as unknown as PayrollCalculationOutput;
+  const output = value as unknown as PayrollCalculationOutput;
+  const components = output.components;
+  const retainLevelBonus = components.retainLevelBonus ?? "0";
+  const jumpLevelBonus = components.jumpLevelBonus ?? components.levelBonus;
+  const calculatedComponents = output.calculatedComponents ?? {
+    proratedSalary: components.proratedSalary,
+    dailyRevenueBonus: components.dailyRevenueBonus,
+    monthlyRevenueBonus: components.monthlyRevenueBonus,
+    attendanceBonus: components.attendanceBonus,
+    achievementBonus: components.achievementBonus,
+    retainLevelBonus,
+    jumpLevelBonus,
+    overtimePay: components.overtimePay,
+    otherBonus: components.otherBonus,
+    penalties: components.penalties,
+    advance: components.advance,
+    totalIncome: components.totalIncome,
+  };
+  const aggregates = output.aggregates as PayrollCalculationOutput["aggregates"] &
+    Partial<Pick<PayrollCalculationOutput["aggregates"], "workedDayCount" | "currentMonthCoins">>;
+  const monthlyLevel = output.monthlyLevel ?? {
+    workedDayCount: aggregates.workedDayCount ?? 0,
+    attendanceRequiredDays: null,
+    attendanceEligible: false,
+    previousMonthCoins: null,
+    previousMonthCoinsSource: "NONE" as const,
+    previousLevelCode: null,
+    previousLevelName: null,
+    previousLevelOrder: null,
+    currentMonthCoins: aggregates.currentMonthCoins ?? aggregates.revenueAmount,
+    currentLevelCode: output.suggestedLevelCode ?? null,
+    currentLevelName: null,
+    currentLevelOrder: null,
+    transition: "NONE" as const,
+  };
+  return {
+    ...output,
+    aggregates: {
+      ...aggregates,
+      workedDayCount: aggregates.workedDayCount ?? monthlyLevel.workedDayCount,
+      currentMonthCoins: aggregates.currentMonthCoins ?? aggregates.revenueAmount,
+    },
+    components: {
+      ...components,
+      retainLevelBonus,
+      jumpLevelBonus,
+    },
+    calculatedComponents,
+    salaryBasis: output.salaryBasis ?? {
+      daysInMonth: 0,
+      standardDaysOffPerMonth: null,
+      standardPayableDays: 0,
+    },
+    employmentSalary: output.employmentSalary ?? {
+      joinedDate: null,
+      officialDate: null,
+      probationSalaryRateBps: 8_500,
+      probationWorkUnits: "0",
+      officialWorkUnits: aggregates.workUnits,
+      excludedBeforeJoinWorkUnits: "0",
+      probationSalaryAmount: "0",
+      officialSalaryAmount: calculatedComponents.proratedSalary,
+      calculatedProratedSalary: calculatedComponents.proratedSalary,
+      fallbackMode: "LEGACY_OFFICIAL_WITHOUT_OFFICIAL_DATE",
+    },
+    monthlyLevel,
+  };
 }
 
 function parseStoredInput(value: Prisma.JsonValue): PayrollCalculationInput {
-  return value as unknown as PayrollCalculationInput;
+  const input = value as unknown as Omit<
+    PayrollCalculationInput,
+    "baseSalaryAmount" | "previousMonth"
+  > & {
+    baseSalaryAmount?: string;
+    previousMonth?: PayrollCalculationInput["previousMonth"];
+  };
+  return {
+    ...input,
+    // Snapshots created before per-staff salary existed remain readable and immutable.
+    baseSalaryAmount: input.baseSalaryAmount ?? input.salaryRule.configuration.baseSalary,
+    salaryRule: {
+      ...input.salaryRule,
+      configuration: {
+        ...input.salaryRule.configuration,
+        probationSalaryRateBps: input.salaryRule.configuration.probationSalaryRateBps ?? 8_500,
+      },
+    },
+    previousMonth: input.previousMonth ?? {
+      coins: null,
+      source: "NONE",
+      level: null,
+    },
+  };
 }
 
 function withoutRevenueDetails(
@@ -236,7 +353,10 @@ function withoutRevenueDetails(
 ): Readonly<Record<string, unknown>> {
   return Object.fromEntries(
     Object.entries(details)
-      .filter(([key]) => !key.toLowerCase().includes("revenue"))
+      .filter(([key]) => {
+        const normalized = key.toLowerCase();
+        return !normalized.includes("revenue") && !normalized.includes("coin");
+      })
       .map(([key, value]) => [
         key,
         Array.isArray(value)
@@ -268,18 +388,70 @@ function dailyRows(
   }
   return [...input.attendance]
     .sort((left, right) => left.businessDate.localeCompare(right.businessDate))
-    .map((row) => ({
-      businessDate: row.businessDate,
-      status: row.status,
-      workUnits: row.workUnits,
-      overtimeMinutes: row.overtimeMinutes,
-      actualLiveMinutes: row.actualLiveMinutes,
-      ...(revenueVisible ? { revenueAmount: row.revenueAmount } : {}),
-      dailyRevenueBonus: (bonusByAttendance.get(row.attendanceId) ?? 0n).toString(),
-      penalties: row.violations
+    .map((row) => {
+      const calculatedPenalty = row.violations
         .reduce((total, violation) => total + BigInt(violation.amount), 0n)
-        .toString(),
-    }));
+        .toString();
+      const dailyRevenueBonus =
+        row.dailyRevenueBonusOverride ?? (bonusByAttendance.get(row.attendanceId) ?? 0n).toString();
+      const source = row.source ?? {
+        checkInTime: row.checkInTime ?? null,
+        checkOutTime: row.checkOutTime ?? null,
+        status: row.status,
+        workUnits: row.workUnits,
+        overtimeMinutes: row.overtimeMinutes,
+        actualLiveMinutes: row.actualLiveMinutes,
+        revenueAmount: row.revenueAmount,
+        rewardThresholdAmount: row.rewardThresholdAmount ?? null,
+        dailyRevenueBonus,
+        violationCategory: row.violationCategory ?? null,
+        violationDetail: row.violationDetail ?? null,
+        penalties: calculatedPenalty,
+        note: row.note ?? null,
+      };
+      return {
+        businessDate: row.businessDate,
+        checkInTime: row.checkInTime ?? null,
+        checkOutTime: row.checkOutTime ?? null,
+        status: row.status,
+        workUnits: row.workUnits,
+        overtimeMinutes: row.overtimeMinutes,
+        actualLiveMinutes: row.actualLiveMinutes,
+        ...(revenueVisible
+          ? {
+              revenueAmount: row.revenueAmount,
+              dailyCoins: row.revenueAmount,
+              rewardThresholdAmount: row.rewardThresholdAmount ?? null,
+            }
+          : {}),
+        dailyRevenueBonus,
+        violationCategory: row.violationCategory ?? null,
+        violationDetail: row.violationDetail ?? null,
+        penalties: row.penaltiesOverride ?? calculatedPenalty,
+        note: row.note ?? null,
+        source: {
+          checkInTime: source.checkInTime,
+          checkOutTime: source.checkOutTime,
+          status: source.status,
+          workUnits: source.workUnits,
+          overtimeMinutes: source.overtimeMinutes,
+          actualLiveMinutes: source.actualLiveMinutes,
+          ...(revenueVisible
+            ? {
+                revenueAmount: source.revenueAmount,
+                dailyCoins: source.revenueAmount,
+                rewardThresholdAmount: source.rewardThresholdAmount,
+              }
+            : {}),
+          dailyRevenueBonus: source.dailyRevenueBonus,
+          violationCategory: source.violationCategory,
+          violationDetail: source.violationDetail,
+          penalties: source.penalties,
+          note: source.note,
+        },
+        overriddenFields: row.overriddenFields ?? [],
+      };
+    });
 }
 
 function lineDto(
@@ -309,6 +481,7 @@ function lineDto(
 function entryDto(
   entry: PeriodRecord["entries"][number],
   revenueVisible: boolean,
+  worksheetOverride: PeriodRecord["worksheetOverrides"][number] | undefined,
 ): PayrollEntryDto {
   if (!entry.currentSnapshot) {
     throw new Error(`Payroll entry ${entry.id} thiếu current snapshot.`);
@@ -323,9 +496,16 @@ function entryDto(
     id: entry.id,
     staff: entry.staff,
     workUnits: entry.workUnits.toString(),
+    workedDayCount: output.aggregates.workedDayCount,
     overtimeMinutes: entry.overtimeMinutes,
-    ...(revenueVisible ? { revenueAmount: entry.revenueAmount.toString() } : {}),
+    ...(revenueVisible
+      ? {
+          revenueAmount: entry.revenueAmount.toString(),
+          currentMonthCoins: output.monthlyLevel.currentMonthCoins,
+        }
+      : {}),
     actualLiveMinutes: entry.actualLiveMinutes,
+    sourceBaseSalary: input.sourceBaseSalaryAmount ?? input.baseSalaryAmount,
     baseSalary: entry.baseSalary.toString(),
     proratedSalary: entry.proratedSalary.toString(),
     dailyRevenueBonus: entry.dailyRevenueBonus.toString(),
@@ -338,6 +518,44 @@ function entryDto(
     penalties: entry.penalties.toString(),
     advance: entry.advance.toString(),
     totalIncome: entry.totalIncome.toString(),
+    calculatedComponents: output.calculatedComponents,
+    previousLevelCode:
+      output.monthlyLevel.previousLevelCode ?? input.levelDisplay?.previousLevelCode ?? null,
+    sourceCurrentLevelCode:
+      input.levelDisplay?.sourceCurrentLevelCode ?? input.currentLevel?.code ?? null,
+    sourceCurrentLevelName: input.levelDisplay?.sourceCurrentLevelName ?? null,
+    currentLevelCode:
+      output.monthlyLevel.currentLevelCode ??
+      input.levelDisplay?.currentLevelCode ??
+      input.currentLevel?.code ??
+      null,
+    currentLevelName:
+      output.monthlyLevel.currentLevelName ?? input.levelDisplay?.currentLevelName ?? null,
+    monthlyLevel: {
+      workedDayCount: output.monthlyLevel.workedDayCount,
+      attendanceRequiredDays: output.monthlyLevel.attendanceRequiredDays,
+      attendanceEligible: output.monthlyLevel.attendanceEligible,
+      ...(revenueVisible
+        ? {
+            previousMonthCoins: output.monthlyLevel.previousMonthCoins,
+            currentMonthCoins: output.monthlyLevel.currentMonthCoins,
+          }
+        : {}),
+      previousMonthCoinsSource: output.monthlyLevel.previousMonthCoinsSource,
+      previousLevelCode: output.monthlyLevel.previousLevelCode,
+      previousLevelName: output.monthlyLevel.previousLevelName,
+      currentLevelCode: output.monthlyLevel.currentLevelCode,
+      currentLevelName: output.monthlyLevel.currentLevelName,
+      transition: output.monthlyLevel.transition,
+    },
+    employmentSalary: output.employmentSalary,
+    worksheetOverride:
+      revenueVisible && worksheetOverride
+        ? {
+            version: worksheetOverride.version,
+            values: payrollWorksheetValuesSchema.parse(worksheetOverride.values),
+          }
+        : null,
     anomalyFlags: entry.anomalyFlags as string[],
     calculationHash: entry.currentSnapshot.inputHash,
     calculationNo: entry.currentSnapshot.calculationNo,
@@ -353,8 +571,15 @@ function periodDto(record: PeriodRecord, actor: ActorContext): PayrollPeriodDto 
   const entries = record.entries
     .filter((entry) => actor.role !== "LIVE_EMPLOYEE" || entry.staffId === actor.staffId)
     .map((entry) =>
-      entryDto(entry, actor.role === "GENERAL_MANAGER" || record.company.employeeRevenueVisible),
+      entryDto(
+        entry,
+        actor.role !== "LIVE_EMPLOYEE" || record.company.employeeRevenueVisible,
+        record.worksheetOverrides.find((item) => item.staffId === entry.staffId),
+      ),
     );
+  const firstSnapshot = record.entries[0]?.currentSnapshot;
+  const firstOutput = firstSnapshot ? parseStoredOutput(firstSnapshot.outputs) : null;
+  const firstInput = firstSnapshot ? parseStoredInput(firstSnapshot.inputs) : null;
   const totals = entries.reduce(
     (total, entry) => ({
       grossIncome:
@@ -382,6 +607,24 @@ function periodDto(record: PeriodRecord, actor: ActorContext): PayrollPeriodDto 
     version: record.version,
     sourcePeriodId: record.sourcePeriodId,
     latestCalculationNo: record.latestCalculationNo,
+    standardDaysOff: {
+      ruleValue:
+        firstInput &&
+        Object.prototype.hasOwnProperty.call(firstInput.salaryRule, "sourceStandardDaysOffPerMonth")
+          ? (firstInput.salaryRule.sourceStandardDaysOffPerMonth ?? null)
+          : (firstInput?.salaryRule.configuration.standardDaysOffPerMonth ?? null),
+      overrideValue: record.standardDaysOffOverride,
+      appliedValue: firstOutput?.salaryBasis.standardDaysOffPerMonth ?? null,
+      daysInMonth: daysInPayrollMonth(record.month.toISOString().slice(0, 7)),
+      standardPayableDays: firstOutput?.salaryBasis.standardPayableDays ?? null,
+    },
+    salaryPolicy: {
+      standardDailyMinutes: firstInput?.salaryRule.configuration.standardDailyMinutes ?? null,
+      overtimeMultiplierBps: firstInput?.salaryRule.configuration.overtime.multiplierBps ?? null,
+      roundingUnit: firstInput?.salaryRule.configuration.roundingPolicy.unit ?? null,
+      roundingMode: firstInput?.salaryRule.configuration.roundingPolicy.mode ?? null,
+      roundingApplyAt: firstInput?.salaryRule.configuration.roundingPolicy.applyAt ?? null,
+    },
     totals: {
       staffCount: entries.length,
       grossIncome: totals.grossIncome.toString(),
@@ -428,7 +671,7 @@ export async function listPayrollPeriods(
   const records = await prisma.payrollPeriod.findMany({
     where: {
       companyId: actor.companyId,
-      ...(query.branchId && actor.role === "GENERAL_MANAGER" ? { branchId: query.branchId } : {}),
+      ...(query.branchId && actor.role !== "LIVE_EMPLOYEE" ? { branchId: query.branchId } : {}),
       ...(month ? { month } : {}),
       ...(actor.role === "LIVE_EMPLOYEE"
         ? {
@@ -441,7 +684,24 @@ export async function listPayrollPeriods(
     orderBy: [{ month: "desc" }, { revision: "desc" }],
     take: 24,
   });
-  return records.map((record) => periodDto(record, actor));
+  const latestByBranchMonth = new Map<string, PeriodRecord>();
+  for (const record of records) {
+    const key = `${record.branchId}:${record.month.toISOString().slice(0, 7)}`;
+    if (!latestByBranchMonth.has(key)) latestByBranchMonth.set(key, record);
+  }
+  return [...latestByBranchMonth.values()].map((record) => periodDto(record, actor));
+}
+
+export async function listPayrollBranches(
+  actor: ActorContext,
+): Promise<readonly Readonly<{ id: string; code: string; name: string }>[]> {
+  requirePayrollRead(actor);
+  if (actor.role === "LIVE_EMPLOYEE") return [];
+  return prisma.branch.findMany({
+    where: { companyId: actor.companyId },
+    select: { id: true, code: true, name: true },
+    orderBy: [{ isActive: "desc" }, { code: "asc" }],
+  });
 }
 
 export async function getPayrollPeriod(
@@ -505,22 +765,126 @@ export async function createPayrollPeriod(
   return getPayrollPeriod(actor, periodId);
 }
 
+export async function ensurePayrollPeriod(
+  actor: ActorContext,
+  input: PayrollPeriodEnsureInput,
+  metadata: RequestMetadata,
+): Promise<PayrollPeriodDto> {
+  requirePayrollWrite(actor);
+  const bounds = periodBounds(input.month);
+  const periodId = await prisma.$transaction(async (tx) => {
+    const branch = await tx.branch.findFirst({
+      where: { id: input.branchId, companyId: actor.companyId },
+      select: { id: true },
+    });
+    if (!branch) throw new DomainError("NOT_FOUND", "Không tìm thấy cơ sở.");
+    const lockKey = `payroll-period:${actor.companyId}:${input.branchId}:${input.month}`;
+    await tx.$queryRaw`
+      SELECT 1::integer AS "locked"
+      FROM pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))
+    `;
+    const existing = await tx.payrollPeriod.findFirst({
+      where: {
+        companyId: actor.companyId,
+        branchId: input.branchId,
+        month: bounds.monthDate,
+      },
+      orderBy: { revision: "desc" },
+      select: { id: true },
+    });
+    if (existing) return existing.id;
+    const created = await tx.payrollPeriod.create({
+      data: {
+        companyId: actor.companyId,
+        branchId: input.branchId,
+        month: bounds.monthDate,
+        revision: 1,
+        createdByUserId: actor.userId,
+        creationReason: input.reason,
+      },
+      select: { id: true },
+    });
+    await appendAudit(tx, {
+      actor,
+      action: "PAYROLL_PERIOD_ENSURE_CREATE",
+      entityType: "PayrollPeriod",
+      entityId: created.id,
+      reason: input.reason,
+      after: {
+        branchId: input.branchId,
+        month: input.month,
+        revision: 1,
+        status: "DRAFT",
+      },
+      metadata,
+    });
+    return created.id;
+  });
+  return getPayrollPeriod(actor, periodId);
+}
+
 async function loadResolvedRules(
   tx: Transaction,
   companyId: string,
   bounds: ReturnType<typeof periodBounds>,
 ): Promise<ResolvedRule[]> {
+  await tx.ruleVersion.updateMany({
+    where: {
+      companyId,
+      isSimpleCurrent: true,
+      supersededAt: null,
+      status: "SCHEDULED",
+      effectiveFrom: { lte: parseBusinessDate(toBusinessDateString(new Date())) },
+      ruleSet: {
+        companyId,
+        managementMode: "SIMPLE_MUTABLE",
+      },
+    },
+    data: {
+      status: "ACTIVE",
+      rowVersion: { increment: 1 },
+    },
+  });
   const records = await tx.ruleVersion.findMany({
     where: {
       companyId,
       status: { not: "DRAFT" },
       effectiveFrom: { lt: parseBusinessDate(bounds.toExclusive) },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: parseBusinessDate(bounds.from) } }],
-      ruleSet: {
-        type: { in: ["DAILY_REWARD_TIERS", "MONTHLY_LEVEL_RULES", "SALARY_RULES"] },
-      },
+      AND: [
+        {
+          OR: [
+            {
+              isSimpleCurrent: true,
+              supersededAt: null,
+              ruleSet: {
+                companyId,
+                type: {
+                  in: ["DAILY_REWARD_TIERS", "MONTHLY_LEVEL_RULES", "SALARY_RULES"],
+                },
+                managementMode: "SIMPLE_MUTABLE",
+              },
+            },
+            {
+              ruleSet: {
+                companyId,
+                type: {
+                  in: ["DAILY_REWARD_TIERS", "MONTHLY_LEVEL_RULES", "SALARY_RULES"],
+                },
+                managementMode: "VERSIONED",
+              },
+            },
+          ],
+        },
+      ],
     },
-    select: { id: true, effectiveFrom: true, effectiveTo: true, configuration: true },
+    select: {
+      id: true,
+      effectiveFrom: true,
+      effectiveTo: true,
+      configuration: true,
+      ruleSet: { select: { managementMode: true } },
+    },
     orderBy: [{ effectiveFrom: "asc" }, { versionNo: "asc" }],
   });
   return records.flatMap((record) => {
@@ -530,7 +894,15 @@ async function loadResolvedRules(
       (parsed.data.kind === "DAILY_REWARD_TIERS" ||
         parsed.data.kind === "MONTHLY_LEVEL_RULES" ||
         parsed.data.kind === "SALARY_RULES")
-      ? [{ ...record, effectiveFrom: record.effectiveFrom, configuration: parsed.data }]
+      ? [
+          {
+            id: record.id,
+            effectiveFrom: record.effectiveFrom,
+            effectiveTo: record.effectiveTo,
+            managementMode: record.ruleSet.managementMode,
+            configuration: parsed.data,
+          },
+        ]
       : [];
   });
 }
@@ -558,7 +930,15 @@ function uniqueRuleAt<T extends ResolvedRule["configuration"]["kind"]>(
   date: string,
   required: boolean,
 ) {
-  const matches = rulesAt(rules, kind, date);
+  const candidates = rulesAt(rules, kind, date);
+  const simpleMatches =
+    kind === "DAILY_REWARD_TIERS" || kind === "MONTHLY_LEVEL_RULES" || kind === "SALARY_RULES"
+      ? candidates.filter((rule) => rule.managementMode === "SIMPLE_MUTABLE")
+      : [];
+  const matches =
+    simpleMatches.length > 0
+      ? simpleMatches
+      : candidates.filter((rule) => rule.managementMode === "VERSIONED");
   if (matches.length > 1) {
     throw new DomainError(
       "VALIDATION_ERROR",
@@ -592,6 +972,9 @@ async function buildCalculations(
   const fromDate = parseBusinessDate(bounds.from);
   const toDate = parseBusinessDate(bounds.toExclusive);
   const lastDate = parseBusinessDate(bounds.lastDate);
+  const previousBounds = periodBounds(previousBusinessMonth(month));
+  const previousFromDate = parseBusinessDate(previousBounds.from);
+  const previousToDate = parseBusinessDate(previousBounds.toExclusive);
   const rules = await loadResolvedRules(tx, actor.companyId, bounds);
   const salary = uniqueRuleAt(rules, "SALARY_RULES", bounds.from, true);
   if (!salary || salary.configuration.kind !== "SALARY_RULES") {
@@ -611,21 +994,37 @@ async function buildCalculations(
     where: {
       companyId: actor.companyId,
       branchId: period.branchId,
-      archivedAt: null,
       effectiveFrom: { lt: toDate },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: fromDate } }],
-      staff: { archivedAt: null },
     },
     select: {
-      staff: { select: { id: true } },
+      staff: {
+        select: {
+          id: true,
+          baseSalaryAmount: true,
+          joinedDate: true,
+          officialDate: true,
+          employmentCategory: true,
+        },
+      },
     },
     distinct: ["staffId"],
   });
-  const staffIds = assignments.map((assignment) => assignment.staff.id).sort();
+  const staffById = new Map(
+    assignments.map((assignment) => [assignment.staff.id, assignment.staff]),
+  );
+  const staffIds = [...staffById.keys()].sort();
   if (staffIds.length === 0) {
     throw new DomainError("VALIDATION_ERROR", "Cơ sở không có nhân viên trong kỳ.");
   }
-  const [attendance, adjustments, levels] = await Promise.all([
+  const [
+    attendance,
+    adjustments,
+    levels,
+    worksheetOverrides,
+    previousPublishedEntries,
+    previousAttendance,
+  ] = await Promise.all([
     tx.attendanceDay.findMany({
       where: {
         companyId: actor.companyId,
@@ -638,9 +1037,12 @@ async function buildCalculations(
         id: true,
         staffId: true,
         businessDate: true,
+        checkInAt: true,
+        checkOutAt: true,
         status: true,
         workUnits: true,
         overtimeMinutes: true,
+        note: true,
         liveMetric: { select: { actualLiveMinutes: true, revenueAmount: true } },
         violations: {
           where: { status: "ACTIVE" },
@@ -649,6 +1051,7 @@ async function buildCalculations(
             ruleVersionId: true,
             amount: true,
             itemName: true,
+            detail: true,
           },
         },
       },
@@ -668,42 +1071,263 @@ async function buildCalculations(
       },
       select: {
         staffId: true,
-        performanceLevel: { select: { code: true, displayOrder: true } },
+        performanceLevel: { select: { code: true, name: true, displayOrder: true } },
+      },
+    }),
+    tx.payrollWorksheetOverride.findMany({
+      where: {
+        companyId: actor.companyId,
+        branchId: period.branchId,
+        payrollPeriodId: period.id,
+        staffId: { in: staffIds },
+      },
+      select: { staffId: true, values: true },
+    }),
+    tx.payrollEntry.findMany({
+      where: {
+        companyId: actor.companyId,
+        staffId: { in: staffIds },
+        included: true,
+        currentSnapshotId: { not: null },
+        payrollPeriod: {
+          companyId: actor.companyId,
+          month: previousBounds.monthDate,
+          status: "PUBLISHED",
+        },
+      },
+      select: {
+        staffId: true,
+        revenueAmount: true,
+        currentSnapshot: { select: { outputs: true } },
+        payrollPeriod: { select: { revision: true, publishedAt: true } },
+      },
+    }),
+    tx.attendanceDay.findMany({
+      where: {
+        companyId: actor.companyId,
+        staffId: { in: staffIds },
+        businessDate: { gte: previousFromDate, lt: previousToDate },
+        archivedAt: null,
+      },
+      select: {
+        id: true,
+        staffId: true,
+        liveMetric: { select: { revenueAmount: true } },
       },
     }),
   ]);
   const levelByStaff = new Map(levels.map((item) => [item.staffId, item.performanceLevel]));
+  const overrideByStaff = new Map(
+    worksheetOverrides.map((item) => [
+      item.staffId,
+      payrollWorksheetValuesSchema.parse(item.values),
+    ]),
+  );
+  const publishedByStaff = new Map<string, (typeof previousPublishedEntries)[number]>();
+  for (const entry of [...previousPublishedEntries].sort((left, right) => {
+    const revision = right.payrollPeriod.revision - left.payrollPeriod.revision;
+    if (revision !== 0) return revision;
+    return (
+      (right.payrollPeriod.publishedAt?.getTime() ?? 0) -
+      (left.payrollPeriod.publishedAt?.getTime() ?? 0)
+    );
+  })) {
+    if (!publishedByStaff.has(entry.staffId)) publishedByStaff.set(entry.staffId, entry);
+  }
+  const previousAttendanceByStaff = new Map<
+    string,
+    Readonly<{ coins: bigint; rowCount: number }>
+  >();
+  for (const row of previousAttendance) {
+    const current = previousAttendanceByStaff.get(row.staffId) ?? { coins: 0n, rowCount: 0 };
+    previousAttendanceByStaff.set(row.staffId, {
+      coins: current.coins + (row.liveMetric?.revenueAmount ?? 0n),
+      rowCount: current.rowCount + 1,
+    });
+  }
   return staffIds.map((staffId) => {
+    const worksheet = overrideByStaff.get(staffId);
+    const dayOverrides = new Map((worksheet?.days ?? []).map((day) => [day.businessDate, day]));
+    const staffSalary = staffById.get(staffId)!.baseSalaryAmount.toString();
+    const storedLevel = levelByStaff.get(staffId) ?? null;
+    const monthlyLevels =
+      monthly?.configuration.kind === "MONTHLY_LEVEL_RULES" ? monthly.configuration.levels : [];
+    const levelFromCoins = (coins: string) => {
+      const matched = matchRevenueBand(
+        coins,
+        monthlyLevels.map((level) => ({ ...level, priority: level.displayOrder })),
+      );
+      return matched
+        ? {
+            code: matched.code,
+            name: matched.name,
+            displayOrder: matched.displayOrder,
+          }
+        : null;
+    };
+    const published = publishedByStaff.get(staffId);
+    const previousSource = previousAttendanceByStaff.get(staffId);
+    let previousMonth: PayrollCalculationInput["previousMonth"];
+    if (published?.currentSnapshot) {
+      const previousOutput = parseStoredOutput(published.currentSnapshot.outputs);
+      const coins =
+        previousOutput.monthlyLevel.currentMonthCoins ?? published.revenueAmount.toString();
+      const snapshotLevel =
+        previousOutput.monthlyLevel.currentLevelCode === null
+          ? null
+          : {
+              code: previousOutput.monthlyLevel.currentLevelCode,
+              name:
+                previousOutput.monthlyLevel.currentLevelName ??
+                previousOutput.monthlyLevel.currentLevelCode,
+              displayOrder:
+                previousOutput.monthlyLevel.currentLevelOrder ??
+                monthlyLevels.find(
+                  (level) => level.code === previousOutput.monthlyLevel.currentLevelCode,
+                )?.displayOrder ??
+                0,
+            };
+      previousMonth = {
+        coins,
+        source: "PUBLISHED_PAYROLL",
+        level: snapshotLevel?.displayOrder ? snapshotLevel : levelFromCoins(coins),
+      };
+    } else if (previousSource && previousSource.rowCount > 0) {
+      const coins = previousSource.coins.toString();
+      previousMonth = {
+        coins,
+        source: "ATTENDANCE_LIVE",
+        level: levelFromCoins(coins),
+      };
+    } else if (typeof worksheet?.previousMonthCoins === "string") {
+      previousMonth = {
+        coins: worksheet.previousMonthCoins,
+        source: "MANUAL_BASELINE",
+        level: levelFromCoins(worksheet.previousMonthCoins),
+      };
+    } else {
+      previousMonth = { coins: null, source: "NONE", level: null };
+    }
+    const { standardDaysOffPerMonth: configuredDaysOff, ...salaryConfiguration } =
+      salary.configuration;
+    const componentOverrides = worksheet
+      ? (Object.fromEntries(
+          Object.entries(worksheet.components).filter(([, value]) => value !== undefined),
+        ) as NonNullable<PayrollCalculationInput["componentOverrides"]>)
+      : undefined;
     const input: PayrollCalculationInput = {
       staffId,
+      baseSalaryAmount: worksheet?.baseSalaryAmount ?? staffSalary,
+      sourceBaseSalaryAmount: staffSalary,
+      employment: {
+        joinedDate: staffById.get(staffId)!.joinedDate?.toISOString().slice(0, 10) ?? null,
+        officialDate: staffById.get(staffId)!.officialDate?.toISOString().slice(0, 10) ?? null,
+        category: staffById.get(staffId)!.employmentCategory,
+      },
       period: {
         month,
         from: bounds.from,
         toExclusive: bounds.toExclusive,
         timezone: "Asia/Ho_Chi_Minh",
       },
-      salaryRule: { ruleVersionId: salary.id, configuration: salary.configuration },
+      salaryRule: {
+        ruleVersionId: salary.id,
+        sourceStandardDaysOffPerMonth: configuredDaysOff ?? null,
+        configuration: {
+          ...salaryConfiguration,
+          probationSalaryRateBps: salaryConfiguration.probationSalaryRateBps ?? 8_500,
+          ...(period.standardDaysOffOverride === null
+            ? configuredDaysOff === undefined
+              ? {}
+              : { standardDaysOffPerMonth: configuredDaysOff }
+            : { standardDaysOffPerMonth: period.standardDaysOffOverride }),
+        },
+      },
       monthlyLevelRule:
         monthly?.configuration.kind === "MONTHLY_LEVEL_RULES"
           ? {
               ruleVersionId: monthly.id,
+              attendanceRequiredDays: monthly.configuration.attendanceRequiredDays ?? 26,
               levels: monthly.configuration.levels,
             }
           : null,
-      currentLevel: levelByStaff.get(staffId) ?? null,
+      previousMonth,
+      currentLevel: null,
+      levelDisplay: {
+        previousLevelCode: previousMonth.level?.code ?? null,
+        sourceCurrentLevelCode: storedLevel?.code ?? null,
+        sourceCurrentLevelName: storedLevel?.name ?? null,
+        currentLevelCode: null,
+        currentLevelName: null,
+      },
+      ...(componentOverrides ? { componentOverrides } : {}),
       attendance: attendance
         .filter((row) => row.staffId === staffId)
         .map((row) => {
           const businessDate = row.businessDate.toISOString().slice(0, 10);
           const daily = uniqueRuleAt(rules, "DAILY_REWARD_TIERS", businessDate, false);
-          return {
-            attendanceId: row.id,
-            businessDate,
+          const dayOverride = dayOverrides.get(businessDate);
+          const sourceRevenue = row.liveMetric?.revenueAmount.toString() ?? "0";
+          const matchedTier =
+            daily?.configuration.kind === "DAILY_REWARD_TIERS"
+              ? matchRevenueBand(sourceRevenue, daily.configuration.tiers)
+              : null;
+          const sourceDailyBonus = matchedTier?.rewardAmount ?? "0";
+          const sourcePenalty = row.violations
+            .reduce((total, violation) => total + violation.amount, 0n)
+            .toString();
+          const sourceViolationCategory =
+            [...new Set(row.violations.map((violation) => violation.itemName))].join(", ") || null;
+          const sourceViolationDetail =
+            row.violations
+              .map((violation) => violation.detail)
+              .filter(Boolean)
+              .join("; ") || null;
+          const source = {
+            checkInTime: timeInBusinessZone(row.checkInAt),
+            checkOutTime: timeInBusinessZone(row.checkOutAt),
             status: row.status,
             workUnits: row.workUnits.toString(),
             overtimeMinutes: row.overtimeMinutes,
             actualLiveMinutes: row.liveMetric?.actualLiveMinutes ?? 0,
-            revenueAmount: row.liveMetric?.revenueAmount.toString() ?? "0",
+            revenueAmount: sourceRevenue,
+            rewardThresholdAmount: matchedTier?.minRevenue ?? null,
+            dailyRevenueBonus: sourceDailyBonus,
+            violationCategory: sourceViolationCategory,
+            violationDetail: sourceViolationDetail,
+            penalties: sourcePenalty,
+            note: row.note,
+          } as const;
+          const has = (key: keyof NonNullable<typeof dayOverride>) =>
+            dayOverride ? Object.prototype.hasOwnProperty.call(dayOverride, key) : false;
+          return {
+            attendanceId: row.id,
+            businessDate,
+            checkInTime: has("checkInTime") ? dayOverride!.checkInTime! : source.checkInTime,
+            checkOutTime: has("checkOutTime") ? dayOverride!.checkOutTime! : source.checkOutTime,
+            status: dayOverride?.status ?? source.status,
+            workUnits: dayOverride?.workUnits ?? source.workUnits,
+            overtimeMinutes: dayOverride?.overtimeMinutes ?? source.overtimeMinutes,
+            actualLiveMinutes: dayOverride?.actualLiveMinutes ?? source.actualLiveMinutes,
+            revenueAmount: dayOverride?.revenueAmount ?? source.revenueAmount,
+            rewardThresholdAmount: has("rewardThresholdAmount")
+              ? dayOverride!.rewardThresholdAmount!
+              : source.rewardThresholdAmount,
+            ...(has("dailyRevenueBonus")
+              ? { dailyRevenueBonusOverride: dayOverride!.dailyRevenueBonus! }
+              : {}),
+            ...(has("penalties") ? { penaltiesOverride: dayOverride!.penalties! } : {}),
+            violationCategory: has("violationCategory")
+              ? dayOverride!.violationCategory!
+              : source.violationCategory,
+            violationDetail: has("violationDetail")
+              ? dayOverride!.violationDetail!
+              : source.violationDetail,
+            note: has("note") ? dayOverride!.note! : source.note,
+            overriddenFields: dayOverride
+              ? Object.keys(dayOverride).filter((key) => key !== "businessDate")
+              : [],
+            source,
             dailyRewardRule:
               daily?.configuration.kind === "DAILY_REWARD_TIERS"
                 ? { ruleVersionId: daily.id, tiers: daily.configuration.tiers }
@@ -908,6 +1532,251 @@ export async function calculatePayrollPeriod(
   return getPayrollPeriod(actor, periodId);
 }
 
+export async function savePayrollWorksheet(
+  actor: ActorContext,
+  periodId: string,
+  input: PayrollWorksheetSaveInput,
+  metadata: RequestMetadata,
+): Promise<PayrollPeriodDto> {
+  requirePayrollWrite(actor);
+  const targetId = await prisma.$transaction(async (tx) => {
+    let period = await loadPeriodForActor(tx, actor, periodId, true);
+    const createdRevision = period.status === "LOCKED" || period.status === "PUBLISHED";
+    if (createdRevision) {
+      const revisionId = await createRevisionInTransaction(
+        tx,
+        actor,
+        period,
+        { reason: `Sửa bảng lương sau khi đã gửi: ${input.reason}` },
+        metadata,
+      );
+      period = await loadPeriodForActor(tx, actor, revisionId, true);
+    } else if (period.version !== input.periodVersion) {
+      throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
+    }
+
+    const month = period.month.toISOString().slice(0, 7);
+    const bounds = periodBounds(month);
+    if (input.standardDaysOffOverride !== null) {
+      standardPayableDays(month, input.standardDaysOffOverride);
+    }
+    const assignment = await tx.branchAssignment.findFirst({
+      where: {
+        companyId: actor.companyId,
+        branchId: period.branchId,
+        staffId: input.staffId,
+        effectiveFrom: { lt: parseBusinessDate(bounds.toExclusive) },
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: parseBusinessDate(bounds.from) } }],
+      },
+      select: { id: true },
+    });
+    if (!assignment) {
+      throw new DomainError("NOT_FOUND", "Nhân viên không thuộc cơ sở trong kỳ lương.");
+    }
+    for (const day of input.values.days) {
+      if (day.businessDate < bounds.from || day.businessDate >= bounds.toExclusive) {
+        throw new DomainError("VALIDATION_ERROR", "Giá trị điều chỉnh nằm ngoài kỳ lương.");
+      }
+    }
+    let hasAutomaticPreviousData = false;
+    if (typeof input.values.previousMonthCoins === "string") {
+      const previousBounds = periodBounds(previousBusinessMonth(month));
+      const [publishedPrevious, attendancePrevious] = await Promise.all([
+        tx.payrollEntry.count({
+          where: {
+            companyId: actor.companyId,
+            staffId: input.staffId,
+            included: true,
+            currentSnapshotId: { not: null },
+            payrollPeriod: {
+              companyId: actor.companyId,
+              month: previousBounds.monthDate,
+              status: "PUBLISHED",
+            },
+          },
+        }),
+        tx.attendanceDay.count({
+          where: {
+            companyId: actor.companyId,
+            staffId: input.staffId,
+            archivedAt: null,
+            businessDate: {
+              gte: parseBusinessDate(previousBounds.from),
+              lt: parseBusinessDate(previousBounds.toExclusive),
+            },
+          },
+        }),
+      ]);
+      hasAutomaticPreviousData = publishedPrevious > 0 || attendancePrevious > 0;
+    }
+
+    const existing = await tx.payrollWorksheetOverride.findUnique({
+      where: {
+        payrollPeriodId_staffId: {
+          payrollPeriodId: period.id,
+          staffId: input.staffId,
+        },
+      },
+      select: { id: true, version: true, values: true },
+    });
+    if (hasAutomaticPreviousData && typeof input.values.previousMonthCoins === "string") {
+      const previousStored = existing
+        ? payrollWorksheetValuesSchema.parse(existing.values).previousMonthCoins
+        : undefined;
+      if (previousStored !== input.values.previousMonthCoins) {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "Tháng trước đã có dữ liệu tự động; không được nhập tổng xu thủ công.",
+        );
+      }
+    }
+    if (!createdRevision) {
+      if (
+        (existing === null && input.overrideVersion !== null) ||
+        (existing !== null && input.overrideVersion !== existing.version)
+      ) {
+        throw new DomainError("CONFLICT", "Phiếu lương đã được người khác cập nhật. Hãy tải lại.");
+      }
+    }
+    const values = payrollWorksheetValuesSchema.parse(input.values);
+    let overrideId: string;
+    if (existing) {
+      const updated = await tx.payrollWorksheetOverride.updateMany({
+        where: {
+          id: existing.id,
+          companyId: actor.companyId,
+          version: existing.version,
+        },
+        data: {
+          values: values as Prisma.InputJsonValue,
+          updatedByUserId: actor.userId,
+          version: { increment: 1 },
+        },
+      });
+      if (updated.count !== 1) {
+        throw new DomainError("CONFLICT", "Phiếu lương đã được người khác cập nhật. Hãy tải lại.");
+      }
+      overrideId = existing.id;
+    } else {
+      const created = await tx.payrollWorksheetOverride.create({
+        data: {
+          companyId: actor.companyId,
+          branchId: period.branchId,
+          payrollPeriodId: period.id,
+          staffId: input.staffId,
+          values: values as Prisma.InputJsonValue,
+          updatedByUserId: actor.userId,
+        },
+        select: { id: true },
+      });
+      overrideId = created.id;
+    }
+    await tx.payrollPeriod.update({
+      where: { id: period.id },
+      data: {
+        standardDaysOffOverride: input.standardDaysOffOverride,
+        status: "DRAFT",
+        version: { increment: 1 },
+      },
+    });
+    await appendAudit(tx, {
+      actor,
+      action: "PAYROLL_WORKSHEET_SAVE",
+      entityType: "PayrollWorksheetOverride",
+      entityId: overrideId,
+      reason: input.reason,
+      before: existing
+        ? {
+            payrollPeriodId: period.id,
+            branchId: period.branchId,
+            staffId: input.staffId,
+            values: existing.values,
+            version: existing.version,
+          }
+        : undefined,
+      after: {
+        payrollPeriodId: period.id,
+        branchId: period.branchId,
+        staffId: input.staffId,
+        values,
+        standardDaysOffOverride: input.standardDaysOffOverride,
+      },
+      metadata,
+    });
+    return period.id;
+  });
+
+  const target = await getPayrollPeriod(actor, targetId);
+  try {
+    return await calculatePayrollPeriod(
+      actor,
+      targetId,
+      { version: target.version, reason: input.reason },
+      metadata,
+    );
+  } catch (error) {
+    if (
+      error instanceof DomainError &&
+      error.code === "VALIDATION_ERROR" &&
+      /SALARY_RULES|salary rule/i.test(error.message)
+    ) {
+      return getPayrollPeriod(actor, targetId);
+    }
+    throw error;
+  }
+}
+
+export async function sendPayrollPeriod(
+  actor: ActorContext,
+  periodId: string,
+  input: PayrollPeriodActionInput,
+  metadata: RequestMetadata,
+): Promise<PayrollPeriodDto> {
+  requirePayrollWrite(actor);
+  await prisma.$transaction(async (tx) => {
+    const period = await loadPeriodForActor(tx, actor, periodId, true);
+    if (period.version !== input.version) {
+      throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
+    }
+    if (period.status === "LOCKED" || period.status === "PUBLISHED") {
+      throw new DomainError("CONFLICT", "Kỳ lương này đã được gửi.");
+    }
+    const includedEntries = await tx.payrollEntry.count({
+      where: {
+        companyId: actor.companyId,
+        payrollPeriodId: period.id,
+        included: true,
+        currentSnapshotId: { not: null },
+      },
+    });
+    if (includedEntries === 0) {
+      throw new DomainError("VALIDATION_ERROR", "Kỳ lương chưa có kết quả để gửi.");
+    }
+    const now = new Date();
+    await tx.payrollPeriod.update({
+      where: { id: period.id },
+      data: {
+        status: "PUBLISHED",
+        publishedByUserId: actor.userId,
+        publishedAt: now,
+        publishReason: input.reason,
+        version: { increment: 1 },
+      },
+    });
+    await appendAudit(tx, {
+      actor,
+      action: "PAYROLL_SEND",
+      entityType: "PayrollPeriod",
+      entityId: period.id,
+      reason: input.reason,
+      before: { status: period.status, version: period.version },
+      after: { status: "PUBLISHED", version: period.version + 1, includedEntries },
+      metadata,
+    });
+  });
+  return getPayrollPeriod(actor, periodId);
+}
+
 async function transitionPayroll(
   actor: ActorContext,
   periodId: string,
@@ -1002,30 +1871,51 @@ async function createRevisionInTransaction(
   if (!["LOCKED", "PUBLISHED"].includes(source.status)) {
     throw new DomainError("CONFLICT", "Chỉ kỳ đã khóa/publish mới được tạo revision.");
   }
-  const latest = await tx.payrollPeriod.aggregate({
+  const revisionLockKey = `payroll-revision:${actor.companyId}:${source.branchId}:${source.month
+    .toISOString()
+    .slice(0, 7)}`;
+  await tx.$queryRaw`
+    SELECT 1::integer AS "locked"
+    FROM pg_advisory_xact_lock(hashtextextended(${revisionLockKey}, 0))
+  `;
+  const latest = await tx.payrollPeriod.findFirst({
     where: {
       companyId: actor.companyId,
       branchId: source.branchId,
       month: source.month,
     },
-    _max: { revision: true },
+    orderBy: { revision: "desc" },
+    select: { id: true, revision: true, status: true },
   });
+  if (latest && latest.id !== source.id) {
+    throw new DomainError(
+      "CONFLICT",
+      "Kỳ lương đã có bản làm việc mới. Hãy tải lại trước khi sửa tiếp.",
+    );
+  }
   const created = await tx.payrollPeriod.create({
     data: {
       companyId: actor.companyId,
       branchId: source.branchId,
       month: source.month,
-      revision: (latest._max.revision ?? source.revision) + 1,
+      revision: (latest?.revision ?? source.revision) + 1,
       sourcePeriodId: source.id,
+      standardDaysOffOverride: source.standardDaysOffOverride,
       createdByUserId: actor.userId,
       creationReason: input.reason,
     },
     select: { id: true, revision: true },
   });
-  const sourceAdjustments = await tx.payrollAdjustment.findMany({
-    where: { payrollPeriodId: source.id },
-    select: { staffId: true, type: true, amount: true, reason: true, sourceDocument: true },
-  });
+  const [sourceAdjustments, sourceWorksheetOverrides] = await Promise.all([
+    tx.payrollAdjustment.findMany({
+      where: { payrollPeriodId: source.id },
+      select: { staffId: true, type: true, amount: true, reason: true, sourceDocument: true },
+    }),
+    tx.payrollWorksheetOverride.findMany({
+      where: { companyId: actor.companyId, payrollPeriodId: source.id },
+      select: { staffId: true, values: true },
+    }),
+  ]);
   if (sourceAdjustments.length > 0) {
     await tx.payrollAdjustment.createMany({
       data: sourceAdjustments.map((adjustment) => ({
@@ -1039,6 +1929,18 @@ async function createRevisionInTransaction(
         sourceDocument: adjustment.sourceDocument,
         createdByUserId: actor.userId,
         approvedByUserId: actor.userId,
+      })),
+    });
+  }
+  if (sourceWorksheetOverrides.length > 0) {
+    await tx.payrollWorksheetOverride.createMany({
+      data: sourceWorksheetOverrides.map((worksheet) => ({
+        companyId: actor.companyId,
+        branchId: source.branchId,
+        payrollPeriodId: created.id,
+        staffId: worksheet.staffId,
+        values: worksheet.values as Prisma.InputJsonValue,
+        updatedByUserId: actor.userId,
       })),
     });
   }

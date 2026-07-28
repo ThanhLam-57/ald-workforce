@@ -366,13 +366,9 @@ export function ManagerKpiWorkspace({ isGeneralManager }: Readonly<{ isGeneralMa
           <div className="mt-5 flex flex-wrap gap-2">
             {evaluations.map((evaluation) => (
               <Button
-                className={
-                  evaluation.id === selectedId
-                    ? ""
-                    : "bg-slate-100 text-slate-800 hover:bg-slate-200"
-                }
                 key={evaluation.id}
                 onClick={() => setSelectedId(evaluation.id)}
+                variant={evaluation.id === selectedId ? "primary" : "soft"}
               >
                 {evaluation.manager.staffCode} · {evaluation.status}
               </Button>

@@ -18,6 +18,7 @@ import {
   retirePenaltyRuleVersion,
   updatePenaltyRuleDraft,
 } from "./penalty-rule-service";
+import { applySimplePenaltyRules } from "./simple-rule-service";
 import {
   completeEvidenceUpload,
   createViolation,
@@ -42,9 +43,11 @@ let managerA: ActorContext;
 let managerB: ActorContext;
 let attendanceAId: string;
 let attendanceBId: string;
+let septemberAttendanceId: string;
 let versionOneId: string;
 let versionOneRowVersion: number;
 let penaltyItemOneId: string;
+let versionedPenaltyItemId: string;
 let oldViolationId: string;
 
 beforeAll(async () => {
@@ -274,7 +277,38 @@ beforeAll(async () => {
   );
   versionOneId = published.id;
   versionOneRowVersion = published.rowVersion;
-  penaltyItemOneId = published.items[0]!.id;
+  versionedPenaltyItemId = published.items[0]!.id;
+  const simplePenalty = await applySimplePenaltyRules(
+    gm,
+    {
+      effectiveFrom: "2026-08-01",
+      items: [
+        {
+          code: "LATE_SIMPLE",
+          name: "Đi muộn",
+          description: "Nhân viên bắt đầu Live muộn.",
+          defaultAmount: "50000",
+          reminderCount: 0,
+          countingWindow: "CALENDAR_MONTH",
+          displayColor: "#EF4444",
+          isActive: true,
+        },
+      ],
+    },
+    metadata,
+    new Date("2026-08-01T03:00:00.000Z"),
+  );
+  penaltyItemOneId = (
+    await prisma.penaltyItem.findFirstOrThrow({
+      where: {
+        companyId,
+        code: simplePenalty.items[0]!.code,
+        archivedAt: null,
+        ruleVersion: { isSimpleCurrent: true },
+      },
+      select: { id: true },
+    })
+  ).id;
 });
 
 afterAll(async () => {
@@ -374,7 +408,7 @@ describe("effective date và published immutable", () => {
 
     await expect(
       prisma.penaltyItem.update({
-        where: { id: penaltyItemOneId },
+        where: { id: versionedPenaltyItemId },
         data: { defaultAmount: 1n },
       }),
     ).rejects.toThrow(/immutable/i);
@@ -447,6 +481,35 @@ describe("violation snapshot, totals và branch scope", () => {
       metadata,
       new Date("2026-08-20T03:00:00.000Z"),
     );
+    await applySimplePenaltyRules(
+      gm,
+      {
+        effectiveFrom: "2026-09-01",
+        items: [
+          {
+            code: "LATE_SIMPLE",
+            name: "Đi muộn",
+            description: "Nhân viên bắt đầu Live muộn.",
+            defaultAmount: "70000",
+            reminderCount: 0,
+            countingWindow: "CALENDAR_MONTH",
+            displayColor: "#EF4444",
+            isActive: true,
+          },
+        ],
+      },
+      metadata,
+      new Date("2026-09-01T03:00:00.000Z"),
+    );
+    const septemberPenaltyItem = await prisma.penaltyItem.findFirstOrThrow({
+      where: {
+        companyId,
+        code: "LATE_SIMPLE",
+        archivedAt: null,
+        ruleVersion: { isSimpleCurrent: true },
+      },
+      select: { id: true },
+    });
     const septemberAttendance = await createAttendance(
       gm,
       {
@@ -456,11 +519,12 @@ describe("violation snapshot, totals và branch scope", () => {
       },
       metadata,
     );
+    septemberAttendanceId = septemberAttendance.id;
     const newViolation = await createViolation(
       managerA,
       {
         attendanceId: septemberAttendance.id,
-        penaltyItemId: versionTwo.items[0]!.id,
+        penaltyItemId: septemberPenaltyItem.id,
         detail: "Đi muộn tháng 9",
         reason: "Ghi nhận lỗi tháng 9",
       },
@@ -533,7 +597,7 @@ describe("violation snapshot, totals và branch scope", () => {
       createViolation(
         managerA,
         {
-          attendanceId: attendanceAId,
+          attendanceId: septemberAttendanceId,
           penaltyItemId: penaltyItemOneId,
           detail: "Thử override",
           amountOverride: "1",

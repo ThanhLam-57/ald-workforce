@@ -147,7 +147,7 @@ describe("import idempotency and branch scope", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
-  it("does not disclose a duplicate import job from another branch", async () => {
+  it("blocks manager import even when the target is an assigned branch", async () => {
     const checksumSha256 = `${"C".repeat(43)}=`;
     await presignImportUpload(
       gm,
@@ -178,10 +178,10 @@ describe("import idempotency and branch scope", () => {
         },
         metadata,
       ),
-    ).rejects.toMatchObject({ code: "CONFLICT" });
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 
-  it("rejects a branch-A file that targets a staff member assigned to branch B", async () => {
+  it("does not allow manager to start a staff import job", async () => {
     const staffCode = `BRANCH-B-${runId}`;
     const staff = await prisma.staffMember.create({
       data: {
@@ -201,51 +201,22 @@ describe("import idempotency and branch scope", () => {
         effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
       },
     });
-    const branchA = await prisma.branch.findUniqueOrThrow({
-      where: { id: branchAId },
-      select: { code: true },
-    });
-    const body = Buffer.from(
-      [
-        "branchCode,staffCode,fullName,jobTitle,employmentCategory,effectiveFrom",
-        `${branchA.code},${staffCode},Cross Branch Update,Live,OFFICIAL,2026-07-01`,
-      ].join("\r\n"),
-      "utf8",
-    );
-    const checksumSha256 = createHash("sha256").update(body).digest("base64");
-    const created = await presignImportUpload(
-      manager,
-      {
-        template: "STAFF",
-        idempotencyKey: `staff-scope-${runId}`,
-        originalFileName: "staff-scope.csv",
-        mimeType: "text/csv",
-        sizeBytes: body.length,
-        checksumSha256,
-        branchId: branchAId,
-        reason: "Staff branch scope test.",
-      },
-      metadata,
-    );
-    const uploaded = await fetch(created.upload!.url, {
-      method: "PUT",
-      headers: created.upload!.headers,
-      body,
-    });
-    expect(uploaded.ok).toBe(true);
-    const completed = await completeImportUpload(manager, created.job.id, metadata);
-    const preview = await previewImport(
-      manager,
-      created.job.id,
-      { mapping: completed.mapping, dryRun: true },
-      metadata,
-    );
-    expect(preview.errorRows).toBe(1);
-    expect(preview.errors).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "STAFF_SCOPE", severity: "CRITICAL" }),
-      ]),
-    );
+    await expect(
+      presignImportUpload(
+        manager,
+        {
+          template: "STAFF",
+          idempotencyKey: `staff-scope-${runId}`,
+          originalFileName: "staff-scope.csv",
+          mimeType: "text/csv",
+          sizeBytes: 128,
+          checksumSha256: createHash("sha256").update(staffCode).digest("base64"),
+          branchId: branchAId,
+          reason: "Staff branch scope test.",
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(
       await prisma.staffMember.findUniqueOrThrow({
         where: { companyId_staffCode: { companyId, staffCode } },

@@ -31,7 +31,7 @@ export default async function ProtectedLayout({ children }: Readonly<{ children:
         roleLabel: roleLabels[actor.role],
         scopeLabel,
       }}
-      navigation={navigationForRole(actor.role)}
+      navigation={navigationForRole(actor.role, Boolean(actor.canManagePayroll))}
     >
       {children}
     </ProtectedShell>

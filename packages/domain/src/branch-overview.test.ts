@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { enumerateBusinessMonth, summarizeMonthlyMetrics, weekOfMonth } from "./index";
+import {
+  businessWeekOfMonth,
+  enumerateBusinessMonth,
+  enumerateBusinessWeeks,
+  summarizeMonthlyMetrics,
+} from "./index";
 
 describe("branch monthly overview totals", () => {
-  it("cộng BIGINT, phút và Decimal mà không dùng floating point", () => {
+  it("cộng BIGINT, phút và Decimal mà không dùng floating point cho tiền", () => {
     expect(
       summarizeMonthlyMetrics([
         {
@@ -30,12 +35,35 @@ describe("branch monthly overview totals", () => {
     });
   });
 
-  it.each([
-    ["2026-02-28", 4],
-    ["2026-04-30", 5],
-    ["2026-07-31", 5],
-  ])("xác định tuần cho %s", (date, expected) => {
-    expect(weekOfMonth(date)).toBe(expected);
+  it("chia tháng 07/2026 thành tuần Thứ Hai–Chủ nhật và cắt ngày ngoài tháng", () => {
+    const weeks = enumerateBusinessWeeks("2026-07");
+
+    expect(weeks).toHaveLength(5);
+    expect(weeks[0]?.dates).toEqual([
+      "2026-07-01",
+      "2026-07-02",
+      "2026-07-03",
+      "2026-07-04",
+      "2026-07-05",
+    ]);
+    expect(weeks[4]?.dates).toEqual([
+      "2026-07-27",
+      "2026-07-28",
+      "2026-07-29",
+      "2026-07-30",
+      "2026-07-31",
+    ]);
+    expect(weeks.flatMap((week) => week.dates).every((date) => date.startsWith("2026-07"))).toBe(
+      true,
+    );
+    expect(businessWeekOfMonth("2026-07-31")).toBe(5);
+  });
+
+  it("hỗ trợ tháng có tuần lịch thứ 6", () => {
+    const weeks = enumerateBusinessWeeks("2026-08");
+
+    expect(weeks).toHaveLength(6);
+    expect(weeks[5]?.dates).toEqual(["2026-08-31"]);
   });
 
   it.each([

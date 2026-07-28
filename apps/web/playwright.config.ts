@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3100";
 const webServerPort = new URL(baseURL).port || "3000";
+const webServerCommand =
+  process.env.PLAYWRIGHT_WEB_SERVER_COMMAND ?? `pnpm exec next dev -p ${webServerPort}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -15,7 +17,7 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: `pnpm exec next dev -p ${webServerPort}`,
+    command: webServerCommand,
     url: `${baseURL}/api/health/live`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
@@ -31,7 +33,9 @@ export default defineConfig({
       testIgnore: /.*\.setup\.ts/,
       use: {
         ...devices["Desktop Chrome"],
-        storageState: "test-results/.auth/gm.json",
+        ...(process.env.PLAYWRIGHT_SKIP_AUTH_STATE === "1"
+          ? {}
+          : { storageState: "test-results/.auth/gm.json" }),
       },
     },
   ],

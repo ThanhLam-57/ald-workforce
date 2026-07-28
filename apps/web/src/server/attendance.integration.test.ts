@@ -5,10 +5,11 @@ import { DomainError, type ActorContext } from "@ald/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
-  archiveAttendance,
   createAttendance,
   createEmployeeErrorReport,
+  getAttendanceFilterOptions,
   getAttendanceMonth,
+  reconcileAutomaticViolationsForMonth,
   updateAttendance,
 } from "./attendance-service";
 
@@ -24,6 +25,7 @@ let branchAId: string;
 let branchBId: string;
 let liveAId: string;
 let liveBId: string;
+let futureLiveId: string;
 let managerStaffId: string;
 let gm: ActorContext;
 let manager: ActorContext;
@@ -45,7 +47,7 @@ beforeAll(async () => {
   branchAId = branchA.id;
   branchBId = branchB.id;
 
-  const [gmStaff, managerStaff, liveA, liveB] = await Promise.all([
+  const [gmStaff, managerStaff, liveA, liveB, futureLive] = await Promise.all([
     prisma.staffMember.create({
       data: {
         companyId,
@@ -82,10 +84,20 @@ beforeAll(async () => {
         employmentCategory: "OFFICIAL",
       },
     }),
+    prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: "LF",
+        fullName: "Live Future",
+        jobTitle: "Live",
+        employmentCategory: "OFFICIAL",
+      },
+    }),
   ]);
   managerStaffId = managerStaff.id;
   liveAId = liveA.id;
   liveBId = liveB.id;
+  futureLiveId = futureLive.id;
 
   const [gmUser, managerUser] = await Promise.all([
     prisma.user.create({
@@ -138,6 +150,15 @@ beforeAll(async () => {
         effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
       },
     }),
+    prisma.branchAssignment.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: futureLiveId,
+        assignmentType: "MEMBER",
+        effectiveFrom: new Date("2026-08-01T00:00:00.000Z"),
+      },
+    }),
   ]);
 
   gm = {
@@ -173,6 +194,55 @@ afterAll(async () => {
 });
 
 describe("attendance branch scope và quyền vai trò", () => {
+  it("lọc cơ sở trước nhân viên và áp dụng assignment effective date", async () => {
+    const managerJuly = await getAttendanceFilterOptions(manager, "2026-07");
+    expect(managerJuly.branches.map((branch) => branch.id)).toEqual([branchAId]);
+    expect(managerJuly.staff.map((person) => person.id)).toContain(liveAId);
+    expect(managerJuly.staff.map((person) => person.id)).not.toContain(liveBId);
+    expect(managerJuly.staff.map((person) => person.id)).not.toContain(futureLiveId);
+
+    const managerAugust = await getAttendanceFilterOptions(manager, "2026-08", branchAId);
+    expect(managerAugust.staff.map((person) => person.id)).toEqual(
+      expect.arrayContaining([liveAId, futureLiveId]),
+    );
+
+    const gmBranchB = await getAttendanceFilterOptions(gm, "2026-07", branchBId);
+    expect(gmBranchB.staff.map((person) => person.id)).toEqual([liveBId]);
+  });
+
+  it("không để manager đoán branchId ngoài phạm vi qua API options", async () => {
+    await expect(getAttendanceFilterOptions(manager, "2026-07", branchBId)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    } satisfies Partial<DomainError>);
+  });
+
+  it("không để manager tính lại lỗi tự động chéo cơ sở hoặc cho chính mình", async () => {
+    await expect(
+      reconcileAutomaticViolationsForMonth(
+        manager,
+        {
+          staffId: liveBId,
+          month: "2026-07",
+          dryRun: true,
+          reason: "Thử tính lại chéo cơ sở",
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      reconcileAutomaticViolationsForMonth(
+        manager,
+        {
+          staffId: managerStaffId,
+          month: "2026-07",
+          dryRun: true,
+          reason: "Thử tính lại cho chính manager",
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
   it("manager branch A không đọc hoặc sửa attendance staff branch B bằng ID trực tiếp", async () => {
     const branchBRecord = await createAttendance(
       gm,
@@ -329,8 +399,8 @@ describe("unique và optimistic concurrency", () => {
   });
 });
 
-describe("audit, archive và export an toàn", () => {
-  it("ghi before/after cho create, update, archive và không hard-delete", async () => {
+describe("audit, dữ liệu cũ và export an toàn", () => {
+  it("cho phép cập nhật lại attendance từng được lưu trữ", async () => {
     const created = await createAttendance(
       gm,
       {
@@ -342,7 +412,7 @@ describe("audit, archive và export an toàn", () => {
       },
       metadata,
     );
-    const updated = await updateAttendance(
+    await updateAttendance(
       gm,
       created.id,
       {
@@ -352,12 +422,21 @@ describe("audit, archive và export an toàn", () => {
       },
       metadata,
     );
-    const archived = await archiveAttendance(
+    const archived = await prisma.attendanceDay.update({
+      where: { id: created.id },
+      data: {
+        archivedAt: new Date(),
+        version: { increment: 1 },
+      },
+      select: { archivedAt: true, version: true },
+    });
+    const restored = await updateAttendance(
       gm,
       created.id,
       {
-        version: updated.version,
-        reason: "Lưu trữ audit attendance",
+        overtimeMinutes: 60,
+        version: archived.version,
+        reason: "Cập nhật lại attendance cũ",
       },
       metadata,
     );
@@ -373,11 +452,13 @@ describe("audit, archive và export an toàn", () => {
     expect(audits.map(({ action }) => action)).toEqual([
       "attendance.create",
       "attendance.update",
-      "attendance.archive",
+      "attendance.restore-and-update",
     ]);
     expect(audits[1]?.before).not.toBeNull();
     expect(audits[1]?.after).not.toBeNull();
     expect(archived.archivedAt).not.toBeNull();
+    expect(restored.archivedAt).toBeNull();
+    expect(restored.overtimeMinutes).toBe(60);
     expect(await prisma.attendanceDay.count({ where: { id: created.id } })).toBe(1);
   });
 

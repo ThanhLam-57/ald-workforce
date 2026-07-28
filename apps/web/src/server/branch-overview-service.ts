@@ -8,9 +8,9 @@ import { prisma, type Prisma } from "@ald/db";
 import {
   DomainError,
   enumerateBusinessMonth,
+  enumerateBusinessWeeks,
   requirePermission,
   summarizeMonthlyMetrics,
-  weekOfMonth,
   type ActorContext,
 } from "@ald/domain";
 
@@ -28,6 +28,11 @@ const ZERO_TOTALS = {
 
 function monthBounds(month: string) {
   const days = enumerateBusinessMonth(month);
+  const weekByDate = new Map(
+    enumerateBusinessWeeks(month).flatMap((week) =>
+      week.dates.map((businessDate) => [businessDate, week.weekNo] as const),
+    ),
+  );
   const first = days[0];
   const last = days.at(-1);
   if (!first || !last) {
@@ -39,7 +44,7 @@ function monthBounds(month: string) {
   return {
     days: days.map((day) => ({
       ...day,
-      weekOfMonth: weekOfMonth(day.businessDate),
+      weekOfMonth: weekByDate.get(day.businessDate)!,
     })),
     start,
     end,

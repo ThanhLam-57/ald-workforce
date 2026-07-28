@@ -243,6 +243,17 @@ beforeAll(async () => {
       businessDate: new Date("2026-07-01T00:00:00.000Z"),
       penaltyItemId: item.id,
       ruleVersionId: ruleVersion.id,
+      penaltyItemCode: item.code,
+      countingKey: item.code,
+      occurrenceNo: 1,
+      countingWindow: "CALENDAR_MONTH",
+      countingPeriodStart: new Date("2026-07-01T00:00:00.000Z"),
+      countingPeriodEnd: new Date("2026-08-01T00:00:00.000Z"),
+      penaltyStartsAt: 1,
+      snapshottedDefaultAmount: 50000n,
+      computedAmount: 50000n,
+      isChargeable: true,
+      responsibleParty: "VIOLATING_STAFF",
       itemName: item.name,
       amount: 50000n,
       detail: "Đi muộn 10 phút",
@@ -301,6 +312,28 @@ describe("branch monthly overview projection", () => {
 
     expect(overview.calendar).toHaveLength(31);
     expect(overview.calendar.at(-1)?.weekOfMonth).toBe(5);
+    expect(
+      overview.calendar
+        .filter((day) => day.weekOfMonth === 1)
+        .map((day) => day.businessDate),
+    ).toEqual([
+      "2026-07-01",
+      "2026-07-02",
+      "2026-07-03",
+      "2026-07-04",
+      "2026-07-05",
+    ]);
+    expect(
+      overview.calendar
+        .filter((day) => day.weekOfMonth === 5)
+        .map((day) => day.businessDate),
+    ).toEqual([
+      "2026-07-27",
+      "2026-07-28",
+      "2026-07-29",
+      "2026-07-30",
+      "2026-07-31",
+    ]);
     expect(overview.rows).toHaveLength(1);
     expect(overview.rows[0]?.staff).toMatchObject({
       fullName: "Live An Toàn",
@@ -321,6 +354,19 @@ describe("branch monthly overview projection", () => {
       workUnits: detail.days[0]?.attendance?.workUnits,
       overtimeMinutes: detail.days[0]?.attendance?.overtimeMinutes,
     });
+  });
+
+  it("hỗ trợ tuần lịch thứ 6 và không đưa ngày tháng khác vào calendar", async () => {
+    const overview = await getBranchMonthlyOverview(managerA, {
+      branchId: branchAId,
+      month: "2026-08",
+    });
+
+    expect(overview.calendar.at(-1)).toMatchObject({
+      businessDate: "2026-08-31",
+      weekOfMonth: 6,
+    });
+    expect(overview.calendar.every((day) => day.businessDate.startsWith("2026-08"))).toBe(true);
   });
 
   it("lọc theo alias, trạng thái, loại nhân sự và level tại cuối tháng", async () => {
@@ -359,7 +405,7 @@ describe("branch monthly overview projection", () => {
 describe("branch overview write-through và optimistic lock", () => {
   it("edit grid cập nhật attendance/live metric nguồn và employee sheet", async () => {
     const [result] = await updateBranchOverviewCells(
-      managerA,
+      gm,
       {
         branchId: branchAId,
         reason: "Sửa từ grid tổng quan",
@@ -388,7 +434,7 @@ describe("branch overview write-through và optimistic lock", () => {
 
   it("tạo ngày nguồn khi ô trống và trả conflict với version cũ", async () => {
     const [created] = await updateBranchOverviewCells(
-      managerA,
+      gm,
       {
         branchId: branchAId,
         reason: "Paste ô mới từ grid",
@@ -409,7 +455,7 @@ describe("branch overview write-through và optimistic lock", () => {
     expect(created?.attendance?.branchId).toBe(branchAId);
 
     const [conflict] = await updateBranchOverviewCells(
-      managerA,
+      gm,
       {
         branchId: branchAId,
         reason: "Thử stale version",
@@ -434,6 +480,28 @@ describe("branch overview write-through và optimistic lock", () => {
 });
 
 describe("branch scope và XLSX export", () => {
+  it("manager chỉ được đọc branch A và không được sửa từ grid tổng quan", async () => {
+    await expect(
+      updateBranchOverviewCells(
+        managerA,
+        {
+          branchId: branchAId,
+          reason: "Thử sửa grid chỉ xem",
+          edits: [
+            {
+              clientId: "read-only",
+              staffId: liveAId,
+              businessDate: "2026-07-01",
+              version: firstAttendanceVersion,
+              revenueAmount: "1",
+            },
+          ],
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
   it("manager không đọc/sửa branch B bằng branchId query/body trực tiếp; GM đọc được", async () => {
     await expect(
       getBranchMonthlyOverview(managerA, {
@@ -459,7 +527,7 @@ describe("branch scope và XLSX export", () => {
         },
         metadata,
       ),
-    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
 
     const gmOverview = await getBranchMonthlyOverview(gm, {
       branchId: branchBId,

@@ -1,15 +1,19 @@
 import type {
-  AttendanceArchiveInput,
   AttendanceCreateInput,
+  AttendanceFilterOptionsDto,
   AttendanceMonthDto,
   AttendanceRecordDto,
+  AutomaticViolationReconcileInput,
+  AutomaticViolationReconcileSummaryDto,
   AttendanceUpdateInput,
   EmployeeErrorReportDto,
 } from "@ald/contracts";
+import { configuredRuleSchema } from "@ald/contracts";
 import { prisma, type Prisma } from "@ald/db";
 import {
   DomainError,
   enumerateBusinessMonth,
+  matchRevenueBand,
   requirePermission,
   sumPenaltyAmounts,
   validateAttendanceValues,
@@ -19,7 +23,12 @@ import {
 import { parseBusinessDate, toBusinessDate } from "./business-date";
 import { createEvidenceViewUrl } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
-import { toViolationDto, violationSelect } from "./violation-service";
+import { activateDueSimpleRules } from "./simple-rule-service";
+import {
+  reconcileAutomaticViolationsInTransaction,
+  toViolationDto,
+  violationSelect,
+} from "./violation-service";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -49,6 +58,14 @@ const attendanceSelect = {
 } satisfies Prisma.AttendanceDaySelect;
 
 type AttendanceRecord = Prisma.AttendanceDayGetPayload<{ select: typeof attendanceSelect }>;
+type DailyRewardDto = AttendanceRecordDto["dailyReward"];
+
+const noDailyReward: DailyRewardDto = {
+  amount: "0",
+  matchedThreshold: null,
+  ruleVersionId: null,
+  status: "NO_ACTIVE_RULE",
+};
 
 function auditJson(value: Record<string, unknown>): Prisma.InputJsonValue {
   return value as Prisma.InputJsonValue;
@@ -85,7 +102,10 @@ async function appendAudit(
   });
 }
 
-function toDto(record: AttendanceRecord): AttendanceRecordDto {
+function toDto(
+  record: AttendanceRecord,
+  dailyReward: DailyRewardDto = noDailyReward,
+): AttendanceRecordDto {
   if (!record.liveMetric) {
     throw new Error(`Attendance ${record.id} thiếu live metric 1-1.`);
   }
@@ -108,6 +128,102 @@ function toDto(record: AttendanceRecord): AttendanceRecordDto {
     revenueAmount: record.liveMetric.revenueAmount.toString(),
     revenueUnit: record.liveMetric.revenueUnit,
     revenueScale: record.liveMetric.revenueScale,
+    dailyReward,
+  };
+}
+
+async function dailyRewardsForRecords(
+  companyId: string,
+  records: readonly AttendanceRecord[],
+): Promise<ReadonlyMap<string, DailyRewardDto>> {
+  if (records.length === 0) return new Map();
+  const dates = records.map((record) => record.businessDate);
+  const firstDate = dates.reduce((left, right) => (left < right ? left : right));
+  const lastDate = dates.reduce((left, right) => (left > right ? left : right));
+  await activateDueSimpleRules(companyId);
+  const versions = await prisma.ruleVersion.findMany({
+    where: {
+      companyId,
+      isSimpleCurrent: true,
+      supersededAt: null,
+      ruleSet: {
+        companyId,
+        type: "DAILY_REWARD_TIERS",
+        managementMode: "SIMPLE_MUTABLE",
+      },
+      status: "ACTIVE",
+      effectiveFrom: { lte: lastDate },
+      OR: [{ effectiveTo: null }, { effectiveTo: { gt: firstDate } }],
+    },
+    select: {
+      id: true,
+      effectiveFrom: true,
+      effectiveTo: true,
+      configuration: true,
+    },
+    orderBy: [{ effectiveFrom: "asc" }, { versionNo: "asc" }],
+  });
+  const result = new Map<string, DailyRewardDto>();
+  for (const record of records) {
+    if (!record.liveMetric) continue;
+    const matches = versions.filter(
+      (version) =>
+        version.effectiveFrom !== null &&
+        version.effectiveFrom <= record.businessDate &&
+        (version.effectiveTo === null || version.effectiveTo > record.businessDate),
+    );
+    if (matches.length === 0) {
+      result.set(record.id, noDailyReward);
+      continue;
+    }
+    if (matches.length > 1) {
+      result.set(record.id, {
+        ...noDailyReward,
+        status: "MULTIPLE_ACTIVE_RULES",
+      });
+      continue;
+    }
+    const version = matches[0]!;
+    const parsed = configuredRuleSchema.safeParse(version.configuration);
+    if (!parsed.success || parsed.data.kind !== "DAILY_REWARD_TIERS") {
+      throw new DomainError("VALIDATION_ERROR", "Bộ thưởng ngày đang áp dụng không hợp lệ.");
+    }
+    const matched = matchRevenueBand(record.liveMetric.revenueAmount.toString(), parsed.data.tiers);
+    result.set(record.id, {
+      amount: matched?.rewardAmount ?? "0",
+      matchedThreshold: matched?.minRevenue ?? null,
+      ruleVersionId: version.id,
+      status: matched ? "MATCHED" : "BELOW_MINIMUM",
+    });
+  }
+  return result;
+}
+
+async function toDtoWithDailyReward(record: AttendanceRecord): Promise<AttendanceRecordDto> {
+  const rewards = await dailyRewardsForRecords(record.companyId, [record]);
+  return toDto(record, rewards.get(record.id) ?? noDailyReward);
+}
+
+async function toMutationDto(
+  record: AttendanceRecord,
+  automaticViolationSummary: AutomaticViolationReconcileSummaryDto,
+): Promise<AttendanceRecordDto> {
+  const [attendance, violations] = await Promise.all([
+    toDtoWithDailyReward(record),
+    prisma.violation.findMany({
+      where: {
+        companyId: record.companyId,
+        attendanceId: record.id,
+      },
+      select: violationSelect,
+      orderBy: { createdAt: "asc" },
+    }),
+  ]);
+  return {
+    ...attendance,
+    automaticViolationSummary,
+    violations: violations.map(toViolationDto),
+    activePenaltyTotal: automaticViolationSummary.attendanceActivePenaltyTotal,
   };
 }
 
@@ -361,6 +477,83 @@ export async function listAttendanceStaff(actor: ActorContext, now: Date) {
   });
 }
 
+export async function getAttendanceFilterOptions(
+  actor: ActorContext,
+  month: string,
+  requestedBranchId?: string,
+): Promise<AttendanceFilterOptionsDto> {
+  requirePermission(actor, "attendance:read");
+  const { start, end } = monthBounds(month);
+  const branches = await prisma.branch.findMany({
+    where: {
+      companyId: actor.companyId,
+      ...(actor.role === "TRAINING_MANAGER" ? { id: { in: [...actor.activeBranchIds] } } : {}),
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      isActive: true,
+    },
+    orderBy: [{ isActive: "desc" }, { code: "asc" }],
+  });
+
+  if (requestedBranchId && !branches.some((branch) => branch.id === requestedBranchId)) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy cơ sở trong phạm vi được phép.");
+  }
+
+  const selectedBranchId =
+    requestedBranchId ?? branches.find((branch) => branch.isActive)?.id ?? branches[0]?.id ?? null;
+  if (!selectedBranchId) {
+    return {
+      month,
+      selectedBranchId: null,
+      branches,
+      staff: [],
+    };
+  }
+
+  const staff = await prisma.staffMember.findMany({
+    where: {
+      companyId: actor.companyId,
+      AND: [
+        { OR: [{ archivedAt: null }, { archivedAt: { gte: start } }] },
+        {
+          OR: [
+            { user: { is: null } },
+            { user: { is: { companyId: actor.companyId, role: "LIVE_EMPLOYEE" } } },
+          ],
+        },
+      ],
+      assignments: {
+        some: {
+          companyId: actor.companyId,
+          branchId: selectedBranchId,
+          assignmentType: "MEMBER",
+          archivedAt: null,
+          effectiveFrom: { lt: end },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: start } }],
+        },
+      },
+      ...(actor.staffId ? { id: { not: actor.staffId } } : {}),
+    },
+    select: {
+      id: true,
+      staffCode: true,
+      fullName: true,
+      jobTitle: true,
+    },
+    orderBy: [{ staffCode: "asc" }],
+  });
+
+  return {
+    month,
+    selectedBranchId,
+    branches,
+    staff,
+  };
+}
+
 export async function getAttendanceMonth(
   actor: ActorContext,
   staffId: string,
@@ -382,8 +575,12 @@ export async function getAttendanceMonth(
     select: attendanceSelect,
     orderBy: { businessDate: "asc" },
   });
+  const dailyRewards = await dailyRewardsForRecords(actor.companyId, records);
   const byDate = new Map(
-    records.map((record) => [record.businessDate.toISOString().slice(0, 10), toDto(record)]),
+    records.map((record) => [
+      record.businessDate.toISOString().slice(0, 10),
+      toDto(record, dailyRewards.get(record.id) ?? noDailyReward),
+    ]),
   );
   const violations = await prisma.violation.findMany({
     where: {
@@ -413,6 +610,9 @@ export async function getAttendanceMonth(
   return {
     month,
     activePenaltyTotal,
+    dailyRewardTotal: sumPenaltyAmounts(
+      records.map((record) => dailyRewards.get(record.id)?.amount ?? "0"),
+    ),
     staff: {
       id: target.id,
       staffCode: target.staffCode,
@@ -463,7 +663,7 @@ export async function createAttendance(
   validateAttendanceValues(values, target.company.timezone);
 
   try {
-    return await prisma.$transaction(async (tx) => {
+    const created = await prisma.$transaction(async (tx) => {
       const attendance = await tx.attendanceDay.create({
         data: {
           companyId: actor.companyId,
@@ -504,8 +704,16 @@ export async function createAttendance(
         after: attendanceAuditShape(created),
         metadata,
       });
-      return toDto(created);
+      const automaticViolationSummary = await reconcileAutomaticViolationsInTransaction(
+        tx,
+        actor,
+        created.id,
+        input.reason,
+        metadata,
+      );
+      return { record: created, automaticViolationSummary };
     });
+    return await toMutationDto(created.record, created.automaticViolationSummary);
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       throw new DomainError("CONFLICT", "Nhân viên đã có attendance tại ngày nghiệp vụ này.");
@@ -528,11 +736,6 @@ export async function updateAttendance(
   if (!existing) {
     throw new DomainError("NOT_FOUND", "Không tìm thấy attendance.");
   }
-  if (existing.archivedAt) {
-    throw new DomainError("CONFLICT", "Attendance đã được lưu trữ.", {
-      current: toDto(existing),
-    });
-  }
   const target = await assertExistingRecordAccess(actor, existing, true);
   if (!existing.liveMetric) {
     throw new Error(`Attendance ${existing.id} thiếu live metric 1-1.`);
@@ -554,13 +757,12 @@ export async function updateAttendance(
   };
   validateAttendanceValues(values, target.company.timezone);
 
-  return prisma.$transaction(async (tx) => {
+  const saved = await prisma.$transaction(async (tx) => {
     const result = await tx.attendanceDay.updateMany({
       where: {
         id,
         companyId: actor.companyId,
         version: input.version,
-        archivedAt: null,
       },
       data: {
         ...(input.checkInAt !== undefined
@@ -574,6 +776,7 @@ export async function updateAttendance(
         ...(input.overtimeMinutes !== undefined ? { overtimeMinutes: input.overtimeMinutes } : {}),
         ...(input.note !== undefined ? { note: input.note } : {}),
         ...(input.status !== undefined ? { status: input.status } : {}),
+        archivedAt: null,
         updatedByUserId: actor.userId,
         version: { increment: 1 },
       },
@@ -608,75 +811,118 @@ export async function updateAttendance(
     });
     await appendAudit(tx, {
       actor,
-      action: "attendance.update",
+      action: existing.archivedAt ? "attendance.restore-and-update" : "attendance.update",
       entityId: id,
       reason: input.reason,
       before: attendanceAuditShape(existing),
       after: attendanceAuditShape(after),
       metadata,
     });
-    return toDto(after);
+    const automaticViolationSummary = await reconcileAutomaticViolationsInTransaction(
+      tx,
+      actor,
+      after.id,
+      input.reason,
+      metadata,
+    );
+    return { record: after, automaticViolationSummary };
   });
+  return toMutationDto(saved.record, saved.automaticViolationSummary);
 }
 
-export async function archiveAttendance(
+function mergeAutomaticViolationSummaries(
+  summaries: readonly AutomaticViolationReconcileSummaryDto[],
+): AutomaticViolationReconcileSummaryDto {
+  const last = summaries.at(-1);
+  return {
+    createdCount: summaries.reduce((total, summary) => total + summary.createdCount, 0),
+    reactivatedCount: summaries.reduce((total, summary) => total + summary.reactivatedCount, 0),
+    cancelledCount: summaries.reduce((total, summary) => total + summary.cancelledCount, 0),
+    unchangedCount: summaries.reduce((total, summary) => total + summary.unchangedCount, 0),
+    attendanceActivePenaltyTotal: last?.attendanceActivePenaltyTotal ?? "0",
+    staffMonthActivePenaltyTotal: last?.staffMonthActivePenaltyTotal ?? "0",
+  };
+}
+
+class AutomaticViolationDryRunRollback extends Error {
+  public constructor(public readonly summary: AutomaticViolationReconcileSummaryDto) {
+    super("AUTOMATIC_VIOLATION_DRY_RUN_ROLLBACK");
+  }
+}
+
+export async function reconcileAutomaticViolationsForMonth(
   actor: ActorContext,
-  id: string,
-  input: AttendanceArchiveInput,
+  input: AutomaticViolationReconcileInput,
   metadata: RequestMetadata,
-): Promise<AttendanceRecordDto> {
-  requirePermission(actor, "attendance:archive");
-  const existing = await prisma.attendanceDay.findFirst({
-    where: { id, companyId: actor.companyId },
-    select: attendanceSelect,
+): Promise<AutomaticViolationReconcileSummaryDto> {
+  requirePermission(actor, "attendance:write");
+  if (actor.role === "TRAINING_MANAGER" && actor.staffId === input.staffId) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
+  }
+  const { start, end } = monthBounds(input.month);
+  await resolveMonthTarget(actor, input.staffId, start, end);
+  const attendance = await prisma.attendanceDay.findMany({
+    where: {
+      companyId: actor.companyId,
+      staffId: input.staffId,
+      businessDate: { gte: start, lt: end },
+      ...(actor.role === "TRAINING_MANAGER"
+        ? { branchId: { in: [...actor.activeBranchIds] } }
+        : {}),
+    },
+    select: { id: true },
+    orderBy: { businessDate: "asc" },
   });
-  if (!existing) {
-    throw new DomainError("NOT_FOUND", "Không tìm thấy attendance.");
-  }
-  await assertExistingRecordAccess(actor, existing, true);
-  if (existing.archivedAt) {
-    return toDto(existing);
-  }
 
-  return prisma.$transaction(async (tx) => {
-    const result = await tx.attendanceDay.updateMany({
-      where: {
-        id,
-        companyId: actor.companyId,
-        version: input.version,
-        archivedAt: null,
-      },
-      data: {
-        archivedAt: new Date(),
-        updatedByUserId: actor.userId,
-        version: { increment: 1 },
-      },
-    });
-    if (result.count !== 1) {
-      const current = await tx.attendanceDay.findFirst({
-        where: { id, companyId: actor.companyId },
-        select: attendanceSelect,
-      });
-      throw new DomainError("CONFLICT", "Attendance đã được cập nhật bởi người khác.", {
-        ...(current ? { current: toDto(current) } : {}),
-      });
+  const execute = async (tx: Transaction) => {
+    const summaries: AutomaticViolationReconcileSummaryDto[] = [];
+    for (const record of attendance) {
+      summaries.push(
+        await reconcileAutomaticViolationsInTransaction(
+          tx,
+          actor,
+          record.id,
+          input.reason,
+          metadata,
+        ),
+      );
     }
+    if (summaries.length > 0) return mergeAutomaticViolationSummaries(summaries);
+    const existingTotal = await tx.violation.aggregate({
+      where: {
+        companyId: actor.companyId,
+        staffId: input.staffId,
+        businessDate: { gte: start, lt: end },
+        status: "ACTIVE",
+      },
+      _sum: { amount: true },
+    });
+    return {
+      createdCount: 0,
+      reactivatedCount: 0,
+      cancelledCount: 0,
+      unchangedCount: 0,
+      attendanceActivePenaltyTotal: "0",
+      staffMonthActivePenaltyTotal: (existingTotal._sum.amount ?? 0n).toString(),
+    };
+  };
 
-    const after = await tx.attendanceDay.findUniqueOrThrow({
-      where: { id },
-      select: attendanceSelect,
-    });
-    await appendAudit(tx, {
-      actor,
-      action: "attendance.archive",
-      entityId: id,
-      reason: input.reason,
-      before: attendanceAuditShape(existing),
-      after: attendanceAuditShape(after),
-      metadata,
-    });
-    return toDto(after);
-  });
+  if (!input.dryRun) {
+    return prisma.$transaction(execute, { maxWait: 5_000, timeout: 30_000 });
+  }
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        const summary = await execute(tx);
+        throw new AutomaticViolationDryRunRollback(summary);
+      },
+      { maxWait: 5_000, timeout: 30_000 },
+    );
+  } catch (error) {
+    if (error instanceof AutomaticViolationDryRunRollback) return error.summary;
+    throw error;
+  }
+  throw new Error("Không thể hoàn tất dry-run lỗi tự động.");
 }
 
 export async function createEmployeeErrorReport(

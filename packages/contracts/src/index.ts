@@ -6,6 +6,11 @@ const trimmedText = (label: string, max: number) =>
 
 export const idSchema = z.uuid();
 export const reasonSchema = trimmedText("Lý do", 500);
+const moneyAmountSchema = z
+  .string()
+  .trim()
+  .regex(/^\d+$/, "Số tiền phải là số nguyên không âm.")
+  .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n, "Số tiền vượt giới hạn lưu trữ.");
 
 export const branchCreateSchema = z.object({
   code: trimmedText("Mã cơ sở", 30).regex(/^[A-Za-z0-9_-]+$/),
@@ -23,25 +28,78 @@ export const branchUpdateSchema = branchCreateSchema
     reason: reasonSchema,
   });
 
-export const staffCreateSchema = z.object({
+const staffFieldsSchema = z.object({
   staffCode: trimmedText("Mã nhân viên", 30).regex(/^[A-Za-z0-9_-]+$/),
   fullName: trimmedText("Họ tên", 120),
   streamingAlias: z.string().trim().max(120).nullable().optional(),
   email: z.email().optional(),
   phone: z.string().trim().max(30).optional(),
   jobTitle: trimmedText("Vị trí công việc", 120),
+  joinedDate: z.iso.date(),
+  officialDate: z.iso.date().nullable().optional(),
   employmentCategory: z.enum(["OFFICIAL", "PROBATION", "CONTRACTOR", "INTERN"]),
+  baseSalaryAmount: moneyAmountSchema.optional(),
   reason: reasonSchema,
 });
 
-export const staffUpdateSchema = staffCreateSchema
+export const staffCreateSchema = staffFieldsSchema.superRefine((value, context) => {
+  if (value.employmentCategory === "OFFICIAL" && !value.officialDate) {
+    context.addIssue({
+      code: "custom",
+      message: "Ngày lên chính thức là bắt buộc với nhân viên chính thức.",
+      path: ["officialDate"],
+    });
+  }
+  if (value.officialDate && value.officialDate < value.joinedDate) {
+    context.addIssue({
+      code: "custom",
+      message: "Ngày lên chính thức phải bằng hoặc sau ngày gia nhập công ty.",
+      path: ["officialDate"],
+    });
+  }
+});
+
+export const staffUpdateSchema = staffFieldsSchema
   .omit({ staffCode: true })
   .partial()
   .extend({
+    joinedDate: z.iso.date().nullable().optional(),
+    officialDate: z.iso.date().nullable().optional(),
     employmentStatus: z.enum(["ACTIVE", "ON_LEAVE", "TERMINATED"]).optional(),
+    effectiveFrom: z.iso.date().optional(),
     version: z.number().int().positive(),
     reason: reasonSchema,
+  })
+  .superRefine((value, context) => {
+    if (
+      value.joinedDate !== undefined &&
+      value.joinedDate !== null &&
+      value.officialDate !== undefined &&
+      value.officialDate !== null &&
+      value.officialDate < value.joinedDate
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Ngày lên chính thức phải bằng hoặc sau ngày gia nhập công ty.",
+        path: ["officialDate"],
+      });
+    }
+    if (
+      (value.employmentStatus !== undefined || value.employmentCategory !== undefined) &&
+      !value.effectiveFrom
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Ngày hiệu lực là bắt buộc khi đổi trạng thái hoặc loại hình nhân sự.",
+        path: ["effectiveFrom"],
+      });
+    }
   });
+
+export const staffArchiveSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
 
 export const assignmentCreateSchema = z
   .object({
@@ -65,6 +123,18 @@ export const assignmentUpdateSchema = z
   })
   .refine(() => true);
 
+export const assignmentTransferSchema = z.object({
+  targetBranchId: idSchema,
+  effectiveFrom: z.iso.date(),
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
+export const assignmentCancelSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
 const strongPasswordSchema = z
   .string()
   .min(12, "Mật khẩu phải có ít nhất 12 ký tự.")
@@ -81,6 +151,7 @@ export const userCreateSchema = z.object({
   password: strongPasswordSchema,
   name: trimmedText("Tên hiển thị", 120),
   role: z.enum(AUTH_ROLES),
+  canManagePayroll: z.boolean().optional(),
   staffId: idSchema.nullable().optional(),
   reason: reasonSchema,
 });
@@ -88,6 +159,8 @@ export const userCreateSchema = z.object({
 export const userUpdateSchema = z.object({
   role: z.enum(AUTH_ROLES).optional(),
   active: z.boolean().optional(),
+  canManagePayroll: z.boolean().optional(),
+  staffId: idSchema.nullable().optional(),
   version: z.number().int().positive(),
   reason: reasonSchema,
 });
@@ -157,6 +230,9 @@ export type AdminStaffDto = Readonly<{
   email: string | null;
   phone: string | null;
   jobTitle: string;
+  baseSalaryAmount: string;
+  joinedDate: string | null;
+  officialDate: string | null;
   employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
   employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
   currentAssignments: readonly Readonly<{
@@ -195,6 +271,7 @@ export type AdminUserDto = Readonly<{
   username: string | null;
   email: string;
   role: "GENERAL_MANAGER" | "TRAINING_MANAGER" | "LIVE_EMPLOYEE";
+  canManagePayroll: boolean;
   active: boolean;
   mustChangePassword: boolean;
   staff: Readonly<{ id: string; staffCode: string; fullName: string }> | null;
@@ -270,14 +347,21 @@ export const attendanceUpdateSchema = attendanceValuesSchema.extend({
   reason: reasonSchema,
 });
 
-export const attendanceArchiveSchema = z.object({
-  version: z.number().int().positive(),
-  reason: reasonSchema,
-});
-
 export const attendanceMonthQuerySchema = z.object({
   staffId: idSchema,
   month: businessMonthSchema,
+});
+
+export const attendanceFilterOptionsQuerySchema = z.object({
+  month: businessMonthSchema,
+  branchId: idSchema.optional(),
+});
+
+export const automaticViolationReconcileSchema = z.object({
+  staffId: idSchema,
+  month: businessMonthSchema,
+  dryRun: z.boolean(),
+  reason: reasonSchema,
 });
 
 export const branchOverviewQuerySchema = z.object({
@@ -382,6 +466,34 @@ export const penaltyRuleSetCreateSchema = z.object({
   reason: reasonSchema,
 });
 
+export const automaticPenaltyConditionSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("MANUAL"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("CHECK_IN_LATE"),
+      scheduledStartMinutes: z.number().int().min(0).max(1_439),
+      graceMinutes: z.number().int().min(0).max(720),
+      branchId: idSchema.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("LIVE_DURATION_SHORT"),
+      requiredLiveMinutes: z.number().int().min(1).max(2_880),
+      graceMinutes: z.number().int().min(0).max(720),
+      branchId: idSchema.nullable(),
+    })
+    .strict()
+    .refine(({ graceMinutes, requiredLiveMinutes }) => graceMinutes <= requiredLiveMinutes, {
+      message: "Số phút du di không được lớn hơn thời lượng Live yêu cầu.",
+      path: ["graceMinutes"],
+    }),
+]);
+
 export const penaltyRuleDraftCreateSchema = z.object({
   ruleSetId: idSchema,
   cloneFromVersionId: idSchema.nullable().optional(),
@@ -463,12 +575,6 @@ export const CONFIGURED_RULE_TYPES = [
 
 export const configuredRuleTypeSchema = z.enum(CONFIGURED_RULE_TYPES);
 
-const moneyAmountSchema = z
-  .string()
-  .trim()
-  .regex(/^\d+$/, "Số tiền phải là số nguyên không âm.")
-  .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n, "Số tiền vượt giới hạn lưu trữ.");
-
 const positiveDecimalSchema = z
   .string()
   .trim()
@@ -501,6 +607,151 @@ export const dailyRewardConfigSchema = z
   })
   .strict();
 
+export const simpleRewardRuleApplySchema = z
+  .object({
+    effectiveFrom: z.iso.date(),
+    tiers: z
+      .array(
+        z
+          .object({
+            thresholdAmount: moneyAmountSchema,
+            rewardAmount: moneyAmountSchema,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(200),
+  })
+  .superRefine(({ tiers }, context) => {
+    const thresholds = new Set<string>();
+    for (const [index, tier] of tiers.entries()) {
+      const normalized = BigInt(tier.thresholdAmount).toString();
+      if (thresholds.has(normalized)) {
+        context.addIssue({
+          code: "custom",
+          message: "Mốc xu không được trùng.",
+          path: ["tiers", index, "thresholdAmount"],
+        });
+      }
+      thresholds.add(normalized);
+    }
+  });
+
+export const simpleMonthlyLevelRuleApplySchema = z
+  .object({
+    effectiveFrom: z.iso.date(),
+    attendanceRequiredDays: z.number().int().min(1).max(31),
+    levels: z
+      .array(
+        z
+          .object({
+            code: ruleCodeSchema.optional(),
+            name: trimmedText("Tên bậc", 160),
+            monthlyCoinThreshold: moneyAmountSchema,
+            attendanceBonus: moneyAmountSchema,
+            achievementBonus: moneyAmountSchema,
+            retainLevelBonus: moneyAmountSchema,
+            jumpLevelBonus: moneyAmountSchema,
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(100),
+  })
+  .superRefine(({ levels }, context) => {
+    const codes = new Set<string>();
+    const names = new Set<string>();
+    let previousThreshold: bigint | null = null;
+    for (const [index, level] of levels.entries()) {
+      if (level.code && codes.has(level.code)) {
+        context.addIssue({
+          code: "custom",
+          message: "Mã bậc không được trùng.",
+          path: ["levels", index, "code"],
+        });
+      }
+      if (level.code) codes.add(level.code);
+      const normalizedName = level.name.toLocaleLowerCase("vi");
+      if (names.has(normalizedName)) {
+        context.addIssue({
+          code: "custom",
+          message: "Tên bậc không được trùng.",
+          path: ["levels", index, "name"],
+        });
+      }
+      names.add(normalizedName);
+      const threshold = BigInt(level.monthlyCoinThreshold);
+      if (previousThreshold !== null && threshold <= previousThreshold) {
+        context.addIssue({
+          code: "custom",
+          message: "Mốc xu phải tăng dần theo thứ tự bậc.",
+          path: ["levels", index, "monthlyCoinThreshold"],
+        });
+      }
+      previousThreshold = threshold;
+    }
+  });
+
+export const simpleSalaryRuleApplySchema = z.object({
+  effectiveFrom: z.iso.date(),
+  standardDaysOffPerMonth: z.number().int().min(0).max(30),
+  probationSalaryRateBps: z.number().int().min(0).max(10_000),
+  standardDailyMinutes: z.number().int().min(1).max(1_440),
+  overtimeMultiplierBps: z.number().int().min(0).max(100_000),
+  roundingUnit: z.union([z.literal(1), z.literal(10), z.literal(100), z.literal(1_000)]),
+  roundingMode: z.enum(["HALF_UP", "HALF_EVEN", "FLOOR", "CEILING"]),
+});
+
+export const simplePenaltyRuleApplySchema = z
+  .object({
+    effectiveFrom: z.iso.date(),
+    items: z
+      .array(
+        z
+          .object({
+            code: ruleCodeSchema.optional(),
+            name: trimmedText("Tên lỗi", 160),
+            description: trimmedText("Nội dung lỗi", 2_000),
+            defaultAmount: moneyAmountSchema,
+            reminderCount: z.number().int().min(0).max(10_000),
+            countingWindow: z.enum(["CALENDAR_MONTH", "LIFETIME"]).default("CALENDAR_MONTH"),
+            displayColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Màu phải có dạng #RRGGBB."),
+            isActive: z.boolean().default(true),
+            automaticCondition: automaticPenaltyConditionSchema.optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(200),
+  })
+  .superRefine(({ items }, context) => {
+    const codes = new Set<string>();
+    const automaticScopes = new Set<string>();
+    for (const [index, item] of items.entries()) {
+      if (item.code) {
+        if (codes.has(item.code)) {
+          context.addIssue({
+            code: "custom",
+            message: "Mã lỗi không được trùng.",
+            path: ["items", index, "code"],
+          });
+        }
+        codes.add(item.code);
+      }
+      const condition = item.automaticCondition ?? { type: "MANUAL" as const };
+      if (!item.isActive || condition.type === "MANUAL") continue;
+      const scopeKey = `${condition.type}:${condition.branchId ?? "ALL_BRANCHES"}`;
+      if (automaticScopes.has(scopeKey)) {
+        context.addIssue({
+          code: "custom",
+          message: "Mỗi loại kiểm tra tự động chỉ được có một rule đang dùng trong cùng phạm vi.",
+          path: ["items", index, "automaticCondition"],
+        });
+      }
+      automaticScopes.add(scopeKey);
+    }
+  });
+
 export const monthlyLevelTierSchema = z
   .object({
     code: ruleCodeSchema,
@@ -525,6 +776,7 @@ export const monthlyLevelConfigSchema = z
   .object({
     kind: z.literal("MONTHLY_LEVEL_RULES"),
     gapPolicy: gapPolicySchema,
+    attendanceRequiredDays: z.number().int().min(1).max(31).optional(),
     levels: z.array(monthlyLevelTierSchema).min(1).max(100),
   })
   .strict();
@@ -534,6 +786,8 @@ export const salaryConfigSchema = z
     kind: z.literal("SALARY_RULES"),
     baseSalary: moneyAmountSchema,
     standardWorkdays: positiveDecimalSchema,
+    standardDaysOffPerMonth: z.number().int().min(0).max(30).optional(),
+    probationSalaryRateBps: z.number().int().min(0).max(10_000).optional(),
     standardDailyMinutes: z.number().int().min(1).max(1_440),
     overtime: z
       .object({
@@ -648,6 +902,86 @@ const signedMoneyAmountSchema = z
     return amount >= -9_223_372_036_854_775_808n && amount <= 9_223_372_036_854_775_807n;
   }, "Số tiền vượt giới hạn lưu trữ.");
 
+const payrollClockTimeSchema = z
+  .string()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Thời gian phải có dạng HH:mm.")
+  .nullable();
+
+export const payrollDayOverrideSchema = z
+  .object({
+    businessDate: z.iso.date(),
+    checkInTime: payrollClockTimeSchema.optional(),
+    checkOutTime: payrollClockTimeSchema.optional(),
+    status: z.enum(["DRAFT", "PRESENT", "ABSENT", "LEAVE"]).optional(),
+    workUnits: positiveDecimalSchema.optional(),
+    overtimeMinutes: z.number().int().min(0).max(10_000).optional(),
+    actualLiveMinutes: z.number().int().min(0).max(10_000).optional(),
+    revenueAmount: moneyAmountSchema.optional(),
+    rewardThresholdAmount: moneyAmountSchema.nullable().optional(),
+    dailyRevenueBonus: moneyAmountSchema.optional(),
+    violationCategory: z.string().trim().max(500).nullable().optional(),
+    violationDetail: z.string().trim().max(2_000).nullable().optional(),
+    penalties: moneyAmountSchema.optional(),
+    note: z.string().trim().max(2_000).nullable().optional(),
+  })
+  .strict();
+
+export const payrollComponentOverridesSchema = z
+  .object({
+    proratedSalary: moneyAmountSchema.optional(),
+    dailyRevenueBonus: moneyAmountSchema.optional(),
+    monthlyRevenueBonus: moneyAmountSchema.optional(),
+    attendanceBonus: moneyAmountSchema.optional(),
+    achievementBonus: moneyAmountSchema.optional(),
+    retainLevelBonus: moneyAmountSchema.optional(),
+    jumpLevelBonus: moneyAmountSchema.optional(),
+    overtimePay: moneyAmountSchema.optional(),
+    otherBonus: signedMoneyAmountSchema.optional(),
+    penalties: moneyAmountSchema.optional(),
+    advance: moneyAmountSchema.optional(),
+  })
+  .strict();
+
+export const payrollWorksheetValuesSchema = z
+  .object({
+    baseSalaryAmount: moneyAmountSchema.optional(),
+    previousMonthCoins: moneyAmountSchema.nullable().optional(),
+    previousLevelCode: z.string().trim().max(40).nullable().optional(),
+    currentLevelCode: z.string().trim().max(40).nullable().optional(),
+    currentLevelName: z.string().trim().max(160).nullable().optional(),
+    days: z.array(payrollDayOverrideSchema).max(31).default([]),
+    components: payrollComponentOverridesSchema.default({}),
+  })
+  .strict()
+  .superRefine(({ days }, context) => {
+    const dates = new Set<string>();
+    for (const [index, day] of days.entries()) {
+      if (dates.has(day.businessDate)) {
+        context.addIssue({
+          code: "custom",
+          message: "Mỗi ngày chỉ được có một bộ giá trị điều chỉnh.",
+          path: ["days", index, "businessDate"],
+        });
+      }
+      dates.add(day.businessDate);
+    }
+  });
+
+export const payrollPeriodEnsureSchema = z.object({
+  branchId: idSchema,
+  month: businessMonthSchema,
+  reason: reasonSchema,
+});
+
+export const payrollWorksheetSaveSchema = z.object({
+  staffId: idSchema,
+  periodVersion: z.number().int().positive(),
+  overrideVersion: z.number().int().positive().nullable(),
+  standardDaysOffOverride: z.number().int().min(0).max(30).nullable(),
+  values: payrollWorksheetValuesSchema,
+  reason: reasonSchema,
+});
+
 export const payrollPeriodListQuerySchema = z.object({
   branchId: idSchema.optional(),
   month: businessMonthSchema.optional(),
@@ -736,15 +1070,87 @@ export type PayrollLineDto = Readonly<{
   includedInTotal: boolean;
 }>;
 
+export type PayrollWorksheetValues = z.infer<typeof payrollWorksheetValuesSchema>;
+
+export type PayrollComponentValuesDto = Readonly<{
+  proratedSalary: string;
+  dailyRevenueBonus: string;
+  monthlyRevenueBonus: string;
+  attendanceBonus: string;
+  achievementBonus: string;
+  retainLevelBonus: string;
+  jumpLevelBonus: string;
+  overtimePay: string;
+  otherBonus: string;
+  penalties: string;
+  advance: string;
+  totalIncome: string;
+}>;
+
 export type PayrollDailyRowDto = Readonly<{
   businessDate: string;
+  checkInTime: string | null;
+  checkOutTime: string | null;
   status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
   workUnits: string;
   overtimeMinutes: number;
   actualLiveMinutes: number;
   revenueAmount?: string;
+  dailyCoins?: string;
+  rewardThresholdAmount?: string | null;
   dailyRevenueBonus: string;
+  violationCategory: string | null;
+  violationDetail: string | null;
   penalties: string;
+  note: string | null;
+  source: Readonly<{
+    checkInTime: string | null;
+    checkOutTime: string | null;
+    status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
+    workUnits: string;
+    overtimeMinutes: number;
+    actualLiveMinutes: number;
+    revenueAmount?: string;
+    dailyCoins?: string;
+    rewardThresholdAmount?: string | null;
+    dailyRevenueBonus: string;
+    violationCategory: string | null;
+    violationDetail: string | null;
+    penalties: string;
+    note: string | null;
+  }>;
+  overriddenFields: readonly string[];
+}>;
+
+export type PayrollMonthlyLevelDto = Readonly<{
+  workedDayCount: number;
+  attendanceRequiredDays: number | null;
+  attendanceEligible: boolean;
+  previousMonthCoins?: string | null;
+  previousMonthCoinsSource: "PUBLISHED_PAYROLL" | "ATTENDANCE_LIVE" | "MANUAL_BASELINE" | "NONE";
+  previousLevelCode: string | null;
+  previousLevelName: string | null;
+  currentMonthCoins?: string;
+  currentLevelCode: string | null;
+  currentLevelName: string | null;
+  transition: "NONE" | "RETAIN" | "JUMP" | "DOWN";
+}>;
+
+export type PayrollEmploymentSalaryDto = Readonly<{
+  joinedDate: string | null;
+  officialDate: string | null;
+  probationSalaryRateBps: number;
+  probationWorkUnits: string;
+  officialWorkUnits: string;
+  excludedBeforeJoinWorkUnits: string;
+  probationSalaryAmount: string;
+  officialSalaryAmount: string;
+  calculatedProratedSalary: string;
+  fallbackMode:
+    | "OFFICIAL_DATE"
+    | "PROBATION_WITHOUT_OFFICIAL_DATE"
+    | "LEGACY_OFFICIAL_WITHOUT_OFFICIAL_DATE"
+    | "NON_PROBATION_CATEGORY";
 }>;
 
 export type PayrollEntryDto = Readonly<{
@@ -756,9 +1162,12 @@ export type PayrollEntryDto = Readonly<{
     streamingAlias: string | null;
   }>;
   workUnits: string;
+  workedDayCount: number;
   overtimeMinutes: number;
   revenueAmount?: string;
+  currentMonthCoins?: string;
   actualLiveMinutes: number;
+  sourceBaseSalary: string;
   baseSalary: string;
   proratedSalary: string;
   dailyRevenueBonus: string;
@@ -771,6 +1180,18 @@ export type PayrollEntryDto = Readonly<{
   penalties: string;
   advance: string;
   totalIncome: string;
+  calculatedComponents: PayrollComponentValuesDto;
+  previousLevelCode: string | null;
+  sourceCurrentLevelCode: string | null;
+  sourceCurrentLevelName: string | null;
+  currentLevelCode: string | null;
+  currentLevelName: string | null;
+  monthlyLevel: PayrollMonthlyLevelDto;
+  employmentSalary: PayrollEmploymentSalaryDto;
+  worksheetOverride: Readonly<{
+    version: number;
+    values: PayrollWorksheetValues;
+  }> | null;
   anomalyFlags: readonly string[];
   calculationHash: string;
   calculationNo: number;
@@ -789,6 +1210,20 @@ export type PayrollPeriodDto = Readonly<{
   version: number;
   sourcePeriodId: string | null;
   latestCalculationNo: number;
+  standardDaysOff: Readonly<{
+    ruleValue: number | null;
+    overrideValue: number | null;
+    appliedValue: number | null;
+    daysInMonth: number;
+    standardPayableDays: number | null;
+  }>;
+  salaryPolicy: Readonly<{
+    standardDailyMinutes: number | null;
+    overtimeMultiplierBps: number | null;
+    roundingUnit: 1 | 10 | 100 | 1_000 | null;
+    roundingMode: "HALF_UP" | "HALF_EVEN" | "FLOOR" | "CEILING" | null;
+    roundingApplyAt: "COMPONENT" | "TOTAL" | null;
+  }>;
   totals: Readonly<{
     staffCount: number;
     grossIncome: string;
@@ -838,6 +1273,20 @@ export const violationCreateSchema = z
     }
   });
 
+export const violationPreviewQuerySchema = z.object({
+  attendanceId: idSchema,
+  penaltyItemId: idSchema,
+});
+
+export type ViolationPreviewDto = Readonly<{
+  nextOccurrenceNo: number;
+  penaltyStartsAt: number;
+  expectedAmount: string;
+  isChargeable: boolean;
+  countingWindow: "CALENDAR_MONTH" | "LIFETIME";
+  message: string;
+}>;
+
 export const violationCancelSchema = z.object({
   version: z.number().int().positive(),
   reason: reasonSchema,
@@ -878,12 +1327,22 @@ export type ViolationDto = Readonly<{
   businessDate: string;
   penaltyItemId: string;
   ruleVersionId: string;
+  penaltyItemCode: string;
+  occurrenceNo: number;
+  penaltyStartsAt: number;
+  countingWindow: "CALENDAR_MONTH" | "LIFETIME";
+  computedAmount: string;
+  isChargeable: boolean;
+  responsibleParty: "VIOLATING_STAFF" | "PRIMARY_MANAGER";
   itemName: string;
   amount: string;
   detail: string;
   note: string | null;
   overrideReason: string | null;
   status: "ACTIVE" | "CANCELLED";
+  origin: "MANUAL" | "AUTOMATIC";
+  automaticKey: string | null;
+  automaticSnapshot: Readonly<Record<string, unknown>> | null;
   version: number;
   displayColor: string;
   evidence: readonly EvidenceDto[];
@@ -940,6 +1399,65 @@ export type MonthlyLevelConfig = z.infer<typeof monthlyLevelConfigSchema>;
 export type SalaryConfig = z.infer<typeof salaryConfigSchema>;
 export type KpiTemplateConfig = z.infer<typeof kpiTemplateConfigSchema>;
 export type ConfiguredRule = z.infer<typeof configuredRuleSchema>;
+
+export type SimpleRewardRuleRowDto = Readonly<{
+  thresholdAmount: string;
+  rewardAmount: string;
+}>;
+
+export type AutomaticPenaltyConditionDto = z.infer<typeof automaticPenaltyConditionSchema>;
+
+export type SimplePenaltyRuleRowDto = Readonly<{
+  code: string;
+  name: string;
+  description: string;
+  defaultAmount: string;
+  reminderCount: number;
+  countingWindow: "CALENDAR_MONTH" | "LIFETIME";
+  displayColor: string;
+  isActive: boolean;
+  automaticCondition: AutomaticPenaltyConditionDto;
+}>;
+
+export type SimpleMonthlyLevelRuleRowDto = Readonly<{
+  code: string;
+  name: string;
+  displayOrder: number;
+  monthlyCoinThreshold: string;
+  attendanceBonus: string;
+  achievementBonus: string;
+  retainLevelBonus: string;
+  jumpLevelBonus: string;
+}>;
+
+export type SimpleRulesDto = Readonly<{
+  reward: Readonly<{
+    status: "EMPTY" | "ACTIVE" | "SCHEDULED" | "RETIRED";
+    effectiveFrom: string | null;
+    tiers: readonly SimpleRewardRuleRowDto[];
+  }>;
+  penalty: Readonly<{
+    status: "EMPTY" | "ACTIVE" | "SCHEDULED" | "RETIRED";
+    effectiveFrom: string | null;
+    items: readonly SimplePenaltyRuleRowDto[];
+  }>;
+  salary: Readonly<{
+    status: "EMPTY" | "ACTIVE" | "SCHEDULED" | "RETIRED";
+    effectiveFrom: string | null;
+    standardDaysOffPerMonth: number | null;
+    probationSalaryRateBps: number;
+    standardDailyMinutes: number | null;
+    overtimeMultiplierBps: number | null;
+    roundingUnit: 1 | 10 | 100 | 1_000 | null;
+    roundingMode: "HALF_UP" | "HALF_EVEN" | "FLOOR" | "CEILING" | null;
+  }>;
+  monthlyLevel: Readonly<{
+    status: "EMPTY" | "ACTIVE" | "SCHEDULED" | "RETIRED";
+    effectiveFrom: string | null;
+    attendanceRequiredDays: number;
+    levels: readonly SimpleMonthlyLevelRuleRowDto[];
+  }>;
+}>;
 
 export type ConfiguredRuleVersionDto = Readonly<{
   id: string;
@@ -1017,6 +1535,23 @@ export type PerformanceLevelOptionDto = Readonly<{
   displayOrder: number;
 }>;
 
+export type AttendanceFilterOptionsDto = Readonly<{
+  month: string;
+  selectedBranchId: string | null;
+  branches: readonly Readonly<{
+    id: string;
+    code: string;
+    name: string;
+    isActive: boolean;
+  }>[];
+  staff: readonly Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    jobTitle: string;
+  }>[];
+}>;
+
 export type AttendanceRecordDto = Readonly<{
   id: string;
   staffId: string;
@@ -1033,8 +1568,26 @@ export type AttendanceRecordDto = Readonly<{
   archivedAt: string | null;
   actualLiveMinutes: number;
   revenueAmount: string;
-  revenueUnit: "VND" | "THOUSAND_VND";
+  revenueUnit: "VND" | "THOUSAND_VND" | "COIN";
   revenueScale: number;
+  dailyReward: Readonly<{
+    amount: string;
+    matchedThreshold: string | null;
+    ruleVersionId: string | null;
+    status: "MATCHED" | "BELOW_MINIMUM" | "NO_ACTIVE_RULE" | "MULTIPLE_ACTIVE_RULES";
+  }>;
+  automaticViolationSummary?: AutomaticViolationReconcileSummaryDto;
+  violations?: readonly ViolationDto[];
+  activePenaltyTotal?: string;
+}>;
+
+export type AutomaticViolationReconcileSummaryDto = Readonly<{
+  createdCount: number;
+  reactivatedCount: number;
+  cancelledCount: number;
+  unchangedCount: number;
+  attendanceActivePenaltyTotal: string;
+  staffMonthActivePenaltyTotal: string;
 }>;
 
 export type AttendanceMonthDayDto = Readonly<{
@@ -1048,6 +1601,7 @@ export type AttendanceMonthDayDto = Readonly<{
 export type AttendanceMonthDto = Readonly<{
   month: string;
   activePenaltyTotal: string;
+  dailyRewardTotal: string;
   staff: Readonly<{
     id: string;
     staffCode: string;
@@ -1055,7 +1609,7 @@ export type AttendanceMonthDto = Readonly<{
     jobTitle: string;
   }>;
   revenueConfig: Readonly<{
-    unit: "VND" | "THOUSAND_VND";
+    unit: "VND" | "THOUSAND_VND" | "COIN";
     scale: number;
   }>;
   days: readonly AttendanceMonthDayDto[];
@@ -1106,7 +1660,7 @@ export type BranchMonthlyOverviewDto = Readonly<{
   month: string;
   branch: Readonly<{ id: string; code: string; name: string }>;
   revenueConfig: Readonly<{
-    unit: "VND" | "THOUSAND_VND";
+    unit: "VND" | "THOUSAND_VND" | "COIN";
     scale: number;
   }>;
   calendar: readonly Readonly<{
@@ -1212,6 +1766,46 @@ export type CompanyMonthlyReportDto = Readonly<{
       bonus: string;
       penalty: string;
     }>[];
+  }>;
+}>;
+
+export type ManagerCompanyReportTotalsDto = Readonly<{
+  revenueAmount: string;
+  workUnits: string;
+  actualLiveMinutes: number;
+  overtimeMinutes: number;
+  penalties: string;
+  missingAttendance: number;
+}>;
+
+export type ManagerCompanyReportStaffRowDto = Readonly<{
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+    employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+    performanceLevel: Readonly<{ id: string; code: string; name: string }> | null;
+  }>;
+  weeks: readonly Readonly<{ weekNo: number; revenueAmount: string }>[];
+  totals: ManagerCompanyReportTotalsDto;
+}>;
+
+export type ManagerCompanyReportDto = Readonly<{
+  month: string;
+  generatedAt: string;
+  weeks: readonly Readonly<{ weekNo: number; from: string; to: string }>[];
+  branches: readonly Readonly<{
+    branch: Readonly<{ id: string; code: string; name: string }>;
+    staff: readonly ManagerCompanyReportStaffRowDto[];
+    totals: ManagerCompanyReportTotalsDto;
+  }>[];
+  totals: ManagerCompanyReportTotalsDto;
+  charts: Readonly<{
+    revenueByBranch: readonly Readonly<{ id: string; label: string; value: string }>[];
+    revenueByEmployee: readonly Readonly<{ id: string; label: string; value: string }>[];
+    revenueTrend: readonly Readonly<{ businessDate: string; value: string }>[];
+    penaltiesByBranch: readonly Readonly<{ id: string; label: string; value: string }>[];
   }>;
 }>;
 
@@ -1525,8 +2119,11 @@ export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
 export type BranchUpdateInput = z.infer<typeof branchUpdateSchema>;
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
 export type StaffUpdateInput = z.infer<typeof staffUpdateSchema>;
+export type StaffArchiveInput = z.infer<typeof staffArchiveSchema>;
 export type AssignmentCreateInput = z.infer<typeof assignmentCreateSchema>;
 export type AssignmentUpdateInput = z.infer<typeof assignmentUpdateSchema>;
+export type AssignmentTransferInput = z.infer<typeof assignmentTransferSchema>;
+export type AssignmentCancelInput = z.infer<typeof assignmentCancelSchema>;
 export type UserCreateInput = z.infer<typeof userCreateSchema>;
 export type UserUpdateInput = z.infer<typeof userUpdateSchema>;
 export type AdminBranchListQuery = z.infer<typeof adminBranchListQuerySchema>;
@@ -1535,8 +2132,9 @@ export type AdminAssignmentListQuery = z.infer<typeof adminAssignmentListQuerySc
 export type AdminUserListQuery = z.infer<typeof adminUserListQuerySchema>;
 export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
 export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
-export type AttendanceArchiveInput = z.infer<typeof attendanceArchiveSchema>;
 export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;
+export type AttendanceFilterOptionsQuery = z.infer<typeof attendanceFilterOptionsQuerySchema>;
+export type AutomaticViolationReconcileInput = z.infer<typeof automaticViolationReconcileSchema>;
 export type BranchOverviewQuery = z.infer<typeof branchOverviewQuerySchema>;
 export type BranchOverviewCellEditInput = z.infer<typeof branchOverviewCellEditSchema>;
 export type BranchOverviewBatchUpdateInput = z.infer<typeof branchOverviewBatchUpdateSchema>;
@@ -1556,6 +2154,10 @@ export type PenaltyRuleRetireInput = z.infer<typeof penaltyRuleRetireSchema>;
 export type ConfiguredRuleSetCreateInput = z.infer<typeof configuredRuleSetCreateSchema>;
 export type ConfiguredRuleDraftCreateInput = z.infer<typeof configuredRuleDraftCreateSchema>;
 export type ConfiguredRuleDraftUpdateInput = z.infer<typeof configuredRuleDraftUpdateSchema>;
+export type SimpleRewardRuleApplyInput = z.infer<typeof simpleRewardRuleApplySchema>;
+export type SimpleMonthlyLevelRuleApplyInput = z.infer<typeof simpleMonthlyLevelRuleApplySchema>;
+export type SimpleSalaryRuleApplyInput = z.infer<typeof simpleSalaryRuleApplySchema>;
+export type SimplePenaltyRuleApplyInput = z.infer<typeof simplePenaltyRuleApplySchema>;
 export type RuleImpactPreviewInput = z.infer<typeof ruleImpactPreviewSchema>;
 export type LevelProposalGenerateInput = z.infer<typeof levelProposalGenerateSchema>;
 export type LevelProposalConfirmInput = z.infer<typeof levelProposalConfirmSchema>;
@@ -1564,10 +2166,12 @@ export type ViolationCancelInput = z.infer<typeof violationCancelSchema>;
 export type EvidencePresignInput = z.infer<typeof evidencePresignSchema>;
 export type EvidenceCompleteInput = z.infer<typeof evidenceCompleteSchema>;
 export type PayrollPeriodListQuery = z.infer<typeof payrollPeriodListQuerySchema>;
+export type PayrollPeriodEnsureInput = z.infer<typeof payrollPeriodEnsureSchema>;
 export type PayrollPeriodCreateInput = z.infer<typeof payrollPeriodCreateSchema>;
 export type PayrollPeriodActionInput = z.infer<typeof payrollPeriodActionSchema>;
 export type PayrollRevisionCreateInput = z.infer<typeof payrollRevisionCreateSchema>;
 export type PayrollAdjustmentCreateInput = z.infer<typeof payrollAdjustmentCreateSchema>;
+export type PayrollWorksheetSaveInput = z.infer<typeof payrollWorksheetSaveSchema>;
 export type PayrollExportCreateInput = z.infer<typeof payrollExportCreateSchema>;
 export type ImportTemplate = z.infer<typeof importTemplateSchema>;
 export type ImportPresignInput = z.infer<typeof importPresignSchema>;

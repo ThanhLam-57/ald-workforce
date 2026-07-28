@@ -73,7 +73,7 @@ export async function createBranchOverviewWorkbook(
     "Loại nhân sự",
     "Cấp bậc",
   ];
-  const totalHeaders = ["Tổng doanh số", "Tổng công", "Tổng Live", "Tăng ca", "Tiền phạt"];
+  const totalHeaders = ["Tổng xu", "Tổng công", "Tổng Live", "Tăng ca", "Tiền phạt"];
   const firstDayColumn = identityHeaders.length + 1;
   const firstTotalColumn = firstDayColumn + overview.calendar.length * 2;
   const lastColumn = firstTotalColumn + totalHeaders.length - 1;
@@ -108,7 +108,7 @@ export async function createBranchOverviewWorkbook(
     timeStyle: "short",
   }).format(
     generatedAt,
-  )} · Doanh số ${overview.revenueConfig.unit} × ${overview.revenueConfig.scale}`;
+  )} · Doanh số tính bằng xu`;
   sheet.getCell("A3").font = { size: 10, color: { argb: "FF64748B" } };
   sheet.getCell("A3").alignment = { horizontal: "center" };
 
@@ -124,7 +124,7 @@ export async function createBranchOverviewWorkbook(
       5,
       7,
     )} · Tuần ${day.weekOfMonth}`;
-    sheet.getCell(6, column).value = "Doanh số";
+    sheet.getCell(6, column).value = "Số xu";
     sheet.getCell(6, column + 1).value = "Live (phút)";
   });
   totalHeaders.forEach((header, index) => {

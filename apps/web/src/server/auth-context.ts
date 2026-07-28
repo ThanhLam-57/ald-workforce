@@ -39,6 +39,7 @@ export async function getOptionalActor(
             where: {
               companyId: user.companyId,
               staffId: user.staffId,
+              assignmentType: { in: ["PRIMARY_MANAGER", "SECONDARY_MANAGER"] },
               archivedAt: null,
               effectiveFrom: { lte: businessDate },
               OR: [{ effectiveTo: null }, { effectiveTo: { gt: businessDate } }],
@@ -55,6 +56,8 @@ export async function getOptionalActor(
     staffId: user.staffId ?? null,
     role,
     activeBranchIds,
+    // Legacy database flag is deliberately ignored for non-GM roles.
+    canManagePayroll: role === "GENERAL_MANAGER",
     name: user.name,
     username: user.username ?? null,
     mustChangePassword: user.mustChangePassword,

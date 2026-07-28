@@ -457,9 +457,9 @@ export function PenaltyRuleCenter() {
                 </div>
                 <div className="mt-4 flex flex-wrap gap-3">
                   <Button
-                    className="bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50"
                     onClick={() => setItems((current) => [...current, emptyItem(current.length)])}
                     type="button"
+                    variant="secondary"
                   >
                     Thêm loại lỗi
                   </Button>

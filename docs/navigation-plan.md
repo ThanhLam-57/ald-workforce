@@ -8,20 +8,21 @@ server bằng actor lấy từ session.
 
 ## Mapping workspace và quyền route
 
-| Workspace hiện tại                        | Route mới            | GENERAL_MANAGER |         TRAINING_MANAGER         |          LIVE_EMPLOYEE          |
-| ----------------------------------------- | -------------------- | :-------------: | :------------------------------: | :-----------------------------: |
-| Tổng quan nhẹ theo vai trò                | `/dashboard`         |       Có        |                Có                |               Có                |
-| `AttendanceWorkspace`                     | `/attendance`        |       Có        |         Có, branch scope         |              Không              |
-| `BranchOverviewWorkspace`                 | `/branch-overview`   |       Có        |         Có, branch scope         |              Không              |
-| `CompanyIntelligenceWorkspace`            | `/company-report`    |       Có        |              Không               |              Không              |
-| `ManagerKpiWorkspace`                     | `/manager-kpi`       |       Có        | Có, dữ liệu bản thân theo policy |              Không              |
-| `ConfiguredRuleCenter`                    | `/rules/configured`  |     Editor      |      Active rules read-only      |          Không có menu          |
-| `PenaltyRuleCenter`                       | `/rules/penalties`   |     Editor      |              Không               |              Không              |
-| `PayrollWorkspace`                        | `/payroll`           |  Admin payroll  |              Không               |              Không              |
-| `DataGovernanceWorkspace`                 | `/data-governance`   |  Toàn công ty   |    Import/export branch scope    |              Không              |
-| `FoundationAdmin`                         | `/administration`    |       Có        |              Không               |              Không              |
-| `ChangePasswordForm`, `TwoFactorSettings` | `/settings/security` |   Có, gồm 2FA   |           Đổi mật khẩu           |          Đổi mật khẩu           |
-| `PayrollWorkspace` chế độ self-service    | `/my-payslips`       |      Không      |              Không               | Payslip đã publish của bản thân |
+| Workspace hiện tại                        | Route mới            | GENERAL_MANAGER |             TRAINING_MANAGER             |          LIVE_EMPLOYEE          |
+| ----------------------------------------- | -------------------- | :-------------: | :--------------------------------------: | :-----------------------------: |
+| Tổng quan nhẹ theo vai trò                | `/dashboard`         |       Có        |                    Có                    |               Có                |
+| `AttendanceWorkspace`                     | `/attendance`        |       Có        |             Có, branch scope             |              Không              |
+| `BranchOverviewWorkspace`                 | `/branch-overview`   | Xem/sửa/export  |          Chỉ xem, branch scope           |              Không              |
+| `CompanyIntelligenceWorkspace`            | `/company-report`    |       Có        | Chỉ vận hành, branch scope, không export |              Không              |
+| `ManagerKpiWorkspace`                     | `/manager-kpi`       |       Có        |     Có, dữ liệu bản thân theo policy     |              Không              |
+| `SimpleRulesWorkspace`                    | `/rules`             |     Editor      |        Quy định hiện hành chỉ đọc        |          Không có menu          |
+| `ConfiguredRuleCenter`                    | `/rules/configured`  |     Editor      |                  Không                   |          Không có menu          |
+| `PenaltyRuleCenter`                       | `/rules/penalties`   |     Editor      |                  Không                   |              Không              |
+| `PayrollWorkspace`                        | `/payroll`           |  Admin payroll  |                  Không                   |              Không              |
+| `DataGovernanceWorkspace`                 | `/data-governance`   |  Toàn công ty   |                  Không                   |              Không              |
+| `FoundationAdmin`                         | `/administration`    |       Có        |                  Không                   |              Không              |
+| `ChangePasswordForm`, `TwoFactorSettings` | `/settings/security` |   Có, gồm 2FA   |               Đổi mật khẩu               |          Đổi mật khẩu           |
+| `PayrollWorkspace` chế độ self-service    | `/my-payslips`       |      Không      |                  Không                   | Payslip đã publish của bản thân |
 
 ## Kiến trúc
 

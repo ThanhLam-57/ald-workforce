@@ -17,6 +17,7 @@
 body {
   min-height: 100vh;
   margin: 0;
+  overflow-x: hidden;
   background: radial-gradient(circle at top left, rgb(14 165 233 / 8%), transparent 30rem), #f8fafc;
 }
 
@@ -27,13 +28,49 @@ button:focus-visible,
   outline-offset: 3px;
 }
 
+a,
+button {
+  overflow-wrap: anywhere;
+}
+
 input,
 select,
 textarea {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid #cbd5e1;
   border-radius: 0.5rem;
   padding: 0.55rem 0.75rem;
   background: white;
+}
+
+select {
+  text-overflow: ellipsis;
+}
+
+textarea {
+  overflow-wrap: anywhere;
+  resize: vertical;
+}
+
+table th,
+table td {
+  overflow-wrap: anywhere;
+}
+
+pre,
+code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.recharts-responsive-container {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.recharts-wrapper {
+  min-width: 0;
 }
 
 input:focus,
@@ -73,4 +110,8 @@ textarea:focus {
 .attendance-table input[type="checkbox"] {
   height: 1.1rem;
   width: 1.1rem;
+}
+
+.attendance-grid-scroll {
+  scrollbar-gutter: stable;
 }

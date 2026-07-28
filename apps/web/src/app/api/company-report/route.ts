@@ -1,7 +1,7 @@
 import { companyReportQuerySchema } from "@ald/contracts";
 
 import { requireActor } from "@/server/auth-context";
-import { getCompanyMonthlyReport } from "@/server/company-report-service";
+import { getCompanyMonthlyReport, getManagerCompanyReport } from "@/server/company-report-service";
 import { json, toErrorResponse } from "@/server/http";
 
 export const dynamic = "force-dynamic";
@@ -17,7 +17,12 @@ export async function GET(request: Request) {
       employmentCategory: url.searchParams.get("employmentCategory") || undefined,
       levelId: url.searchParams.get("levelId") || undefined,
     });
-    return json({ data: await getCompanyMonthlyReport(actor, query) });
+    return json({
+      data:
+        actor.role === "TRAINING_MANAGER"
+          ? await getManagerCompanyReport(actor, query)
+          : await getCompanyMonthlyReport(actor, query),
+    });
   } catch (error) {
     return toErrorResponse(error);
   }

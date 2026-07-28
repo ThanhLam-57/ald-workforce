@@ -6,8 +6,8 @@ import type {
   BranchOverviewCellResultDto,
   BranchOverviewDayDto,
   BranchOverviewRowDto,
+  BranchOverviewTotalsDto,
 } from "@ald/contracts";
-import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@ald/ui";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
@@ -19,6 +19,19 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
+
+import {
+  groupBranchOverviewWeeks,
+  overviewTotals,
+  type BranchOverviewCalendarDay,
+  type BranchOverviewWeek,
+} from "./branch-overview-weekly";
+import {
+  compactChartNumber,
+  responsiveTooltipStyle,
+  truncateChartLabel,
+} from "./chart-format";
+import { useReportingAutoRefresh } from "./use-reporting-auto-refresh";
 
 type BranchOption = Readonly<{
   id: string;
@@ -45,9 +58,9 @@ type ApiPayload = Readonly<{
   error?: Readonly<{ message?: unknown }>;
 }>;
 
-const IDENTITY_WIDTH = 470;
-const DAY_WIDTH = 190;
-const TOTAL_WIDTH = 470;
+const IDENTITY_WIDTH = 280;
+const DAY_WIDTH = 136;
+const TOTAL_WIDTH = 260;
 const weekdayLabels = ["CN", "T2", "T3", "T4", "T5", "T6", "T7"] as const;
 
 const employmentCategoryLabels = {
@@ -79,10 +92,18 @@ function money(value: string): string {
   }).format(BigInt(value));
 }
 
+function coinThousands(value: string): number {
+  return Number(BigInt(value) / 10n) / 100;
+}
+
 function duration(minutes: number): string {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return hours > 0 ? `${hours}g ${rest.toString().padStart(2, "0")}p` : `${rest}p`;
+}
+
+function shortDate(businessDate: string): string {
+  return `${businessDate.slice(8, 10)}/${businessDate.slice(5, 7)}`;
 }
 
 function payloadError(payload: ApiPayload): string {
@@ -102,28 +123,6 @@ function editableRows(rows: readonly BranchOverviewRowDto[]): readonly EditableR
       dirtyLive: false,
     })),
   }));
-}
-
-function rowTotals(days: readonly EditableDay[]) {
-  let revenue = 0n;
-  let workUnits = 0;
-  let live = 0;
-  let overtime = 0;
-  let penalties = 0n;
-  for (const day of days) {
-    revenue += BigInt(day.revenueAmount);
-    workUnits += Number(day.workUnits);
-    live += day.actualLiveMinutes;
-    overtime += day.overtimeMinutes;
-    penalties += BigInt(day.penaltyAmount);
-  }
-  return {
-    revenueAmount: revenue.toString(),
-    workUnits: workUnits.toFixed(2).replace(/\.?0+$/, ""),
-    actualLiveMinutes: live,
-    overtimeMinutes: overtime,
-    penaltyAmount: penalties.toString(),
-  };
 }
 
 function queryString(input: {
@@ -162,6 +161,7 @@ export function BranchOverviewWorkspace({
   const [employmentCategory, setEmploymentCategory] = useState("");
   const [levelId, setLevelId] = useState("");
   const [search, setSearch] = useState("");
+  const [chartWeekNo, setChartWeekNo] = useState(1);
   const deferredSearch = useDeferredValue(search.trim());
   const [reason, setReason] = useState("");
   const [dataset, setDataset] = useState<BranchMonthlyOverviewDto | null>(null);
@@ -173,7 +173,6 @@ export function BranchOverviewWorkspace({
   const reasonRef = useRef(reason);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const loadSequence = useRef(0);
-  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     rowsRef.current = rows;
@@ -183,64 +182,75 @@ export function BranchOverviewWorkspace({
   }, [reason]);
 
   const calendar = dataset?.calendar ?? [];
-  // TanStack Virtual intentionally exposes imperative functions for scroll coordination.
-  // eslint-disable-next-line react-hooks/incompatible-library
-  const dayVirtualizer = useVirtualizer({
-    count: calendar.length,
-    horizontal: true,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => DAY_WIDTH,
-    overscan: 3,
-    paddingStart: IDENTITY_WIDTH,
-    paddingEnd: TOTAL_WIDTH,
-  });
+  const weeks = groupBranchOverviewWeeks(calendar);
 
-  const load = useCallback(async () => {
-    if (!branchId) return;
-    const sequence = ++loadSequence.current;
-    for (const timer of timers.current.values()) clearTimeout(timer);
-    timers.current.clear();
-    setLoading(true);
-    setPermissionDenied(false);
-    setMessage(null);
-    try {
-      const query = queryString({
-        branchId,
-        month,
-        employmentStatus,
-        employmentCategory,
-        levelId,
-        search: deferredSearch,
-      });
-      const response = await fetch(`/api/branch-overview?${query}`, {
-        cache: "no-store",
-      });
-      const payload = (await response.json()) as ApiPayload;
-      if (sequence !== loadSequence.current) return;
-      if (!response.ok) {
-        setDataset(null);
-        setRows([]);
-        setPermissionDenied(response.status === 403 || response.status === 404);
-        setMessage(payloadError(payload));
-        return;
+  const load = useCallback(
+    async (silent = false) => {
+      if (!branchId) return;
+      const sequence = ++loadSequence.current;
+      for (const timer of timers.current.values()) clearTimeout(timer);
+      timers.current.clear();
+      if (!silent) {
+        setLoading(true);
+        setPermissionDenied(false);
+        setMessage(null);
       }
-      const overview = payload.data as BranchMonthlyOverviewDto;
-      setDataset(overview);
-      setRows(editableRows(overview.rows));
-    } catch {
-      if (sequence !== loadSequence.current) return;
-      setDataset(null);
-      setRows([]);
-      setMessage("Mất kết nối khi tải bảng tổng quan.");
-    } finally {
-      if (sequence === loadSequence.current) setLoading(false);
-    }
-  }, [branchId, deferredSearch, employmentCategory, employmentStatus, levelId, month]);
+      try {
+        const query = queryString({
+          branchId,
+          month,
+          employmentStatus,
+          employmentCategory,
+          levelId,
+          search: deferredSearch,
+        });
+        const response = await fetch(`/api/branch-overview?${query}`, {
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as ApiPayload;
+        if (sequence !== loadSequence.current) return;
+        if (!response.ok) {
+          const denied = response.status === 403 || response.status === 404;
+          if (!silent || denied) {
+            setDataset(null);
+            setRows([]);
+          }
+          setPermissionDenied(denied);
+          setMessage(payloadError(payload));
+          return;
+        }
+        const overview = payload.data as BranchMonthlyOverviewDto;
+        setPermissionDenied(false);
+        setDataset(overview);
+        setRows(editableRows(overview.rows));
+      } catch {
+        if (sequence !== loadSequence.current) return;
+        if (!silent) {
+          setDataset(null);
+          setRows([]);
+        }
+        setMessage("Mất kết nối khi tải bảng tổng quan.");
+      } finally {
+        if (sequence === loadSequence.current) setLoading(false);
+      }
+    },
+    [branchId, deferredSearch, employmentCategory, employmentStatus, levelId, month],
+  );
 
   useEffect(() => {
     const timeout = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timeout);
   }, [load]);
+
+  const refreshFromSource = useCallback(async () => {
+    const hasPendingEdits = rowsRef.current.some((row) =>
+      row.days.some((day) => day.dirtyLive || day.dirtyRevenue || day.saveState === "saving"),
+    );
+    if (hasPendingEdits || timers.current.size > 0) return;
+    await load(true);
+  }, [load]);
+
+  useReportingAutoRefresh(refreshFromSource, { enabled: branches.length > 0 });
 
   useEffect(
     () => () => {
@@ -260,7 +270,7 @@ export function BranchOverviewWorkspace({
         const days = row.days.map((day) =>
           day.businessDate === businessDate ? updater(day) : day,
         );
-        return { ...row, days, totals: rowTotals(days) };
+        return { ...row, days, totals: overviewTotals(days) };
       }),
     );
   }
@@ -506,23 +516,36 @@ export function BranchOverviewWorkspace({
     metric: 0 | 1,
   ) {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
-    const rowDelta = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0;
-    const columnDelta = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
-    const nextRowIndex = rowIndex + rowDelta;
-    const nextFlatColumn = dayIndex * 2 + metric + columnDelta;
-    const nextDayIndex = Math.floor(nextFlatColumn / 2);
-    const nextMetric = (nextFlatColumn % 2) as 0 | 1;
+    let nextRowIndex = rowIndex;
+    let nextDayIndex = dayIndex;
+    let nextMetric: 0 | 1 = metric;
+    if (event.key === "ArrowLeft") nextDayIndex -= 1;
+    if (event.key === "ArrowRight") nextDayIndex += 1;
+    if (event.key === "ArrowUp") {
+      if (metric === 1) nextMetric = 0;
+      else {
+        nextRowIndex -= 1;
+        nextMetric = 1;
+      }
+    }
+    if (event.key === "ArrowDown") {
+      if (metric === 0) nextMetric = 1;
+      else {
+        nextRowIndex += 1;
+        nextMetric = 0;
+      }
+    }
+    if (nextDayIndex < 0) return;
     const nextRow = rowsRef.current[nextRowIndex];
     const nextDay = nextRow?.days[nextDayIndex];
-    if (!nextRow || !nextDay || nextMetric < 0) return;
+    if (!nextRow || !nextDay) return;
     event.preventDefault();
-    dayVirtualizer.scrollToIndex(nextDayIndex, { align: "auto" });
     window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        document
-          .getElementById(cellId(nextRow.staff.id, nextDay.businessDate, nextMetric))
-          ?.focus();
-      });
+      const nextCell = document.getElementById(
+        cellId(nextRow.staff.id, nextDay.businessDate, nextMetric),
+      );
+      nextCell?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+      nextCell?.focus({ preventScroll: true });
     });
   }
 
@@ -534,12 +557,163 @@ export function BranchOverviewWorkspace({
     levelId,
     search: deferredSearch,
   });
-  const virtualDays = dayVirtualizer.getVirtualItems();
-  const visibleTotals = rowTotals(rows.flatMap((row) => row.days));
+  const visibleTotals = overviewTotals(rows.flatMap((row) => row.days));
+  const hasPendingEdits = rows.some((row) =>
+    row.days.some((day) => day.dirtyLive || day.dirtyRevenue || day.saveState === "saving"),
+  );
   const chartData = rows.map((row) => ({
     name: row.staff.streamingAlias || row.staff.fullName,
-    revenueMillions: Number(BigInt(row.totals.revenueAmount) / 10_000n) / 100,
+    coinThousands: coinThousands(row.totals.revenueAmount),
   }));
+  const selectedChartWeek =
+    weeks.find((week) => week.weekNo === chartWeekNo) ?? weeks[0] ?? null;
+  const selectedWeekDates = new Set(
+    selectedChartWeek?.days.map((day) => day.businessDate) ?? [],
+  );
+  const weeklyChartData = rows.map((row) => {
+    const totals = overviewTotals(
+      row.days.filter((day) => selectedWeekDates.has(day.businessDate)),
+    );
+    return {
+      name: row.staff.streamingAlias || row.staff.fullName,
+      coinThousands: coinThousands(totals.revenueAmount),
+    };
+  });
+  const selectedWeekTotals = overviewTotals(
+    rows.flatMap((row) =>
+      row.days.filter((day) => selectedWeekDates.has(day.businessDate)),
+    ),
+  );
+
+  function renderWeek(week: BranchOverviewWeek) {
+    const gridStyle = {
+      gridTemplateColumns: `${IDENTITY_WIDTH}px repeat(${week.days.length}, minmax(${DAY_WIDTH}px, 1fr)) ${TOTAL_WIDTH}px`,
+      minWidth: IDENTITY_WIDTH + week.days.length * DAY_WIDTH + TOTAL_WIDTH,
+    };
+    return (
+      <section
+        aria-labelledby={`overview-week-title-${week.weekNo}`}
+        data-testid={`overview-week-${week.weekNo}`}
+        key={week.weekNo}
+      >
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h3
+            className="font-semibold text-slate-900"
+            id={`overview-week-title-${week.weekNo}`}
+          >
+            Tuần {week.weekNo} · {shortDate(week.from)}–{shortDate(week.to)}
+          </h3>
+          <span className="text-xs text-slate-500">{week.days.length} ngày trong tháng</span>
+        </div>
+        <div className="overflow-x-auto rounded-xl border border-slate-200">
+          <div className="grid min-w-full" style={gridStyle}>
+            <IdentityHeader />
+            {week.days.map((day) => (
+              <DayHeader day={day} key={day.businessDate} />
+            ))}
+            <TotalsHeader />
+          </div>
+          {rows.map((row, rowIndex) => {
+            const daysByDate = new Map(row.days.map((day) => [day.businessDate, day]));
+            const weekDays = week.days.flatMap((calendarDay) => {
+              const day = daysByDate.get(calendarDay.businessDate);
+              return day ? [day] : [];
+            });
+            const totals = overviewTotals(weekDays);
+            return (
+              <div
+                className="grid min-w-full border-t border-slate-200 bg-white"
+                data-testid={`overview-row-${week.weekNo}-${row.staff.id}`}
+                key={row.staff.id}
+                style={gridStyle}
+              >
+                <IdentityCell row={row} weekNo={week.weekNo} />
+                {week.days.map((calendarDay) => {
+                  const day = daysByDate.get(calendarDay.businessDate);
+                  const dayIndex = row.days.findIndex(
+                    (candidate) => candidate.businessDate === calendarDay.businessDate,
+                  );
+                  if (!day || dayIndex < 0) return null;
+                  return (
+                    <div
+                      className="relative grid min-h-28 grid-rows-2 border-r border-slate-300"
+                      data-business-date={day.businessDate}
+                      key={day.businessDate}
+                    >
+                      {isGeneralManager ? (
+                        <>
+                          <div className="flex items-center border-b border-slate-200 px-2 py-1">
+                            <MetricInput
+                              ariaLabel={`Số xu ${row.staff.staffCode} ${day.businessDate}`}
+                              disabled={Boolean(day.archivedAt) || day.saveState === "saving"}
+                              onChange={(value) =>
+                                updateMetric(
+                                  row.staff.id,
+                                  day.businessDate,
+                                  "revenueAmount",
+                                  value,
+                                )
+                              }
+                              onKeyDown={(event) => moveFocus(event, rowIndex, dayIndex, 0)}
+                              onPaste={(event) => pasteCells(event, rowIndex, dayIndex, 0)}
+                              cellId={cellId(row.staff.id, day.businessDate, 0)}
+                              value={day.revenueAmount}
+                            />
+                          </div>
+                          <div className="flex items-center px-2 pt-1 pb-4">
+                            <MetricInput
+                              ariaLabel={`Live phút ${row.staff.staffCode} ${day.businessDate}`}
+                              disabled={Boolean(day.archivedAt) || day.saveState === "saving"}
+                              onChange={(value) =>
+                                updateMetric(
+                                  row.staff.id,
+                                  day.businessDate,
+                                  "actualLiveMinutes",
+                                  value,
+                                )
+                              }
+                              onKeyDown={(event) => moveFocus(event, rowIndex, dayIndex, 1)}
+                              onPaste={(event) => pasteCells(event, rowIndex, dayIndex, 1)}
+                              cellId={cellId(row.staff.id, day.businessDate, 1)}
+                              value={String(day.actualLiveMinutes)}
+                            />
+                          </div>
+                          <div className="absolute inset-x-1 bottom-0.5 truncate text-center text-[10px]">
+                            <SaveBadge day={day} />
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <span
+                            aria-label={`Số xu ${row.staff.staffCode} ${day.businessDate}`}
+                            className="flex items-center justify-end border-b border-slate-200 px-2 text-xs font-medium"
+                          >
+                            {money(day.revenueAmount)}
+                          </span>
+                          <span
+                            aria-label={`Live ${row.staff.staffCode} ${day.businessDate}`}
+                            className="flex items-center justify-center px-2 text-xs"
+                          >
+                            {duration(day.actualLiveMinutes)}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+                <TotalsCell
+                  staffId={row.staff.id}
+                  staffCode={row.staff.staffCode}
+                  totals={totals}
+                  weekNo={week.weekNo}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    );
+  }
 
   if (branches.length === 0) {
     return (
@@ -556,15 +730,21 @@ export function BranchOverviewWorkspace({
         <div>
           <h2 className="text-xl font-semibold">Bảng tổng quan cơ sở</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Projection trực tiếp từ attendance · revenue và Live theo ngày
+            Tổng hợp trực tiếp số xu và thời gian Live theo ngày
           </p>
         </div>
-        <a
-          className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white"
-          href={`/api/exports/branch-monthly-overview?${exportQuery}`}
-        >
-          Xuất XLSX
-        </a>
+        {isGeneralManager ? (
+          <a
+            className="rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white"
+            href={`/api/exports/branch-monthly-overview?${exportQuery}`}
+          >
+            Xuất XLSX
+          </a>
+        ) : (
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+            Chỉ xem
+          </span>
+        )}
       </div>
 
       <div className="mt-5 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -647,15 +827,17 @@ export function BranchOverviewWorkspace({
           />
         </label>
       </div>
-      <label className="mt-3 grid max-w-xl gap-1 text-sm">
-        Lý do chỉnh sửa
-        <input
-          aria-label="Lý do chỉnh sửa tổng quan"
-          onChange={(event) => setReason(event.target.value)}
-          placeholder="Bắt buộc khi inline edit hoặc paste"
-          value={reason}
-        />
-      </label>
+      {isGeneralManager ? (
+        <label className="mt-3 grid max-w-xl gap-1 text-sm">
+          Lý do chỉnh sửa
+          <input
+            aria-label="Lý do chỉnh sửa tổng quan"
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Bắt buộc khi inline edit hoặc paste"
+            value={reason}
+          />
+        </label>
+      ) : null}
 
       {message ? (
         <p aria-live="polite" className="mt-3 text-sm text-slate-600">
@@ -678,7 +860,7 @@ export function BranchOverviewWorkspace({
       ) : (
         <>
           <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-            <SummaryCard label="Doanh số cơ sở" value={`${money(visibleTotals.revenueAmount)} ₫`} />
+            <SummaryCard label="Tổng xu cơ sở" value={`${money(visibleTotals.revenueAmount)} xu`} />
             <SummaryCard label="Tổng công" value={visibleTotals.workUnits} />
             <SummaryCard label="Tổng Live" value={duration(visibleTotals.actualLiveMinutes)} />
             <SummaryCard label="Tăng ca" value={duration(visibleTotals.overtimeMinutes)} />
@@ -691,117 +873,23 @@ export function BranchOverviewWorkspace({
             </div>
           ) : (
             <>
-              <div className="mt-6 hidden lg:block">
-                <p className="mb-2 text-xs text-slate-500">
-                  Có thể paste vùng TSV từ Excel; toàn bộ vùng được validate trước khi lưu.
-                </p>
-                <div
-                  className="max-h-[68vh] overflow-auto rounded-xl border border-slate-200"
-                  ref={scrollRef}
-                >
-                  <div className="relative" style={{ width: dayVirtualizer.getTotalSize() }}>
-                    <div className="sticky top-0 z-40 h-20 border-b border-slate-300 bg-slate-100">
-                      <IdentityHeader />
-                      {virtualDays.map((virtualDay) => {
-                        const day = calendar[virtualDay.index]!;
-                        return (
-                          <div
-                            className="absolute top-0 h-20 border-r border-slate-300 bg-sky-50"
-                            key={day.businessDate}
-                            style={{
-                              left: virtualDay.start,
-                              width: virtualDay.size,
-                            }}
-                          >
-                            <div className="border-b border-slate-200 px-2 py-2 text-center text-xs font-semibold text-sky-900">
-                              {day.businessDate.slice(8, 10)}/{day.businessDate.slice(5, 7)}
-                              <span className="ml-1 text-slate-500">
-                                {weekdayLabels[day.dayOfWeek]} · W{day.weekOfMonth}
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-2 text-center text-xs text-slate-600">
-                              <span className="border-r border-slate-200 px-1 py-2">Doanh số</span>
-                              <span className="px-1 py-2">Live phút</span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      <TotalsHeader />
-                    </div>
-
-                    {rows.map((row, rowIndex) => (
-                      <div
-                        className="relative h-28 border-b border-slate-200 bg-white"
-                        key={row.staff.id}
-                      >
-                        <IdentityCell row={row} />
-                        {virtualDays.map((virtualDay) => {
-                          const day = row.days[virtualDay.index]!;
-                          return (
-                            <div
-                              className="absolute top-0 grid h-28 grid-cols-2 border-r border-slate-200 p-2"
-                              key={day.businessDate}
-                              style={{
-                                left: virtualDay.start,
-                                width: virtualDay.size,
-                              }}
-                            >
-                              <MetricInput
-                                ariaLabel={`Doanh số ${row.staff.staffCode} ${day.businessDate}`}
-                                disabled={Boolean(day.archivedAt) || day.saveState === "saving"}
-                                onChange={(value) =>
-                                  updateMetric(
-                                    row.staff.id,
-                                    day.businessDate,
-                                    "revenueAmount",
-                                    value,
-                                  )
-                                }
-                                onKeyDown={(event) =>
-                                  moveFocus(event, rowIndex, virtualDay.index, 0)
-                                }
-                                onPaste={(event) =>
-                                  pasteCells(event, rowIndex, virtualDay.index, 0)
-                                }
-                                cellId={cellId(row.staff.id, day.businessDate, 0)}
-                                value={day.revenueAmount}
-                              />
-                              <MetricInput
-                                ariaLabel={`Live phút ${row.staff.staffCode} ${day.businessDate}`}
-                                disabled={Boolean(day.archivedAt) || day.saveState === "saving"}
-                                onChange={(value) =>
-                                  updateMetric(
-                                    row.staff.id,
-                                    day.businessDate,
-                                    "actualLiveMinutes",
-                                    value,
-                                  )
-                                }
-                                onKeyDown={(event) =>
-                                  moveFocus(event, rowIndex, virtualDay.index, 1)
-                                }
-                                onPaste={(event) =>
-                                  pasteCells(event, rowIndex, virtualDay.index, 1)
-                                }
-                                cellId={cellId(row.staff.id, day.businessDate, 1)}
-                                value={String(day.actualLiveMinutes)}
-                              />
-                              <div className="col-span-2 mt-1 text-center text-[11px]">
-                                <SaveBadge day={day} />
-                              </div>
-                            </div>
-                          );
-                        })}
-                        <TotalsCell row={row} />
-                      </div>
-                    ))}
-                  </div>
-                </div>
+              <div
+                className="mt-6 hidden space-y-6 lg:block"
+                data-testid="overview-week-list"
+              >
+                {isGeneralManager ? (
+                  <p className="text-xs text-slate-500">
+                    Có thể paste vùng TSV từ Excel; toàn bộ vùng được kiểm tra trước khi lưu.
+                  </p>
+                ) : null}
+                {weeks.map(renderWeek)}
               </div>
 
               <div className="mt-6 space-y-3 lg:hidden">
                 <p className="text-xs text-slate-500">
-                  Chế độ mobile chỉ đọc; dùng desktop để chỉnh sửa nhiều ô.
+                  {isGeneralManager
+                    ? "Chế độ mobile chỉ đọc; dùng desktop để chỉnh sửa nhiều ô."
+                    : "Báo cáo chỉ đọc trong phạm vi cơ sở được phân công."}
                 </p>
                 {rows.map((row) => (
                   <article className="rounded-xl border border-slate-200 p-4" key={row.staff.id}>
@@ -811,7 +899,7 @@ export function BranchOverviewWorkspace({
                       {row.staff.performanceLevel?.name ?? "Chưa xếp hạng"}
                     </p>
                     <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-                      <span>Doanh số: {money(row.totals.revenueAmount)} ₫</span>
+                      <span>Tổng xu: {money(row.totals.revenueAmount)} xu</span>
                       <span>Live: {duration(row.totals.actualLiveMinutes)}</span>
                       <span>Công: {row.totals.workUnits}</span>
                       <span>Phạt: {money(row.totals.penaltyAmount)} ₫</span>
@@ -820,26 +908,127 @@ export function BranchOverviewWorkspace({
                 ))}
               </div>
 
-              <div className="mt-8 rounded-xl border border-slate-200 p-4">
-                <h3 className="font-semibold">Doanh số theo nhân viên</h3>
-                <p className="mt-1 text-xs text-slate-500">
-                  Đơn vị biểu đồ: triệu VND; số tổng phía trên giữ nguyên BIGINT.
-                </p>
-                <div className="mt-4 h-80">
-                  <ResponsiveContainer height="100%" width="100%">
-                    <BarChart data={chartData}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                      <XAxis dataKey="name" interval={0} tick={{ fontSize: 11 }} />
-                      <YAxis tick={{ fontSize: 11 }} />
-                      <Tooltip />
-                      <Bar
-                        dataKey="revenueMillions"
-                        fill="#0284c7"
-                        name="Doanh số (triệu VND)"
-                        radius={[6, 6, 0, 0]}
-                      />
-                    </BarChart>
-                  </ResponsiveContainer>
+              <div className="mt-8 grid gap-4 xl:grid-cols-2">
+                <div
+                  className="min-w-0 overflow-hidden rounded-xl border border-slate-200 p-4"
+                  data-testid="monthly-revenue-chart"
+                >
+                  <h3 className="break-words font-semibold [overflow-wrap:anywhere]">
+                    Tổng xu theo nhân viên
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Cả tháng · đơn vị biểu đồ là nghìn xu.
+                  </p>
+                  <div className="mt-4 h-80 min-w-0 overflow-hidden">
+                    <ResponsiveContainer height="100%" width="100%">
+                      <BarChart
+                        data={chartData}
+                        margin={{ top: 8, right: 8, bottom: 20, left: 8 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="name"
+                          height={48}
+                          interval={0}
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={(value) => truncateChartLabel(value, 16)}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={compactChartNumber}
+                          width={64}
+                        />
+                        <Tooltip
+                          contentStyle={responsiveTooltipStyle}
+                          itemStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          labelStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          wrapperStyle={{ maxWidth: "calc(100vw - 2rem)", zIndex: 60 }}
+                        />
+                        <Bar
+                          dataKey="coinThousands"
+                          fill="#0284c7"
+                          name="Tổng xu tháng (nghìn xu)"
+                          radius={[6, 6, 0, 0]}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div
+                  className="min-w-0 overflow-hidden rounded-xl border border-slate-200 p-4"
+                  data-testid="weekly-revenue-chart"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="break-words font-semibold [overflow-wrap:anywhere]">
+                        Tổng xu theo nhân viên từng tuần
+                      </h3>
+                      <p className="mt-1 break-words text-xs text-slate-500 [overflow-wrap:anywhere]">
+                        {selectedChartWeek
+                          ? `Tuần ${selectedChartWeek.weekNo} · ${shortDate(selectedChartWeek.from)}–${shortDate(selectedChartWeek.to)} · ${money(selectedWeekTotals.revenueAmount)} xu`
+                          : "Chưa có tuần trong tháng."}
+                      </p>
+                    </div>
+                    <div
+                      aria-label="Chọn tuần biểu đồ xu"
+                      className="flex flex-wrap gap-1"
+                      role="group"
+                    >
+                      {weeks.map((week) => {
+                        const selected = week.weekNo === selectedChartWeek?.weekNo;
+                        return (
+                          <button
+                            aria-pressed={selected}
+                            className={
+                              selected
+                                ? "rounded-md bg-sky-700 px-2.5 py-1 text-xs font-semibold text-white"
+                                : "rounded-md bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50"
+                            }
+                            key={week.weekNo}
+                            onClick={() => setChartWeekNo(week.weekNo)}
+                            type="button"
+                          >
+                            Tuần {week.weekNo}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="mt-4 h-80 min-w-0 overflow-hidden">
+                    <ResponsiveContainer height="100%" width="100%">
+                      <BarChart
+                        data={weeklyChartData}
+                        margin={{ top: 8, right: 8, bottom: 20, left: 8 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="name"
+                          height={48}
+                          interval={0}
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={(value) => truncateChartLabel(value, 16)}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 11 }}
+                          tickFormatter={compactChartNumber}
+                          width={64}
+                        />
+                        <Tooltip
+                          contentStyle={responsiveTooltipStyle}
+                          itemStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          labelStyle={{ overflowWrap: "anywhere", whiteSpace: "normal" }}
+                          wrapperStyle={{ maxWidth: "calc(100vw - 2rem)", zIndex: 60 }}
+                        />
+                        <Bar
+                          dataKey="coinThousands"
+                          fill="#0f766e"
+                          name={`Tuần ${selectedChartWeek?.weekNo ?? ""} (nghìn xu)`}
+                          radius={[6, 6, 0, 0]}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
               </div>
             </>
@@ -847,12 +1036,18 @@ export function BranchOverviewWorkspace({
         </>
       )}
       <Button
-        className="mt-4 bg-white text-slate-700 ring-1 ring-slate-300 hover:bg-slate-50"
+        className="mt-4"
+        disabled={loading || hasPendingEdits}
         onClick={() => void load()}
         type="button"
+        variant="secondary"
       >
-        Tải lại dữ liệu nguồn
+        {hasPendingEdits ? "Lưu xong để cập nhật" : "Cập nhật dữ liệu nguồn"}
       </Button>
+      <p className="mt-2 text-xs text-slate-500">
+        Tự động đồng bộ khi quay lại trang và mỗi 30 giây. Hệ thống không ghi đè ô đang sửa hoặc
+        đang chờ lưu.
+      </p>
     </section>
   );
 }
@@ -877,45 +1072,54 @@ function savedDay(day: EditableDay, attendance: AttendanceRecordDto): EditableDa
 
 function SummaryCard({ label, value }: Readonly<{ label: string; value: string }>) {
   return (
-    <div className="rounded-xl bg-slate-50 p-4">
-      <p className="text-xs text-slate-500">{label}</p>
-      <p className="mt-1 text-lg font-semibold">{value}</p>
+    <div className="min-w-0 rounded-xl bg-slate-50 p-4 [overflow-wrap:anywhere]">
+      <p className="break-words text-xs text-slate-500">{label}</p>
+      <p className="mt-1 break-words text-lg font-semibold">{value}</p>
     </div>
   );
 }
 
 function IdentityHeader() {
   return (
-    <div
-      className="sticky left-0 z-50 grid h-20 grid-cols-[90px_160px_105px_115px] border-r border-slate-300 bg-slate-100 text-xs font-semibold"
-      style={{ width: IDENTITY_WIDTH }}
-    >
-      <span className="flex items-center px-2">Mã NV</span>
-      <span className="flex items-center px-2">Nhân viên / ACC</span>
-      <span className="flex items-center px-2">Loại / trạng thái</span>
-      <span className="flex items-center px-2">Cấp bậc</span>
+    <div className="sticky left-0 z-50 flex h-24 items-center border-r border-slate-300 bg-slate-100 px-3 text-xs font-semibold shadow-[4px_0_6px_-5px_rgba(15,23,42,0.45)]">
+      Thông tin nhân viên
     </div>
   );
 }
 
-function IdentityCell({ row }: Readonly<{ row: EditableRow }>) {
+function DayHeader({ day }: Readonly<{ day: BranchOverviewCalendarDay }>) {
+  return (
+    <div className="h-24 border-r border-slate-300 bg-sky-50">
+      <div className="flex h-10 items-center justify-center border-b border-slate-200 px-2 text-center text-xs font-semibold text-sky-900">
+        {shortDate(day.businessDate)}
+        <span className="ml-1 text-slate-500">{weekdayLabels[day.dayOfWeek]}</span>
+      </div>
+      <div className="grid h-14 grid-rows-2 text-center text-xs text-slate-600">
+        <span className="flex items-center justify-center border-b border-slate-200 px-1">Xu</span>
+        <span className="flex items-center justify-center px-1">Live</span>
+      </div>
+    </div>
+  );
+}
+
+function IdentityCell({ row, weekNo }: Readonly<{ row: EditableRow; weekNo: number }>) {
   return (
     <div
-      className="sticky left-0 z-20 grid h-28 grid-cols-[90px_160px_105px_115px] border-r border-slate-300 bg-white text-xs"
-      style={{ width: IDENTITY_WIDTH }}
+      className="sticky left-0 z-20 flex min-h-28 flex-col justify-center border-r border-slate-300 bg-white px-3 py-2 text-xs shadow-[4px_0_6px_-5px_rgba(15,23,42,0.35)]"
+      data-testid={`overview-identity-${weekNo}-${row.staff.id}`}
     >
-      <span className="flex items-center px-2 font-mono">{row.staff.staffCode}</span>
-      <span className="flex flex-col justify-center px-2">
-        <strong>{row.staff.fullName}</strong>
-        <span className="mt-1 text-slate-500">{row.staff.streamingAlias || "Chưa có ACC"}</span>
-      </span>
-      <span className="flex flex-col justify-center px-2">
-        {employmentCategoryLabels[row.staff.employmentCategory]}
-        <span className="mt-1 text-slate-500">
-          {employmentStatusLabels[row.staff.employmentStatus]}
+      <div className="flex items-start justify-between gap-2">
+        <strong className="min-w-0 truncate text-sm">{row.staff.fullName}</strong>
+        <span className="shrink-0 font-mono text-[11px] text-slate-500">
+          {row.staff.staffCode}
         </span>
+      </div>
+      <span className="mt-1 truncate text-slate-600">
+        ACC: {row.staff.streamingAlias || "Chưa có"}
       </span>
-      <span className="flex items-center px-2">
+      <span className="mt-1 text-slate-500">
+        {employmentCategoryLabels[row.staff.employmentCategory]} ·{" "}
+        {employmentStatusLabels[row.staff.employmentStatus]} ·{" "}
         {row.staff.performanceLevel?.name ?? "Chưa xếp hạng"}
       </span>
     </div>
@@ -924,37 +1128,48 @@ function IdentityCell({ row }: Readonly<{ row: EditableRow }>) {
 
 function TotalsHeader() {
   return (
-    <div
-      className="sticky right-0 z-50 ml-auto grid h-20 grid-cols-5 border-l border-slate-300 bg-slate-100 text-center text-xs font-semibold"
-      style={{ width: TOTAL_WIDTH }}
-    >
-      <span className="flex items-center justify-center px-1">Tổng doanh số</span>
-      <span className="flex items-center justify-center px-1">Công</span>
-      <span className="flex items-center justify-center px-1">Live</span>
-      <span className="flex items-center justify-center px-1">Tăng ca</span>
-      <span className="flex items-center justify-center px-1">Phạt</span>
+    <div className="sticky right-0 z-50 flex h-24 items-center justify-center border-l border-slate-300 bg-slate-100 px-3 text-center text-xs font-semibold shadow-[-4px_0_6px_-5px_rgba(15,23,42,0.45)]">
+      Tổng tuần
     </div>
   );
 }
 
-function TotalsCell({ row }: Readonly<{ row: EditableRow }>) {
+function TotalsCell({
+  staffCode,
+  staffId,
+  totals,
+  weekNo,
+}: Readonly<{
+  staffCode: string;
+  staffId: string;
+  totals: BranchOverviewTotalsDto;
+  weekNo: number;
+}>) {
   return (
     <div
-      className="sticky right-0 z-20 ml-auto grid h-28 grid-cols-5 border-l border-slate-300 bg-white text-center text-xs"
-      style={{ width: TOTAL_WIDTH }}
+      aria-label={`Tổng tuần ${weekNo} ${staffCode}`}
+      className="sticky right-0 z-20 grid min-h-28 grid-cols-2 content-center gap-x-3 gap-y-1 border-l border-slate-300 bg-white px-3 py-2 text-xs shadow-[-4px_0_6px_-5px_rgba(15,23,42,0.35)]"
+      data-testid={`overview-total-${weekNo}-${staffId}`}
     >
-      <span className="flex items-center justify-end px-2 font-medium">
-        {money(row.totals.revenueAmount)}
+      <span className="col-span-2 flex justify-between gap-2 font-semibold">
+        <span className="text-slate-500">Xu</span>
+        <span>{money(totals.revenueAmount)}</span>
       </span>
-      <span className="flex items-center justify-center px-1">{row.totals.workUnits}</span>
-      <span className="flex items-center justify-center px-1">
-        {duration(row.totals.actualLiveMinutes)}
+      <span>
+        <span className="text-slate-500">Công </span>
+        {totals.workUnits}
       </span>
-      <span className="flex items-center justify-center px-1">
-        {duration(row.totals.overtimeMinutes)}
+      <span>
+        <span className="text-slate-500">Live </span>
+        {duration(totals.actualLiveMinutes)}
       </span>
-      <span className="flex items-center justify-end px-2 text-rose-700">
-        {money(row.totals.penaltyAmount)}
+      <span>
+        <span className="text-slate-500">Tăng ca </span>
+        {duration(totals.overtimeMinutes)}
+      </span>
+      <span className="text-rose-700">
+        <span className="text-slate-500">Phạt </span>
+        {money(totals.penaltyAmount)}
       </span>
     </div>
   );
@@ -980,7 +1195,7 @@ function MetricInput({
   return (
     <input
       aria-label={ariaLabel}
-      className="min-w-0 px-1 text-right text-xs"
+      className="w-full min-w-0 px-1 text-right text-xs"
       disabled={disabled}
       id={cellId}
       inputMode="numeric"
