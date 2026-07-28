@@ -79,6 +79,7 @@ jobs:
       - name: Deploy migrations and seed
         run: |
           pnpm db:deploy
+          pnpm db:generate
           pnpm db:seed
       - name: Static checks
         run: |
