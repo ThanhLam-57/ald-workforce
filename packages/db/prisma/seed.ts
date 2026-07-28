@@ -168,11 +168,11 @@ const demoWorkDate = new Date(Date.UTC(demoYear, demoMonthIndex, 15));
 
 const demoBranch = await prisma.branch.upsert({
   where: { companyId_code: { companyId: company.id, code: "DEMO" } },
-  update: { name: "Cơ sở Demo Payroll", isActive: true },
+  update: { name: "Cơ sở Demo Lương", isActive: true },
   create: {
     companyId: company.id,
     code: "DEMO",
-    name: "Cơ sở Demo Payroll",
+    name: "Cơ sở Demo Lương",
   },
 });
 const demoStaff = await prisma.staffMember.upsert({
