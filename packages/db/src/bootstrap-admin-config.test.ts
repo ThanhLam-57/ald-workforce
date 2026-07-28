@@ -59,7 +59,7 @@ describe("readBootstrapAdminConfig", () => {
     });
   });
 
-  it("resets the bootstrap admin password when a real password is explicitly configured", () => {
+  it("does not reset the bootstrap admin password unless the recovery flag is enabled", () => {
     expect(
       readBootstrapAdminConfig({
         RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
@@ -68,7 +68,7 @@ describe("readBootstrapAdminConfig", () => {
     ).toMatchObject({
       enabled: true,
       adminPassword: "My-New-Admin-Password-123!",
-      resetPassword: true,
+      resetPassword: false,
     });
   });
 

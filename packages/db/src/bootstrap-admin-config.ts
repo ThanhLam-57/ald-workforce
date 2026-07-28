@@ -94,7 +94,6 @@ export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): Bootst
     adminEmail,
     adminUsername,
     adminPassword,
-    resetPassword:
-      booleanValue(environment, "BOOTSTRAP_ADMIN_RESET_PASSWORD") || Boolean(explicitAdminPassword),
+    resetPassword: booleanValue(environment, "BOOTSTRAP_ADMIN_RESET_PASSWORD"),
   };
 }
