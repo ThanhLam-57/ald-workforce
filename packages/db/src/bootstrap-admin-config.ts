@@ -10,6 +10,7 @@ export type BootstrapAdminConfig =
       adminEmail: string;
       adminUsername: string;
       adminPassword: string;
+      resetPassword: boolean;
     };
 
 export const DEFAULT_BOOTSTRAP_ADMIN_PASSWORD = "ALD-Admin-123456!";
@@ -32,6 +33,19 @@ function requiredValue(environment: NodeJS.ProcessEnv, key: string, fallback?: s
   return value;
 }
 
+function optionalValue(environment: NodeJS.ProcessEnv, key: string): string | undefined {
+  const candidate = environment[key]?.trim();
+  if (!candidate || candidate.includes("<") || candidate.includes(">")) {
+    return undefined;
+  }
+  return candidate;
+}
+
+function booleanValue(environment: NodeJS.ProcessEnv, key: string): boolean {
+  const value = environment[key]?.trim().toLowerCase();
+  return value === "true" || value === "1" || value === "yes" || value === "on";
+}
+
 export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): BootstrapAdminConfig {
   const enabled = environment.BOOTSTRAP_ADMIN_ENABLED?.trim().toLowerCase();
   if (
@@ -42,11 +56,14 @@ export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): Bootst
     return { enabled: false };
   }
 
-  const adminPassword = requiredValue(
-    environment,
-    "BOOTSTRAP_ADMIN_PASSWORD",
-    isRailwayRuntime(environment) ? DEFAULT_BOOTSTRAP_ADMIN_PASSWORD : undefined,
-  );
+  const explicitAdminPassword = optionalValue(environment, "BOOTSTRAP_ADMIN_PASSWORD");
+  const adminPassword =
+    explicitAdminPassword ??
+    requiredValue(
+      environment,
+      "BOOTSTRAP_ADMIN_PASSWORD",
+      isRailwayRuntime(environment) ? DEFAULT_BOOTSTRAP_ADMIN_PASSWORD : undefined,
+    );
   if (adminPassword.length < 12) {
     throw new Error("BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters.");
   }
@@ -76,5 +93,8 @@ export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): Bootst
     adminEmail,
     adminUsername,
     adminPassword,
+    resetPassword:
+      booleanValue(environment, "BOOTSTRAP_ADMIN_RESET_PASSWORD") ||
+      Boolean(explicitAdminPassword),
   };
 }

@@ -51,7 +51,7 @@ async function bootstrapAdmin(): Promise<void> {
       where: {
         OR: [{ email: config.adminEmail }, { username: config.adminUsername }],
       },
-      select: { id: true, companyId: true },
+      select: { id: true, companyId: true, mustChangePassword: true, passwordChangedAt: true },
     });
     const uniqueUserIds = new Set(users.map((user) => user.id));
     if (uniqueUserIds.size > 1) {
@@ -62,6 +62,9 @@ async function bootstrapAdmin(): Promise<void> {
     if (existingUser && existingUser.companyId !== company.id) {
       throw new Error("Bootstrap administrator belongs to another company.");
     }
+    const shouldResetPassword =
+      config.resetPassword ||
+      Boolean(existingUser?.mustChangePassword && !existingUser.passwordChangedAt);
 
     const user = existingUser
       ? await transaction.user.update({
@@ -79,6 +82,9 @@ async function bootstrapAdmin(): Promise<void> {
             active: true,
             banned: false,
             banReason: null,
+            ...(shouldResetPassword
+              ? { mustChangePassword: true, passwordChangedAt: null }
+              : {}),
           },
         })
       : await transaction.user.create({
@@ -100,7 +106,7 @@ async function bootstrapAdmin(): Promise<void> {
 
     const credential = await transaction.account.findFirst({
       where: { userId: user.id, providerId: "credential" },
-      select: { id: true },
+      select: { id: true, password: true },
     });
     if (!credential) {
       await transaction.account.create({
@@ -111,10 +117,19 @@ async function bootstrapAdmin(): Promise<void> {
           password: passwordHash,
         },
       });
+    } else if (shouldResetPassword || !credential.password) {
+      await transaction.account.update({
+        where: { id: credential.id },
+        data: { password: passwordHash },
+      });
     }
   });
 
-  console.log(`Admin bootstrap completed for username "${config.adminUsername}".`);
+  console.log(
+    `Admin bootstrap completed for username "${config.adminUsername}"${
+      config.resetPassword ? " with requested password reset" : ""
+    }.`,
+  );
 }
 
 bootstrapAdmin()

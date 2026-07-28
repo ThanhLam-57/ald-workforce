@@ -19,6 +19,7 @@ describe("readBootstrapAdminConfig", () => {
       enabled: true,
       adminUsername: "admin",
       adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+      resetPassword: false,
     });
   });
 
@@ -41,6 +42,33 @@ describe("readBootstrapAdminConfig", () => {
     ).toMatchObject({
       enabled: true,
       adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+      resetPassword: false,
+    });
+  });
+
+  it("can reset the bootstrap admin password with an explicit recovery flag", () => {
+    expect(
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_RESET_PASSWORD: "true",
+      }),
+    ).toMatchObject({
+      enabled: true,
+      adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+      resetPassword: true,
+    });
+  });
+
+  it("resets the bootstrap admin password when a real password is explicitly configured", () => {
+    expect(
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_PASSWORD: "My-New-Admin-Password-123!",
+      }),
+    ).toMatchObject({
+      enabled: true,
+      adminPassword: "My-New-Admin-Password-123!",
+      resetPassword: true,
     });
   });
 
