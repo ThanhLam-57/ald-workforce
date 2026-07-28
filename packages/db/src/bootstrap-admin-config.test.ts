@@ -1,0 +1,40 @@
+import { describe, expect, it } from "vitest";
+
+import { readBootstrapAdminConfig } from "./bootstrap-admin-config.js";
+
+describe("readBootstrapAdminConfig", () => {
+  it("does nothing unless explicitly enabled", () => {
+    expect(readBootstrapAdminConfig({})).toEqual({ enabled: false });
+  });
+
+  it("requires a strong temporary password", () => {
+    expect(() =>
+      readBootstrapAdminConfig({
+        BOOTSTRAP_ADMIN_ENABLED: "true",
+        BOOTSTRAP_ADMIN_PASSWORD: "short",
+      }),
+    ).toThrow("at least 12 characters");
+  });
+
+  it("normalizes identifiers and applies safe defaults", () => {
+    expect(
+      readBootstrapAdminConfig({
+        BOOTSTRAP_ADMIN_ENABLED: "true",
+        BOOTSTRAP_ADMIN_PASSWORD: "Temporary-Password-123!",
+        BOOTSTRAP_ADMIN_USERNAME: "Admin",
+        BOOTSTRAP_ADMIN_EMAIL: "Admin@ALD.Local",
+        BOOTSTRAP_COMPANY_SLUG: "ALD",
+        BOOTSTRAP_ADMIN_STAFF_CODE: "gm001",
+      }),
+    ).toMatchObject({
+      enabled: true,
+      companyName: "ALD",
+      companySlug: "ald",
+      revenueUnit: "COIN",
+      staffCode: "GM001",
+      adminName: "Tổng quản lý",
+      adminEmail: "admin@ald.local",
+      adminUsername: "admin",
+    });
+  });
+});

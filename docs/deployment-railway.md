@@ -65,6 +65,32 @@ the local MinIO value from `.env.example`.
 xác định trước khi deploy production. Mỗi environment dùng auth secret, metrics token và
 storage credentials riêng.
 
+## Bootstrap tài khoản Tổng quản lý
+
+Production không chạy demo seed. Lần deploy đầu tiên, đặt các Railway Variables sau trên
+service `web`:
+
+```text
+BOOTSTRAP_ADMIN_ENABLED=true
+BOOTSTRAP_COMPANY_NAME=ALD
+BOOTSTRAP_COMPANY_SLUG=ald
+BOOTSTRAP_REVENUE_UNIT=COIN
+BOOTSTRAP_ADMIN_STAFF_CODE=GM001
+BOOTSTRAP_ADMIN_NAME=Tổng quản lý
+BOOTSTRAP_ADMIN_EMAIL=admin@ald.local
+BOOTSTRAP_ADMIN_USERNAME=admin
+BOOTSTRAP_ADMIN_PASSWORD=<strong-temporary-password>
+```
+
+Pre-deploy command chạy migration rồi tạo duy nhất công ty, hồ sơ GM và tài khoản admin.
+Lệnh này không tạo cơ sở, nhân viên, rule, attendance hoặc payroll demo. Sau khi deployment
+đầu tiên thành công:
+
+1. Đặt `BOOTSTRAP_ADMIN_ENABLED=false`.
+2. Redeploy service `web`.
+3. Đăng nhập bằng mật khẩu tạm, đổi mật khẩu ngay và bật 2FA.
+4. Xóa `BOOTSTRAP_ADMIN_PASSWORD` khỏi Railway Variables sau khi xác nhận đăng nhập được.
+
 ## Trình tự release
 
 1. CI phải pass lint, typecheck, unit, integration, build và E2E.

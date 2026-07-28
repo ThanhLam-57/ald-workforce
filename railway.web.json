@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile.web"
   },
   "deploy": {
-    "preDeployCommand": "node packages/db/node_modules/prisma/build/index.js migrate deploy --config packages/db/prisma.config.ts",
+    "preDeployCommand": "node packages/db/node_modules/prisma/build/index.js migrate deploy --config packages/db/prisma.config.ts && node packages/db/dist/bootstrap-admin.js",
     "startCommand": "node apps/web/server.js",
     "healthcheckPath": "/api/health/ready",
     "healthcheckTimeout": 300,

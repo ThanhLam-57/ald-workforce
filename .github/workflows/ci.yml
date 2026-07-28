@@ -61,11 +61,15 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Start private object storage
         run: |
+          docker build \
+            --tag ald-minio-ci \
+            --file infra/minio/Dockerfile \
+            infra/minio
           docker run --detach --name ald-minio \
             --publish 9000:9000 \
             --env MINIO_ROOT_USER=ald_ci \
             --env MINIO_ROOT_PASSWORD=ci-only-minio-password \
-            quay.io/minio/minio:RELEASE.2025-10-15T17-29-55Z \
+            ald-minio-ci \
             server /data
           for attempt in $(seq 1 30); do
             curl --fail --silent http://127.0.0.1:9000/minio/health/live && break
