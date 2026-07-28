@@ -38,10 +38,11 @@ import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
 const ENGINE_VERSION = "payroll-v1";
 type Transaction = Prisma.TransactionClient;
+type PayrollDatabase = Transaction | typeof prisma;
 const PAYROLL_CALCULATION_TRANSACTION_OPTIONS = {
   isolationLevel: "RepeatableRead" as const,
   maxWait: 10_000,
-  timeout: 60_000,
+  timeout: 120_000,
 };
 
 type ResolvedRule = Readonly<{
@@ -829,7 +830,7 @@ export async function ensurePayrollPeriod(
 }
 
 async function loadResolvedRules(
-  tx: Transaction,
+  tx: PayrollDatabase,
   companyId: string,
   bounds: ReturnType<typeof periodBounds>,
 ): Promise<ResolvedRule[]> {
@@ -960,7 +961,7 @@ function uniqueRuleAt<T extends ResolvedRule["configuration"]["kind"]>(
 }
 
 async function buildCalculations(
-  tx: Transaction,
+  tx: PayrollDatabase,
   actor: ActorContext,
   period: Awaited<ReturnType<typeof loadPeriodForActor>>,
 ): Promise<
@@ -1372,6 +1373,21 @@ export async function calculatePayrollPeriod(
   metadata: RequestMetadata,
 ): Promise<PayrollPeriodDto> {
   requirePayrollWrite(actor);
+  const periodForCalculation = await loadPeriodForActor(prisma, actor, periodId, true);
+  if (!["DRAFT", "CALCULATED", "REVIEWED"].includes(periodForCalculation.status)) {
+    throw new DomainError("CONFLICT", "Kỳ lương đã khóa, không thể tính lại.");
+  }
+  if (periodForCalculation.version !== input.version) {
+    throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
+  }
+  console.info({
+    event: "payroll.calculate.start",
+    payrollPeriodId: periodId,
+    branchId: periodForCalculation.branchId,
+    transactionTimeoutMs: PAYROLL_CALCULATION_TRANSACTION_OPTIONS.timeout,
+    requestId: metadata.requestId,
+  });
+  const calculations = await buildCalculations(prisma, actor, periodForCalculation);
   await prisma.$transaction(async (tx) => {
     const period = await loadPeriodForActor(tx, actor, periodId, true);
     if (!["DRAFT", "CALCULATED", "REVIEWED"].includes(period.status)) {
@@ -1380,7 +1396,6 @@ export async function calculatePayrollPeriod(
     if (period.version !== input.version) {
       throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
     }
-    const calculations = await buildCalculations(tx, actor, period);
     const existing = await tx.payrollEntry.findMany({
       where: { payrollPeriodId: period.id, included: true },
       select: {
@@ -1531,6 +1546,12 @@ export async function calculatePayrollPeriod(
       metadata,
     });
   }, PAYROLL_CALCULATION_TRANSACTION_OPTIONS);
+  console.info({
+    event: "payroll.calculate.completed",
+    payrollPeriodId: periodId,
+    staffCount: calculations.length,
+    requestId: metadata.requestId,
+  });
   return getPayrollPeriod(actor, periodId);
 }
 
