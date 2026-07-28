@@ -38,6 +38,11 @@ import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
 const ENGINE_VERSION = "payroll-v1";
 type Transaction = Prisma.TransactionClient;
+const PAYROLL_CALCULATION_TRANSACTION_OPTIONS = {
+  isolationLevel: "RepeatableRead" as const,
+  maxWait: 10_000,
+  timeout: 60_000,
+};
 
 type ResolvedRule = Readonly<{
   id: string;
@@ -1367,168 +1372,165 @@ export async function calculatePayrollPeriod(
   metadata: RequestMetadata,
 ): Promise<PayrollPeriodDto> {
   requirePayrollWrite(actor);
-  await prisma.$transaction(
-    async (tx) => {
-      const period = await loadPeriodForActor(tx, actor, periodId, true);
-      if (!["DRAFT", "CALCULATED", "REVIEWED"].includes(period.status)) {
-        throw new DomainError("CONFLICT", "Kỳ lương đã khóa, không thể tính lại.");
-      }
-      if (period.version !== input.version) {
-        throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
-      }
-      const calculations = await buildCalculations(tx, actor, period);
-      const existing = await tx.payrollEntry.findMany({
-        where: { payrollPeriodId: period.id, included: true },
-        select: {
-          staffId: true,
-          currentSnapshot: { select: { inputHash: true } },
-        },
-      });
-      const unchanged =
-        existing.length === calculations.length &&
-        calculations.every(
-          (calculation) =>
-            existing.find((entry) => entry.staffId === calculation.staffId)?.currentSnapshot
-              ?.inputHash === calculation.inputHash,
-        );
-      if (unchanged) return;
+  await prisma.$transaction(async (tx) => {
+    const period = await loadPeriodForActor(tx, actor, periodId, true);
+    if (!["DRAFT", "CALCULATED", "REVIEWED"].includes(period.status)) {
+      throw new DomainError("CONFLICT", "Kỳ lương đã khóa, không thể tính lại.");
+    }
+    if (period.version !== input.version) {
+      throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
+    }
+    const calculations = await buildCalculations(tx, actor, period);
+    const existing = await tx.payrollEntry.findMany({
+      where: { payrollPeriodId: period.id, included: true },
+      select: {
+        staffId: true,
+        currentSnapshot: { select: { inputHash: true } },
+      },
+    });
+    const unchanged =
+      existing.length === calculations.length &&
+      calculations.every(
+        (calculation) =>
+          existing.find((entry) => entry.staffId === calculation.staffId)?.currentSnapshot
+            ?.inputHash === calculation.inputHash,
+      );
+    if (unchanged) return;
 
-      const calculationNo = period.latestCalculationNo + 1;
-      await tx.payrollEntry.updateMany({
-        where: { payrollPeriodId: period.id },
-        data: { included: false, version: { increment: 1 } },
-      });
-      for (const calculation of calculations) {
-        const components = calculation.output.components;
-        const entry = await tx.payrollEntry.upsert({
-          where: {
-            payrollPeriodId_staffId: {
-              payrollPeriodId: period.id,
-              staffId: calculation.staffId,
-            },
-          },
-          create: {
-            companyId: actor.companyId,
-            branchId: period.branchId,
+    const calculationNo = period.latestCalculationNo + 1;
+    await tx.payrollEntry.updateMany({
+      where: { payrollPeriodId: period.id },
+      data: { included: false, version: { increment: 1 } },
+    });
+    for (const calculation of calculations) {
+      const components = calculation.output.components;
+      const entry = await tx.payrollEntry.upsert({
+        where: {
+          payrollPeriodId_staffId: {
             payrollPeriodId: period.id,
             staffId: calculation.staffId,
-            included: true,
-            workUnits: calculation.output.aggregates.workUnits,
-            overtimeMinutes: calculation.output.aggregates.overtimeMinutes,
-            revenueAmount: BigInt(calculation.output.aggregates.revenueAmount),
-            actualLiveMinutes: calculation.output.aggregates.actualLiveMinutes,
-            baseSalary: BigInt(components.baseSalary),
-            proratedSalary: BigInt(components.proratedSalary),
-            dailyRevenueBonus: BigInt(components.dailyRevenueBonus),
-            monthlyRevenueBonus: BigInt(components.monthlyRevenueBonus),
-            attendanceBonus: BigInt(components.attendanceBonus),
-            achievementBonus: BigInt(components.achievementBonus),
-            levelBonus: BigInt(components.levelBonus),
-            overtimePay: BigInt(components.overtimePay),
-            otherBonus: BigInt(components.otherBonus),
-            penalties: BigInt(components.penalties),
-            advance: BigInt(components.advance),
-            totalIncome: BigInt(components.totalIncome),
-            anomalyFlags: jsonValue(calculation.output.anomalyFlags),
           },
-          update: {
-            included: true,
-            workUnits: calculation.output.aggregates.workUnits,
-            overtimeMinutes: calculation.output.aggregates.overtimeMinutes,
-            revenueAmount: BigInt(calculation.output.aggregates.revenueAmount),
-            actualLiveMinutes: calculation.output.aggregates.actualLiveMinutes,
-            baseSalary: BigInt(components.baseSalary),
-            proratedSalary: BigInt(components.proratedSalary),
-            dailyRevenueBonus: BigInt(components.dailyRevenueBonus),
-            monthlyRevenueBonus: BigInt(components.monthlyRevenueBonus),
-            attendanceBonus: BigInt(components.attendanceBonus),
-            achievementBonus: BigInt(components.achievementBonus),
-            levelBonus: BigInt(components.levelBonus),
-            overtimePay: BigInt(components.overtimePay),
-            otherBonus: BigInt(components.otherBonus),
-            penalties: BigInt(components.penalties),
-            advance: BigInt(components.advance),
-            totalIncome: BigInt(components.totalIncome),
-            anomalyFlags: jsonValue(calculation.output.anomalyFlags),
-            version: { increment: 1 },
-          },
-          select: { id: true },
-        });
-        const snapshot = await tx.calculationSnapshot.create({
-          data: {
-            companyId: actor.companyId,
-            branchId: period.branchId,
-            payrollPeriodId: period.id,
-            payrollEntryId: entry.id,
-            calculationNo,
-            inputHash: calculation.inputHash,
-            outputHash: calculation.outputHash,
-            engineVersion: ENGINE_VERSION,
-            inputs: jsonValue(calculation.input),
-            selectedRuleVersions: jsonValue(calculation.output.selectedRuleVersionIds),
-            roundingPolicy: jsonValue(calculation.input.salaryRule.configuration.roundingPolicy),
-            outputs: jsonValue(calculation.output),
-            calculatedByUserId: actor.userId,
-          },
-          select: { id: true },
-        });
-        await tx.payrollLine.createMany({
-          data: calculation.output.lines.map((line, displayOrder) => ({
-            companyId: actor.companyId,
-            branchId: period.branchId,
-            payrollEntryId: entry.id,
-            calculationSnapshotId: snapshot.id,
-            type: line.type,
-            amount: BigInt(line.amount),
-            sourceType: line.sourceType,
-            sourceId: line.sourceId,
-            ruleVersionId: line.ruleVersionId,
-            label: line.label,
-            calculationDetails: jsonValue(line.calculationDetails),
-            includedInTotal: line.includedInTotal,
-            displayOrder,
-          })),
-        });
-        await tx.payrollEntry.update({
-          where: { id: entry.id },
-          data: { currentSnapshotId: snapshot.id },
-        });
-      }
-      const now = new Date();
-      await tx.payrollPeriod.update({
-        where: { id: period.id },
-        data: {
-          latestCalculationNo: calculationNo,
-          status: "CALCULATED",
-          calculatedAt: now,
-          reviewedByUserId: null,
-          reviewedAt: null,
-          reviewReason: null,
+        },
+        create: {
+          companyId: actor.companyId,
+          branchId: period.branchId,
+          payrollPeriodId: period.id,
+          staffId: calculation.staffId,
+          included: true,
+          workUnits: calculation.output.aggregates.workUnits,
+          overtimeMinutes: calculation.output.aggregates.overtimeMinutes,
+          revenueAmount: BigInt(calculation.output.aggregates.revenueAmount),
+          actualLiveMinutes: calculation.output.aggregates.actualLiveMinutes,
+          baseSalary: BigInt(components.baseSalary),
+          proratedSalary: BigInt(components.proratedSalary),
+          dailyRevenueBonus: BigInt(components.dailyRevenueBonus),
+          monthlyRevenueBonus: BigInt(components.monthlyRevenueBonus),
+          attendanceBonus: BigInt(components.attendanceBonus),
+          achievementBonus: BigInt(components.achievementBonus),
+          levelBonus: BigInt(components.levelBonus),
+          overtimePay: BigInt(components.overtimePay),
+          otherBonus: BigInt(components.otherBonus),
+          penalties: BigInt(components.penalties),
+          advance: BigInt(components.advance),
+          totalIncome: BigInt(components.totalIncome),
+          anomalyFlags: jsonValue(calculation.output.anomalyFlags),
+        },
+        update: {
+          included: true,
+          workUnits: calculation.output.aggregates.workUnits,
+          overtimeMinutes: calculation.output.aggregates.overtimeMinutes,
+          revenueAmount: BigInt(calculation.output.aggregates.revenueAmount),
+          actualLiveMinutes: calculation.output.aggregates.actualLiveMinutes,
+          baseSalary: BigInt(components.baseSalary),
+          proratedSalary: BigInt(components.proratedSalary),
+          dailyRevenueBonus: BigInt(components.dailyRevenueBonus),
+          monthlyRevenueBonus: BigInt(components.monthlyRevenueBonus),
+          attendanceBonus: BigInt(components.attendanceBonus),
+          achievementBonus: BigInt(components.achievementBonus),
+          levelBonus: BigInt(components.levelBonus),
+          overtimePay: BigInt(components.overtimePay),
+          otherBonus: BigInt(components.otherBonus),
+          penalties: BigInt(components.penalties),
+          advance: BigInt(components.advance),
+          totalIncome: BigInt(components.totalIncome),
+          anomalyFlags: jsonValue(calculation.output.anomalyFlags),
           version: { increment: 1 },
         },
+        select: { id: true },
       });
-      await appendAudit(tx, {
-        actor,
-        action: "PAYROLL_CALCULATE",
-        entityType: "PayrollPeriod",
-        entityId: period.id,
-        reason: input.reason,
-        before: {
-          status: period.status,
-          version: period.version,
-          calculationNo: period.latestCalculationNo,
-        },
-        after: {
-          status: "CALCULATED",
+      const snapshot = await tx.calculationSnapshot.create({
+        data: {
+          companyId: actor.companyId,
+          branchId: period.branchId,
+          payrollPeriodId: period.id,
+          payrollEntryId: entry.id,
           calculationNo,
-          staffCount: calculations.length,
-          aggregateInputHash: canonicalPayrollHash(calculations.map((item) => item.inputHash)),
+          inputHash: calculation.inputHash,
+          outputHash: calculation.outputHash,
+          engineVersion: ENGINE_VERSION,
+          inputs: jsonValue(calculation.input),
+          selectedRuleVersions: jsonValue(calculation.output.selectedRuleVersionIds),
+          roundingPolicy: jsonValue(calculation.input.salaryRule.configuration.roundingPolicy),
+          outputs: jsonValue(calculation.output),
+          calculatedByUserId: actor.userId,
         },
-        metadata,
+        select: { id: true },
       });
-    },
-    { isolationLevel: "RepeatableRead" },
-  );
+      await tx.payrollLine.createMany({
+        data: calculation.output.lines.map((line, displayOrder) => ({
+          companyId: actor.companyId,
+          branchId: period.branchId,
+          payrollEntryId: entry.id,
+          calculationSnapshotId: snapshot.id,
+          type: line.type,
+          amount: BigInt(line.amount),
+          sourceType: line.sourceType,
+          sourceId: line.sourceId,
+          ruleVersionId: line.ruleVersionId,
+          label: line.label,
+          calculationDetails: jsonValue(line.calculationDetails),
+          includedInTotal: line.includedInTotal,
+          displayOrder,
+        })),
+      });
+      await tx.payrollEntry.update({
+        where: { id: entry.id },
+        data: { currentSnapshotId: snapshot.id },
+      });
+    }
+    const now = new Date();
+    await tx.payrollPeriod.update({
+      where: { id: period.id },
+      data: {
+        latestCalculationNo: calculationNo,
+        status: "CALCULATED",
+        calculatedAt: now,
+        reviewedByUserId: null,
+        reviewedAt: null,
+        reviewReason: null,
+        version: { increment: 1 },
+      },
+    });
+    await appendAudit(tx, {
+      actor,
+      action: "PAYROLL_CALCULATE",
+      entityType: "PayrollPeriod",
+      entityId: period.id,
+      reason: input.reason,
+      before: {
+        status: period.status,
+        version: period.version,
+        calculationNo: period.latestCalculationNo,
+      },
+      after: {
+        status: "CALCULATED",
+        calculationNo,
+        staffCount: calculations.length,
+        aggregateInputHash: canonicalPayrollHash(calculations.map((item) => item.inputHash)),
+      },
+      metadata,
+    });
+  }, PAYROLL_CALCULATION_TRANSACTION_OPTIONS);
   return getPayrollPeriod(actor, periodId);
 }
 
