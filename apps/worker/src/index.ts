@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { PgBoss } from "pg-boss";
-import { prisma } from "@ald/db";
+import { prisma, requiredDatabaseUrl } from "@ald/db";
 import { createServer } from "node:http";
 import path from "node:path";
 
@@ -10,7 +10,7 @@ import { processPayrollExportJob } from "./payroll-export.js";
 dotenv.config({ path: path.resolve(process.cwd(), "../../.env"), quiet: true });
 dotenv.config({ quiet: true });
 
-const connectionString = process.env.DATABASE_URL;
+const connectionString = requiredDatabaseUrl();
 
 if (!connectionString) {
   throw new Error("DATABASE_URL là bắt buộc để khởi động worker.");

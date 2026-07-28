@@ -1,3 +1,4 @@
+import { requiredDatabaseUrl } from "@ald/db";
 import { PgBoss } from "pg-boss";
 
 const globalQueue = globalThis as unknown as {
@@ -7,7 +8,7 @@ const globalQueue = globalThis as unknown as {
 
 function queueInstance(): PgBoss {
   if (globalQueue.aldBoss) return globalQueue.aldBoss;
-  const connectionString = process.env.DATABASE_URL;
+  const connectionString = requiredDatabaseUrl();
   if (!connectionString) throw new Error("DATABASE_URL là bắt buộc để gửi background job.");
   globalQueue.aldBoss = new PgBoss({
     connectionString,
