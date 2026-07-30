@@ -148,7 +148,7 @@ Các khoản thưởng tháng đều là VND:
 ```text
 workedDayCount =
   COUNT DISTINCT businessDate
-  WHERE status = PRESENT AND workUnits > 0
+  WHERE workUnits > 0
 
 attendanceBonus =
   level.attendanceBonus nếu workedDayCount >= attendanceRequiredDays, ngược lại 0
@@ -169,9 +169,9 @@ levelBonus =
 
 Điều kiện chuyên cần dùng **ngày làm việc**, không dùng tổng số công:
 
-- ngày `PRESENT` có `workUnits > 0` được tính đúng một ngày;
+- ngày có `workUnits > 0` được tính đúng một ngày, không phụ thuộc trạng thái;
 - 0,5 công hay 1,5 công trong một ngày vẫn chỉ là một ngày;
-- `DRAFT`, `LEAVE`, `ABSENT`, ngày có 0 công và số phút tăng ca không làm tăng số ngày.
+- ngày có 0 công và số phút tăng ca không làm tăng số ngày.
 
 Mặc định cấu hình ban đầu là 26 ngày trở lên, nhưng giá trị thực tế luôn lấy từ
 `MONTHLY_LEVEL_RULES.attendanceRequiredDays` và được snapshot cùng payroll.

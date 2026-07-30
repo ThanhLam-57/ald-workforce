@@ -26,7 +26,15 @@ export type ResourceAction =
   | "branch:create"
   | "branch:update"
   | "staff:create"
+  | "staff:onboard"
+  | "staff-profile:update"
   | "staff:update"
+  | "staff-schedule:read"
+  | "staff-schedule:write"
+  | "staff-identity-document:read"
+  | "staff-identity-document:write"
+  | "staff-bank-qr:read"
+  | "staff-bank-qr:write"
   | "user:create"
   | "user:update"
   | "assignment:create"
@@ -87,6 +95,14 @@ export function can(actor: ActorContext, action: ResourceAction): boolean {
     return (
       action === "branch:read" ||
       action === "staff:read" ||
+      action === "staff:onboard" ||
+      action === "staff-profile:update" ||
+      action === "staff-schedule:read" ||
+      action === "staff-schedule:write" ||
+      action === "staff-identity-document:read" ||
+      action === "staff-identity-document:write" ||
+      action === "staff-bank-qr:read" ||
+      action === "staff-bank-qr:write" ||
       action === "attendance:read" ||
       action === "attendance:write" ||
       action === "attendance:export" ||
@@ -832,13 +848,11 @@ export function calculateSalaryProjection(
   if (standardDays <= 0n) {
     throw new DomainError("VALIDATION_ERROR", "Số ngày công chuẩn phải lớn hơn 0.");
   }
-  const eligible = attendance.filter((row) =>
-    rule.attendancePolicy.eligibleStatuses.includes(row.status),
-  );
+  const workedAttendance = attendance.filter((row) => decimalHundredths(row.workUnits) > 0n);
   let worked =
     rule.attendancePolicy.prorateMode === "WORK_UNITS"
-      ? eligible.reduce((total, row) => total + decimalHundredths(row.workUnits), 0n)
-      : BigInt(eligible.length) * 100n;
+      ? workedAttendance.reduce((total, row) => total + decimalHundredths(row.workUnits), 0n)
+      : BigInt(workedAttendance.length) * 100n;
   const fullThreshold = rule.attendancePolicy.minimumWorkUnitsForFullSalary;
   if (fullThreshold !== null && worked >= decimalHundredths(fullThreshold)) {
     worked = standardDays;
@@ -848,7 +862,7 @@ export function calculateSalaryProjection(
   }
 
   const baseSalary = BigInt(rule.baseSalary);
-  const overtimeMinutes = eligible.reduce(
+  const overtimeMinutes = attendance.reduce(
     (total, row) => total + Math.max(0, row.overtimeMinutes - rule.overtime.eligibleAfterMinutes),
     0,
   );
@@ -976,7 +990,7 @@ export type PayrollAttendanceInput = Readonly<{
 export function countWorkedDays(attendance: readonly PayrollAttendanceInput[]): number {
   return new Set(
     attendance
-      .filter((row) => row.status === "PRESENT" && decimalHundredths(row.workUnits) > 0n)
+      .filter((row) => decimalHundredths(row.workUnits) > 0n)
       .map((row) => row.businessDate),
   ).size;
 }
@@ -986,6 +1000,13 @@ export type PayrollAdjustmentInput = Readonly<{
   type: "OTHER_BONUS" | "ADVANCE" | "CORRECTION";
   amount: string;
   reason: string;
+}>;
+
+export type PayrollMachineCodeInterval = Readonly<{
+  assignmentId: string;
+  attendanceMachineCode: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
 }>;
 
 export type PayrollLine = Readonly<{
@@ -1001,6 +1022,12 @@ export type PayrollLine = Readonly<{
 
 export type PayrollCalculationInput = Readonly<{
   staffId: string;
+  staffIdentity?: Readonly<{
+    staffCode: string;
+    fullName: string;
+    streamingAlias: string | null;
+    attendanceMachineCodeIntervals: readonly PayrollMachineCodeInterval[];
+  }>;
   baseSalaryAmount: string;
   sourceBaseSalaryAmount?: string;
   employment?: Readonly<{
@@ -1009,6 +1036,7 @@ export type PayrollCalculationInput = Readonly<{
     category: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
   }>;
   period: Readonly<{
+    branchId?: string;
     month: string;
     from: string;
     toExclusive: string;
@@ -1210,13 +1238,11 @@ function calculateEmploymentSalaryProjection(
       : category === "OFFICIAL"
         ? "LEGACY_OFFICIAL_WITHOUT_OFFICIAL_DATE"
         : "NON_PROBATION_CATEGORY";
-  const eligible = attendance.filter((row) =>
-    rule.attendancePolicy.eligibleStatuses.includes(row.status),
-  );
+  const workedAttendance = attendance.filter((row) => decimalHundredths(row.workUnits) > 0n);
   let probationWorkUnits = 0n;
   let officialWorkUnits = 0n;
   let excludedBeforeJoinWorkUnits = 0n;
-  for (const row of eligible) {
+  for (const row of workedAttendance) {
     const workUnits =
       rule.attendancePolicy.prorateMode === "WORK_UNITS" ? decimalHundredths(row.workUnits) : 100n;
     if (joinedDate && row.businessDate < joinedDate) {
@@ -1261,7 +1287,7 @@ function calculateEmploymentSalaryProjection(
   const officialWeight = officialWorkUnits * 10_000n;
   const baseNumerator = baseSalary * (probationWeight + officialWeight);
   const baseDenominator = standardDays * 10_000n;
-  const overtimeMinutes = eligible.reduce(
+  const overtimeMinutes = attendance.reduce(
     (total, row) => total + Math.max(0, row.overtimeMinutes - rule.overtime.eligibleAfterMinutes),
     0,
   );
@@ -1870,7 +1896,6 @@ export function calculatePayroll(input: PayrollCalculationInput): PayrollCalcula
     selectedRuleVersionIds,
     anomalyFlags: [
       ...(attendance.length === 0 ? ["NO_ATTENDANCE"] : []),
-      ...(attendance.some((row) => row.status === "DRAFT") ? ["DRAFT_ATTENDANCE"] : []),
       ...(salary.excludedBeforeJoinWorkUnits !== "0" ? ["WORK_BEFORE_JOIN_DATE"] : []),
       ...(input.monthlyLevelRule === null ? ["MISSING_MONTHLY_LEVEL_RULE"] : []),
       ...(totalIncome < 0n ? ["NEGATIVE_TOTAL"] : []),

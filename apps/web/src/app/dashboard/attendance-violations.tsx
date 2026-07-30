@@ -8,6 +8,8 @@ import type {
 } from "@ald/contracts";
 import { useState, type ChangeEvent, type FormEvent } from "react";
 
+import { activeViolationBadges } from "./attendance-violations-view";
+
 type ApiPayload = Readonly<{
   data?: unknown;
   error?: Readonly<{ message?: unknown }>;
@@ -86,7 +88,6 @@ export function AttendanceViolations({
   businessDate,
   violations,
   activePenaltyTotal,
-  reason,
   canOverrideAmount,
   onChanged,
 }: Readonly<{
@@ -94,7 +95,6 @@ export function AttendanceViolations({
   businessDate: string;
   violations: readonly ViolationDto[];
   activePenaltyTotal: string;
-  reason: string;
   canOverrideAmount: boolean;
   onChanged: () => void;
 }>) {
@@ -111,9 +111,31 @@ export function AttendanceViolations({
   const [panelOpen, setPanelOpen] = useState(false);
 
   const selectedItem = items.find((item) => item.id === selectedItemId);
-  const activeViolationCount = violations.filter(
-    (violation) => violation.status === "ACTIVE",
-  ).length;
+  const activeViolations = activeViolationBadges(violations);
+  const activeViolationCount = activeViolations.length;
+
+  function resetViolationForm() {
+    setEditing(false);
+    setItems([]);
+    setSelectedItemId("");
+    setDetail("");
+    setNote("");
+    setAmountOverride("");
+    setOverrideReason("");
+    setPreview(null);
+  }
+
+  function openPanel() {
+    resetViolationForm();
+    setMessage(null);
+    setPanelOpen(true);
+  }
+
+  function closePanel() {
+    resetViolationForm();
+    setMessage(null);
+    setPanelOpen(false);
+  }
 
   async function loadPreview(penaltyItemId: string) {
     if (!attendanceId || !penaltyItemId) {
@@ -174,10 +196,6 @@ export function AttendanceViolations({
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!attendanceId || !selectedItemId) return;
-    if (!reason.trim()) {
-      setMessage("Nhập lý do thay đổi attendance trước khi thêm lỗi.");
-      return;
-    }
     setPending(true);
     const response = await fetch("/api/violations", {
       method: "POST",
@@ -190,7 +208,6 @@ export function AttendanceViolations({
         note: note || null,
         amountOverride: amountOverride || null,
         overrideReason: overrideReason || null,
-        reason,
       }),
     });
     const payload = (await response.json()) as ApiPayload;
@@ -199,23 +216,18 @@ export function AttendanceViolations({
       setMessage(errorMessage(payload));
       return;
     }
-    setEditing(false);
+    resetViolationForm();
     setMessage("Đã thêm lỗi và snapshot mức phạt.");
-    setNote("");
     onChanged();
   }
 
   async function cancel(violation: ViolationDto) {
-    if (!reason.trim()) {
-      setMessage("Nhập lý do trước khi hủy lỗi.");
-      return;
-    }
     setPending(true);
     const response = await fetch(`/api/violations/${violation.id}`, {
       method: "DELETE",
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version: violation.version, reason }),
+      body: JSON.stringify({ version: violation.version }),
     });
     const payload = (await response.json()) as ApiPayload;
     setPending(false);
@@ -231,10 +243,6 @@ export function AttendanceViolations({
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    if (!reason.trim()) {
-      setMessage("Nhập lý do trước khi upload evidence.");
-      return;
-    }
     setPending(true);
     try {
       const checksumSha256 = await sha256Base64(file);
@@ -248,7 +256,6 @@ export function AttendanceViolations({
           mimeType: file.type,
           sizeBytes: file.size,
           checksumSha256,
-          reason,
         }),
       });
       const presignPayload = (await presignResponse.json()) as ApiPayload;
@@ -290,17 +297,21 @@ export function AttendanceViolations({
   return (
     <>
       <button
-        aria-label={`Mở lỗi và evidence ngày ${businessDate}`}
-        className={`inline-flex h-9 w-9 items-center justify-center rounded-lg border transition ${
+        aria-label={`Mở lỗi và evidence ngày ${businessDate}, ${activeViolationCount} lỗi hiện hành`}
+        className={`inline-flex min-h-10 w-full min-w-0 items-start gap-2 rounded-lg border p-2 text-left transition ${
           activeViolationCount > 0
             ? "border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100"
             : "border-slate-300 bg-white text-slate-500 hover:bg-slate-100"
         }`}
-        onClick={() => setPanelOpen(true)}
-        title={`Lỗi & evidence ngày ${businessDate}`}
+        onClick={openPanel}
+        title={
+          activeViolationCount > 0
+            ? activeViolations.map((violation) => violation.itemName).join(", ")
+            : `Thêm lỗi ngày ${businessDate}`
+        }
         type="button"
       >
-        <svg aria-hidden="true" className="h-5 w-5" fill="none" viewBox="0 0 24 24">
+        <svg aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24">
           <path
             d="M12 9v4m0 4h.01M10.3 4.5 2.6 18a2 2 0 0 0 1.74 3h15.32a2 2 0 0 0 1.74-3L13.7 4.5a2 2 0 0 0-3.4 0Z"
             stroke="currentColor"
@@ -309,6 +320,22 @@ export function AttendanceViolations({
             strokeWidth="1.8"
           />
         </svg>
+        {activeViolationCount > 0 ? (
+          <span className="grid min-w-0 flex-1 gap-1">
+            {activeViolations.map((violation) => (
+              <span
+                className="block max-w-full whitespace-normal break-words rounded-md px-2 py-1 text-xs font-medium leading-4 text-white [overflow-wrap:anywhere]"
+                key={violation.id}
+                style={{ backgroundColor: violation.displayColor }}
+                title={violation.itemName}
+              >
+                {violation.itemName}
+              </span>
+            ))}
+          </span>
+        ) : (
+          <span className="min-w-0 text-xs leading-5">Thêm lỗi</span>
+        )}
       </button>
 
       {panelOpen ? (
@@ -333,7 +360,7 @@ export function AttendanceViolations({
               </div>
               <button
                 className="shrink-0 rounded-lg border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50"
-                onClick={() => setPanelOpen(false)}
+                onClick={closePanel}
                 type="button"
               >
                 Đóng

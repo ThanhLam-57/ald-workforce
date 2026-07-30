@@ -99,7 +99,6 @@ describe("import idempotency and branch scope", () => {
         sizeBytes: 128,
         checksumSha256,
         branchId: null,
-        reason: "Import idempotency test.",
       },
       metadata,
     );
@@ -113,7 +112,6 @@ describe("import idempotency and branch scope", () => {
         sizeBytes: 128,
         checksumSha256,
         branchId: null,
-        reason: "Import idempotency test repeated.",
       },
       metadata,
     );
@@ -140,7 +138,6 @@ describe("import idempotency and branch scope", () => {
           sizeBytes: 128,
           checksumSha256: `${"B".repeat(43)}=`,
           branchId: branchBId,
-          reason: "Cross branch test.",
         },
         metadata,
       ),
@@ -159,7 +156,6 @@ describe("import idempotency and branch scope", () => {
         sizeBytes: 128,
         checksumSha256,
         branchId: branchBId,
-        reason: "Cross-branch duplicate fixture.",
       },
       metadata,
     );
@@ -174,7 +170,6 @@ describe("import idempotency and branch scope", () => {
           sizeBytes: 128,
           checksumSha256,
           branchId: branchAId,
-          reason: "Cross-branch duplicate disclosure test.",
         },
         metadata,
       ),
@@ -212,7 +207,6 @@ describe("import idempotency and branch scope", () => {
           sizeBytes: 128,
           checksumSha256: createHash("sha256").update(staffCode).digest("base64"),
           branchId: branchAId,
-          reason: "Staff branch scope test.",
         },
         metadata,
       ),
@@ -242,7 +236,6 @@ describe("import idempotency and branch scope", () => {
         sizeBytes: body.length,
         checksumSha256,
         branchId: null,
-        reason: "CSV integration import.",
       },
       metadata,
     );
@@ -265,7 +258,7 @@ describe("import idempotency and branch scope", () => {
     const committed = await commitImport(
       gm,
       created.job.id,
-      { confirm: true, reason: "Commit CSV integration import." },
+      { confirm: true },
       metadata,
     );
     expect(committed).toMatchObject({ status: "SUCCEEDED", committedRows: 1 });

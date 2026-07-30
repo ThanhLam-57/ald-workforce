@@ -2,13 +2,15 @@ export type AutomaticPenaltyCondition =
   | Readonly<{ type: "MANUAL" }>
   | Readonly<{
       type: "CHECK_IN_LATE";
-      scheduledStartMinutes: number;
+      thresholdSource?: "STAFF_SHIFT" | "RULE_FIXED";
+      scheduledStartMinutes?: number;
       graceMinutes: number;
       branchId: string | null;
     }>
   | Readonly<{
       type: "LIVE_DURATION_SHORT";
-      requiredLiveMinutes: number;
+      thresholdSource?: "STAFF_SHIFT" | "RULE_FIXED";
+      requiredLiveMinutes?: number;
       graceMinutes: number;
       branchId: string | null;
     }>;
@@ -90,11 +92,22 @@ export function evaluateAutomaticPenalty(
   attendance: AutomaticPenaltyAttendance,
   timeZone = "Asia/Ho_Chi_Minh",
 ): AutomaticPenaltyEvaluation {
+  const configuredMinutes =
+    condition.type === "CHECK_IN_LATE"
+      ? condition.scheduledStartMinutes
+      : condition.requiredLiveMinutes;
+  if (configuredMinutes === undefined) {
+    return {
+      status: "INSUFFICIENT_DATA",
+      triggerType: condition.type,
+      actualMinutes: null,
+      configuredMinutes: 0,
+      graceMinutes: condition.graceMinutes,
+      acceptedThresholdMinutes: 0,
+      message: "Chưa có ca làm hiệu lực để xác định ngưỡng tự động.",
+    };
+  }
   if (attendance.status !== "PRESENT") {
-    const configuredMinutes =
-      condition.type === "CHECK_IN_LATE"
-        ? condition.scheduledStartMinutes
-        : condition.requiredLiveMinutes;
     return {
       status: "PASS",
       triggerType: condition.type,
@@ -110,13 +123,13 @@ export function evaluateAutomaticPenalty(
   }
 
   if (condition.type === "CHECK_IN_LATE") {
-    const acceptedThresholdMinutes = condition.scheduledStartMinutes + condition.graceMinutes;
+    const acceptedThresholdMinutes = configuredMinutes + condition.graceMinutes;
     if (!attendance.checkInAt) {
       return {
         status: "INSUFFICIENT_DATA",
         triggerType: condition.type,
         actualMinutes: null,
-        configuredMinutes: condition.scheduledStartMinutes,
+        configuredMinutes,
         graceMinutes: condition.graceMinutes,
         acceptedThresholdMinutes,
         message: "Chưa có giờ check-in để đánh giá đi muộn.",
@@ -128,7 +141,7 @@ export function evaluateAutomaticPenalty(
         status: "INSUFFICIENT_DATA",
         triggerType: condition.type,
         actualMinutes: null,
-        configuredMinutes: condition.scheduledStartMinutes,
+        configuredMinutes,
         graceMinutes: condition.graceMinutes,
         acceptedThresholdMinutes,
         message: "Giờ check-in không hợp lệ.",
@@ -144,7 +157,7 @@ export function evaluateAutomaticPenalty(
       status: isViolation ? "VIOLATION" : "PASS",
       triggerType: condition.type,
       actualMinutes,
-      configuredMinutes: condition.scheduledStartMinutes,
+      configuredMinutes,
       graceMinutes: condition.graceMinutes,
       acceptedThresholdMinutes,
       message: isViolation
@@ -155,7 +168,7 @@ export function evaluateAutomaticPenalty(
 
   const acceptedThresholdMinutes = Math.max(
     0,
-    condition.requiredLiveMinutes - condition.graceMinutes,
+    configuredMinutes - condition.graceMinutes,
   );
   const actualMinutes = attendance.actualLiveMinutes;
   const isViolation = actualMinutes < acceptedThresholdMinutes;
@@ -163,7 +176,7 @@ export function evaluateAutomaticPenalty(
     status: isViolation ? "VIOLATION" : "PASS",
     triggerType: condition.type,
     actualMinutes,
-    configuredMinutes: condition.requiredLiveMinutes,
+    configuredMinutes,
     graceMinutes: condition.graceMinutes,
     acceptedThresholdMinutes,
     message: isViolation

@@ -15,6 +15,11 @@ describe("Training Manager permission matrix", () => {
   it.each<ResourceAction>([
     "branch:read",
     "staff:read",
+    "staff:onboard",
+    "staff-schedule:read",
+    "staff-schedule:write",
+    "staff-identity-document:read",
+    "staff-identity-document:write",
     "attendance:read",
     "attendance:write",
     "attendance:export",

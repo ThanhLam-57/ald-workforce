@@ -11,7 +11,6 @@ describe("password policy", () => {
         password: "alllowercase123",
         name: "User",
         role: "LIVE_EMPLOYEE",
-        reason: "Security unit test",
       }).success,
     ).toBe(false);
   });

@@ -235,3 +235,32 @@
   không có migration step. Đổi lại image web lớn hơn standalone-only image, nhưng loại bỏ
   race migration giữa services.
 - Railway Bucket là private storage; signed URL vẫn phải qua application authorization.
+
+## ADR-021 — Onboarding theo cơ sở, ca hiệu lực và CCCD riêng tư
+
+- Trạng thái: Accepted.
+- Training Manager được tạo hồ sơ nhân viên Live chỉ trong `activeBranchIds`; API
+  chuyên biệt không nhận lương cơ bản, role, tài khoản hoặc `companyId`.
+- Ca làm là dữ liệu có hiệu lực `[effectiveFrom, effectiveTo)`, chống overlap bằng
+  constraint PostgreSQL và dùng số phút nguyên. Thay ca tạo khoảng mới, không ghi
+  đè lịch sử đã dùng để tính lỗi.
+- Rule tự động chỉ lưu nguồn ngưỡng và phút du di. Khi dùng `STAFF_SHIFT`, service
+  resolve ca theo nhân viên/branch/ngày rồi snapshot ca vào violation; thiếu ca thì
+  không phạt và trả cảnh báo có cấu trúc.
+- Hai mặt CCCD dùng bảng riêng, private object storage và signed URL ngắn hạn sau
+  authorization. DTO không trả `objectKey`, checksum hoặc URL lâu dài; lượt xem
+  được ghi audit.
+- Không tạo tài khoản đăng nhập khi manager onboard nhân viên và không thêm
+  production dependency.
+
+## ADR-022 — Lý do audit cho thao tác thường được sinh tại server
+
+- Trạng thái: Accepted.
+- Form thêm, sửa, lưu, import, export và hủy thông thường không yêu cầu người dùng nhập
+  một ô “Lý do thay đổi”. Client không dùng nội dung tự do làm nguồn quyết định cho audit.
+- Service sinh mô tả có cấu trúc bằng `systemAuditReason(action)`. Audit vẫn bắt buộc giữ
+  actor, company/branch scope, action, entity, before/after, requestId, IP và user agent.
+- Trường mang ý nghĩa nghiệp vụ thật vẫn được giữ, ví dụ chi tiết lỗi, ghi chú KPI,
+  `overrideReason` khi Tổng quản lý đổi mức tiền phạt và lý do của khoản điều chỉnh lương.
+- Thao tác nhạy cảm vẫn cần xác nhận rõ hậu quả và giữ authorization, optimistic lock,
+  soft-delete/versioning; việc bỏ ô nhập tự do không làm yếu các kiểm soát này.

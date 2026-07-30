@@ -30,7 +30,7 @@ import {
   createEvidenceViewUrl,
   verifyEvidenceObject,
 } from "./object-storage";
-import { appendSecureAudit } from "./audit-service";
+import { appendSecureAudit, systemAuditReason } from "./audit-service";
 import type { RequestMetadata } from "./request-metadata";
 import { activateDueSimpleRules } from "./simple-rule-service";
 
@@ -487,7 +487,9 @@ export async function createViolation(
       action: hasOverride ? "violation.create_with_override" : "violation.create",
       entityType: "Violation",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason(
+        hasOverride ? "VIOLATION_CREATED_WITH_AMOUNT_OVERRIDE" : "VIOLATION_CREATED",
+      ),
       after: violationAuditShape(created),
       metadata,
     });
@@ -496,6 +498,21 @@ export async function createViolation(
 }
 
 type AutomaticCondition = Exclude<AutomaticPenaltyConditionDto, Readonly<{ type: "MANUAL" }>>;
+type ResolvedAutomaticCondition =
+  | Readonly<{
+      type: "CHECK_IN_LATE";
+      thresholdSource: "STAFF_SHIFT" | "RULE_FIXED";
+      scheduledStartMinutes: number;
+      graceMinutes: number;
+      branchId: string | null;
+    }>
+  | Readonly<{
+      type: "LIVE_DURATION_SHORT";
+      thresholdSource: "STAFF_SHIFT" | "RULE_FIXED";
+      requiredLiveMinutes: number;
+      graceMinutes: number;
+      branchId: string | null;
+    }>;
 
 const automaticPenaltyItemSelect = {
   id: true,
@@ -543,7 +560,7 @@ function comparableAutomaticSnapshot(value: Prisma.JsonValue | null): string {
 }
 
 function automaticDetail(
-  condition: AutomaticCondition,
+  condition: ResolvedAutomaticCondition,
   actualMinutes: number,
   acceptedThresholdMinutes: number,
 ): string {
@@ -635,6 +652,36 @@ export async function reconcileAutomaticViolationsInTransaction(
     const chosen = branchSpecific ?? companyWide;
     return chosen ? [chosen] : [];
   });
+  const needsStaffSchedule = selected.some(
+    ({ condition }) => condition.thresholdSource === "STAFF_SHIFT",
+  );
+  const staffSchedule = needsStaffSchedule
+    ? await tx.staffWorkSchedule.findFirst({
+        where: {
+          companyId: actor.companyId,
+          branchId: attendance.branchId,
+          staffId: attendance.staffId,
+          archivedAt: null,
+          effectiveFrom: { lte: attendance.businessDate },
+          OR: [
+            { effectiveTo: null },
+            { effectiveTo: { gt: attendance.businessDate } },
+          ],
+        },
+        orderBy: { effectiveFrom: "desc" },
+        select: {
+          id: true,
+          version: true,
+          name: true,
+          scheduledStartMinutes: true,
+          scheduledEndMinutes: true,
+          spansNextDay: true,
+          requiredLiveMinutes: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+        },
+      })
+    : null;
 
   const existing = await tx.violation.findMany({
     where: {
@@ -654,6 +701,18 @@ export async function reconcileAutomaticViolationsInTransaction(
   let reactivatedCount = 0;
   let cancelledCount = 0;
   let unchangedCount = 0;
+  const businessDateText = attendance.businessDate.toISOString().slice(0, 10);
+  const warnings: AutomaticViolationReconcileSummaryDto["warnings"] =
+    needsStaffSchedule && !staffSchedule
+      ? [
+          {
+            businessDate: businessDateText,
+            code: "MISSING_STAFF_SHIFT",
+            message:
+              "Nhân viên chưa có ca làm hiệu lực trong ngày này nên chưa thể tính lỗi tự động theo giờ.",
+          },
+        ]
+      : [];
 
   const cancelAutomaticViolation = async (
     violation: ViolationRecord,
@@ -691,8 +750,54 @@ export async function reconcileAutomaticViolationsInTransaction(
     const key = automaticViolationKey(item, condition);
     selectedKeys.add(key);
     const current = existingByKey.get(key);
+    const thresholdSource = condition.thresholdSource ?? "RULE_FIXED";
+    const resolvedCondition: ResolvedAutomaticCondition | null =
+      condition.type === "CHECK_IN_LATE"
+        ? thresholdSource === "STAFF_SHIFT"
+          ? staffSchedule
+            ? {
+                ...condition,
+                thresholdSource,
+                scheduledStartMinutes: staffSchedule.scheduledStartMinutes,
+              }
+            : null
+          : condition.scheduledStartMinutes === undefined
+            ? null
+            : {
+                ...condition,
+                thresholdSource,
+                scheduledStartMinutes: condition.scheduledStartMinutes,
+              }
+        : thresholdSource === "STAFF_SHIFT"
+          ? staffSchedule
+            ? {
+                ...condition,
+                thresholdSource,
+                requiredLiveMinutes: staffSchedule.requiredLiveMinutes,
+              }
+            : null
+          : condition.requiredLiveMinutes === undefined
+            ? null
+            : {
+                ...condition,
+                thresholdSource,
+                requiredLiveMinutes: condition.requiredLiveMinutes,
+              };
+    if (!resolvedCondition) {
+      if (current) {
+        await cancelAutomaticViolation(
+          current,
+          thresholdSource === "STAFF_SHIFT"
+            ? "Nhân viên chưa có ca làm hiệu lực trong ngày này."
+            : "Rule tự động chưa có ngưỡng thời gian hợp lệ.",
+        );
+      } else {
+        unchangedCount += 1;
+      }
+      continue;
+    }
     const evaluation = evaluateAutomaticPenalty(
-      condition,
+      resolvedCondition,
       {
         status: attendance.status,
         businessDate: attendance.businessDate.toISOString().slice(0, 10),
@@ -715,15 +820,47 @@ export async function reconcileAutomaticViolationsInTransaction(
       continue;
     }
 
-    const businessDate = attendance.businessDate.toISOString().slice(0, 10);
+    const businessDate = businessDateText;
     const detail = automaticDetail(
-      condition,
+      resolvedCondition,
       evaluation.actualMinutes,
       evaluation.acceptedThresholdMinutes,
     );
     const snapshotBase = {
       triggerType: condition.type,
-      condition,
+      condition: resolvedCondition,
+      scheduleId:
+        thresholdSource === "STAFF_SHIFT" && staffSchedule
+          ? staffSchedule.id
+          : null,
+      scheduleVersion:
+        thresholdSource === "STAFF_SHIFT" && staffSchedule
+          ? staffSchedule.version
+          : null,
+      scheduledStartMinutes:
+        resolvedCondition.type === "CHECK_IN_LATE"
+          ? resolvedCondition.scheduledStartMinutes
+          : null,
+      requiredLiveMinutes:
+        resolvedCondition.type === "LIVE_DURATION_SHORT"
+          ? resolvedCondition.requiredLiveMinutes
+          : null,
+      graceMinutes: resolvedCondition.graceMinutes,
+      schedule:
+        thresholdSource === "STAFF_SHIFT" && staffSchedule
+          ? {
+              id: staffSchedule.id,
+              version: staffSchedule.version,
+              name: staffSchedule.name,
+              scheduledStartMinutes: staffSchedule.scheduledStartMinutes,
+              scheduledEndMinutes: staffSchedule.scheduledEndMinutes,
+              spansNextDay: staffSchedule.spansNextDay,
+              requiredLiveMinutes: staffSchedule.requiredLiveMinutes,
+              effectiveFrom: staffSchedule.effectiveFrom.toISOString().slice(0, 10),
+              effectiveTo:
+                staffSchedule.effectiveTo?.toISOString().slice(0, 10) ?? null,
+            }
+          : null,
       actualMinutes: evaluation.actualMinutes,
       acceptedThresholdMinutes: evaluation.acceptedThresholdMinutes,
       businessDate,
@@ -900,6 +1037,8 @@ export async function reconcileAutomaticViolationsInTransaction(
     reactivatedCount,
     cancelledCount,
     unchangedCount,
+    missingScheduleCount: warnings.length,
+    warnings,
     attendanceActivePenaltyTotal: (attendanceTotal._sum.amount ?? 0n).toString(),
     staffMonthActivePenaltyTotal: (staffMonthTotal._sum.amount ?? 0n).toString(),
   };
@@ -937,7 +1076,7 @@ export async function cancelViolation(
         status: "CANCELLED",
         cancelledByUserId: actor.userId,
         cancelledAt: new Date(),
-        cancellationReason: input.reason,
+        cancellationReason: systemAuditReason("VIOLATION_CANCELLED"),
         version: { increment: 1 },
       },
     });
@@ -953,7 +1092,7 @@ export async function cancelViolation(
       action: "violation.cancel",
       entityType: "Violation",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason("VIOLATION_CANCELLED"),
       before: violationAuditShape(before),
       after: violationAuditShape(after),
       metadata,
@@ -1006,7 +1145,7 @@ export async function presignEvidenceUpload(
       action: "evidence.presign_upload",
       entityType: "EvidenceObject",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason("EVIDENCE_UPLOAD_REQUESTED"),
       after: {
         violationId: created.violationId,
         originalFileName: created.originalFileName,

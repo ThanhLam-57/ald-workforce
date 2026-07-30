@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DomainError,
   calculatePayroll,
+  calculateSalaryProjection,
   countWorkedDays,
   daysInPayrollMonth,
   standardPayableDays,
@@ -336,7 +337,7 @@ describe("production payroll calculator", () => {
     expect(notEligible.components.attendanceBonus).toBe("0");
   });
 
-  it("counts each valid PRESENT date once and ignores leave, absent, draft and overtime", () => {
+  it("counts each date with positive work units regardless of attendance status", () => {
     const row = (
       attendanceId: string,
       businessDate: string,
@@ -363,7 +364,24 @@ describe("production payroll calculator", () => {
         row("absent", "2026-07-04", "ABSENT", "1"),
         row("draft", "2026-07-05", "DRAFT", "1"),
       ]),
-    ).toBe(1);
+    ).toBe(4);
+  });
+
+  it("calculates salary and overtime without using attendance status", () => {
+    const result = calculateSalaryProjection(
+      salaryRule.configuration,
+      [
+        { status: "DRAFT", workUnits: "1", overtimeMinutes: 60 },
+        { status: "ABSENT", workUnits: "1", overtimeMinutes: 0 },
+        { status: "LEAVE", workUnits: "0", overtimeMinutes: 30 },
+      ],
+    );
+
+    expect(result).toEqual({
+      baseSalaryAmount: "2000000",
+      overtimeAmount: "281250",
+      totalAmount: "2281250",
+    });
   });
 
   it("is deterministic and independent from source ordering", () => {

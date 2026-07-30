@@ -53,7 +53,6 @@ test("GM xem company intelligence, export và tạo draft KPI quản lý", async
       data: {
         month,
         managerStaffId: candidates.data[0]!.id,
-        reason: "E2E tạo đánh giá KPI tháng",
       },
     });
     expect(createResponse.ok()).toBe(true);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { automaticPenaltyConditionSchema } from "@ald/contracts";
 import { prisma } from "@ald/db";
 import type { ActorContext } from "@ald/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -155,6 +156,7 @@ afterAll(async () => {
     await tx.ruleSet.deleteMany({ where: { companyId } });
     await tx.liveDailyMetric.deleteMany({ where: { companyId } });
     await tx.attendanceDay.deleteMany({ where: { companyId } });
+    await tx.staffWorkSchedule.deleteMany({ where: { companyId } });
     await tx.$executeRawUnsafe("SET LOCAL ald.audit_cleanup = 'on'");
     await tx.auditLog.deleteMany({ where: { companyId } });
     await tx.branchAssignment.deleteMany({ where: { companyId } });
@@ -256,7 +258,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         staffId: liveStaffId,
         businessDate: "2026-07-15",
         revenueAmount: "17000",
-        reason: "Kiểm tra tự động tính thưởng xu",
       },
       metadata,
     );
@@ -310,7 +311,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         {
           staffId: liveStaffId,
           businessDate: `2026-07-${String(index + 20).padStart(2, "0")}`,
-          reason: "Kiểm tra thứ tự vi phạm",
         },
         metadata,
       );
@@ -322,7 +322,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
           attendanceId: attendance.id,
           penaltyItemId,
           detail: "Trang phục chưa đúng quy định.",
-          reason: "Ghi nhận vi phạm",
         },
         metadata,
       );
@@ -443,7 +442,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         staffId: liveStaffId,
         businessDate: "2026-05-31",
         revenueAmount: "12000",
-        reason: "Attendance trước ngày backdate",
       },
       metadata,
     );
@@ -453,7 +451,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         staffId: liveStaffId,
         businessDate: "2026-06-02",
         revenueAmount: "12000",
-        reason: "Attendance sau ngày backdate",
       },
       metadata,
     );
@@ -528,7 +525,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
       {
         staffId: liveStaffId,
         businessDate: "2026-08-01",
-        reason: "Attendance dùng penalty mới",
       },
       metadata,
     );
@@ -547,7 +543,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         attendanceId: attendance.id,
         penaltyItemId: item.id,
         detail: "Violation mới sau khi backdate.",
-        reason: "Kiểm tra snapshot rule mới",
       },
       metadata,
     );
@@ -657,7 +652,7 @@ describe("quy định thưởng/phạt đơn giản", () => {
             isActive: true,
             automaticCondition: {
               type: "CHECK_IN_LATE",
-              scheduledStartMinutes: 540,
+              thresholdSource: "STAFF_SHIFT",
               graceMinutes: 15,
               branchId: null,
             },
@@ -672,7 +667,7 @@ describe("quy định thưởng/phạt đơn giản", () => {
             isActive: true,
             automaticCondition: {
               type: "CHECK_IN_LATE",
-              scheduledStartMinutes: 540,
+              thresholdSource: "STAFF_SHIFT",
               graceMinutes: 15,
               branchId,
             },
@@ -687,7 +682,7 @@ describe("quy định thưởng/phạt đơn giản", () => {
             isActive: true,
             automaticCondition: {
               type: "LIVE_DURATION_SHORT",
-              requiredLiveMinutes: 360,
+              thresholdSource: "STAFF_SHIFT",
               graceMinutes: 15,
               branchId: null,
             },
@@ -714,6 +709,71 @@ describe("quy định thưởng/phạt đơn giản", () => {
       },
       select: { id: true },
     });
+    expect(
+      applied.items.find((item) => item.name === "Đi muộn cơ sở A")
+        ?.automaticCondition,
+    ).toMatchObject({
+      type: "CHECK_IN_LATE",
+      thresholdSource: "STAFF_SHIFT",
+    });
+    const storedAutomaticItems = await prisma.penaltyItem.findMany({
+      where: {
+        companyId,
+        name: { in: ["Đi muộn cơ sở A", "Thiếu Live"] },
+        isActive: true,
+        archivedAt: null,
+      },
+      select: { metadata: true },
+    });
+    expect(storedAutomaticItems).toHaveLength(2);
+    expect(
+      storedAutomaticItems.map((item) => {
+        const metadataValue = item.metadata as Record<string, unknown>;
+        const parsed = automaticPenaltyConditionSchema.safeParse(
+          metadataValue.automaticCondition,
+        );
+        return parsed.success
+          ? { success: true }
+          : {
+              success: false,
+              value: metadataValue.automaticCondition,
+              issues: parsed.error.issues,
+            };
+      }),
+    ).toEqual([{ success: true }, { success: true }]);
+    const missingSchedule = await createAttendance(
+      manager,
+      {
+        staffId: liveStaffId,
+        businessDate: "2026-07-28",
+        status: "PRESENT",
+        checkInAt: "2026-07-28T09:16:00+07:00",
+        actualLiveMinutes: 344,
+      },
+      metadata,
+    );
+    expect(missingSchedule.automaticViolationSummary).toMatchObject({
+      createdCount: 0,
+      missingScheduleCount: 1,
+    });
+    expect(missingSchedule.automaticViolationSummary?.warnings[0]).toMatchObject({
+      businessDate: "2026-07-28",
+      code: "MISSING_STAFF_SHIFT",
+    });
+    await prisma.staffWorkSchedule.create({
+      data: {
+        companyId,
+        branchId,
+        staffId: liveStaffId,
+        name: "Ca Live chuẩn",
+        scheduledStartMinutes: 540,
+        scheduledEndMinutes: 900,
+        spansNextDay: false,
+        requiredLiveMinutes: 360,
+        effectiveFrom: new Date("2026-07-29T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
     const created = await createAttendance(
       manager,
       {
@@ -722,10 +782,13 @@ describe("quy định thưởng/phạt đơn giản", () => {
         status: "PRESENT",
         checkInAt: "2026-07-29T09:16:00+07:00",
         actualLiveMinutes: 344,
-        reason: "Kiểm tra tự động ghi lỗi",
       },
       metadata,
     );
+    expect(created.automaticViolationSummary).toMatchObject({
+      createdCount: 2,
+      missingScheduleCount: 0,
+    });
     const automaticAtStart = await prisma.violation.findMany({
       where: { companyId, attendanceId: created.id, origin: "AUTOMATIC" },
       orderBy: { itemName: "asc" },
@@ -746,7 +809,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         attendanceId: created.id,
         penaltyItemId: manualItem.id,
         detail: "Lỗi nhập thủ công.",
-        reason: "Thêm lỗi thủ công để kiểm tra",
       },
       metadata,
     );
@@ -757,7 +819,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         version: created.version,
         checkInAt: "2026-07-29T09:15:00+07:00",
         actualLiveMinutes: 345,
-        reason: "Sửa dữ liệu về đúng ngưỡng",
       },
       metadata,
     );
@@ -780,7 +841,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         version: corrected.version,
         checkInAt: "2026-07-29T09:16:00+07:00",
         actualLiveMinutes: 344,
-        reason: "Đưa dữ liệu về trạng thái vi phạm",
       },
       metadata,
     );
@@ -791,7 +851,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
       {
         version: invalidAgain.version,
         note: "Lưu lại không tạo lỗi trùng",
-        reason: "Kiểm tra idempotency",
       },
       metadata,
     );
@@ -811,7 +870,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
         staffId: liveStaffId,
         businessDate: "2026-07-30",
         status: "DRAFT",
-        reason: "Chuẩn bị kiểm tra hai request lưu đồng thời",
       },
       metadata,
     );
@@ -824,7 +882,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
           status: "PRESENT",
           checkInAt: "2026-07-30T09:16:00+07:00",
           actualLiveMinutes: 344,
-          reason: "Request lưu đồng thời thứ nhất",
         },
         metadata,
       ),
@@ -836,7 +893,6 @@ describe("quy định thưởng/phạt đơn giản", () => {
           status: "PRESENT",
           checkInAt: "2026-07-30T09:16:00+07:00",
           actualLiveMinutes: 344,
-          reason: "Request lưu đồng thời thứ hai",
         },
         metadata,
       ),
@@ -859,12 +915,15 @@ describe("quy định thưởng/phạt đơn giản", () => {
         staffId: liveStaffId,
         month: "2026-07",
         dryRun: true,
-        reason: "Xem trước tính lại lỗi tháng",
       },
       metadata,
     );
     expect(dryRun.createdCount).toBe(0);
     expect(dryRun.cancelledCount).toBe(0);
+    expect(dryRun.missingScheduleCount).toBeGreaterThanOrEqual(1);
+    expect(dryRun.warnings.map((warning) => warning.businessDate)).toContain(
+      "2026-07-28",
+    );
   });
 
   it("rule VERSIONED vẫn immutable và vẫn chặn overlap", async () => {

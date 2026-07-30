@@ -44,7 +44,6 @@ function KpiEditor({
     })),
   );
   const [notes, setNotes] = useState(evaluation.notes ?? "");
-  const [reason, setReason] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -63,11 +62,9 @@ function KpiEditor({
             note: line.note || null,
             evidence: line.evidence || null,
           })),
-          reason,
         }),
       }).then(responseData<ManagerKpiEvaluationDto>);
       onSaved(saved);
-      setReason("");
       setMessage("Đã lưu draft KPI.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Không thể lưu KPI.");
@@ -83,7 +80,7 @@ function KpiEditor({
       const published = await fetch(`/api/manager-kpi/evaluations/${evaluation.id}/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ version: evaluation.version, reason }),
+        body: JSON.stringify({ version: evaluation.version }),
       }).then(responseData<ManagerKpiEvaluationDto>);
       onSaved(published);
       setMessage("Đã publish KPI cho quản lý.");
@@ -183,15 +180,10 @@ function KpiEditor({
             placeholder="Nhận xét tổng hợp"
             value={notes}
           />
-          <input
-            onChange={(event) => setReason(event.target.value)}
-            placeholder="Lý do thao tác"
-            value={reason}
-          />
-          <Button disabled={pending || !reason.trim()} onClick={() => void save()}>
+          <Button disabled={pending} onClick={() => void save()}>
             Lưu draft
           </Button>
-          <Button disabled={pending || !reason.trim()} onClick={() => void publish()}>
+          <Button disabled={pending} onClick={() => void publish()}>
             Publish
           </Button>
         </div>
@@ -275,7 +267,6 @@ export function ManagerKpiWorkspace({ isGeneralManager }: Readonly<{ isGeneralMa
           managerStaffId: candidateId,
           month,
           notes: null,
-          reason: "Tạo đánh giá KPI tháng",
         }),
       }).then(responseData<ManagerKpiEvaluationDto>);
       setEvaluations((current) => [created, ...current]);
@@ -295,7 +286,6 @@ export function ManagerKpiWorkspace({ isGeneralManager }: Readonly<{ isGeneralMa
         body: JSON.stringify({
           enabled: !setting.enabled,
           version: setting.version,
-          reason: "Cập nhật quyền xem KPI của quản lý",
         }),
       }).then(responseData<ManagerKpiSettingDto>);
       setSetting(updated);

@@ -95,6 +95,18 @@ function formatOptionalDate(value: string | null): string {
   return value ? formatDate(value) : "Chưa cập nhật";
 }
 
+function machineCodeLabel(staff: PayrollPeriodDto["entries"][number]["staff"]): string {
+  const codes = [
+    ...new Set(
+      staff.attendanceMachineCodeIntervals
+        .map((interval) => interval.attendanceMachineCode)
+        .filter((code): code is string => code !== null),
+    ),
+  ];
+  if (codes.length === 0) return staff.attendanceMachineCode ?? "Chưa cập nhật";
+  return codes.join(" → ");
+}
+
 function weekday(value: string): string {
   const date = new Date(`${value}T12:00:00+07:00`);
   return new Intl.DateTimeFormat("vi-VN", {
@@ -303,7 +315,6 @@ export function PayrollWorkspace({
   const [employeeSearch, setEmployeeSearch] = useState("");
   const [worksheet, setWorksheet] = useState<PayrollWorksheetValues>(emptyWorksheet);
   const [standardDaysOff, setStandardDaysOff] = useState("");
-  const [reason, setReason] = useState("Cập nhật bảng lương");
   const [jobs, setJobs] = useState<readonly PayrollExportJobDto[]>([]);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -319,7 +330,9 @@ export function PayrollWorkspace({
     const query = employeeSearch.trim().toLocaleLowerCase("vi");
     if (!period || !query) return period?.entries ?? [];
     return period.entries.filter((entry) =>
-      `${entry.staff.staffCode} ${entry.staff.fullName}`.toLocaleLowerCase("vi").includes(query),
+      `${entry.staff.staffCode} ${machineCodeLabel(entry.staff)} ${entry.staff.fullName}`
+        .toLocaleLowerCase("vi")
+        .includes(query),
     );
   }, [employeeSearch, period]);
 
@@ -346,7 +359,6 @@ export function PayrollWorkspace({
           body: JSON.stringify({
             branchId,
             month,
-            reason: "Mở bảng lương theo tháng và cơ sở",
           }),
         });
         if (forceCalculate || result.entries.length === 0) {
@@ -354,9 +366,6 @@ export function PayrollWorkspace({
             method: "POST",
             body: JSON.stringify({
               version: result.version,
-              reason: forceCalculate
-                ? "Đồng bộ lại từ Chấm công & Live"
-                : "Tự động lấy dữ liệu Chấm công & Live",
             }),
           });
         }
@@ -504,7 +513,6 @@ export function PayrollWorkspace({
           overrideVersion: selectedEntry.worksheetOverride?.version ?? null,
           standardDaysOffOverride: standardDaysOff.trim() === "" ? null : Number(standardDaysOff),
           values,
-          reason,
         }),
       });
       setPeriod(result);
@@ -539,7 +547,6 @@ export function PayrollWorkspace({
         method: "POST",
         body: JSON.stringify({
           version: period.version,
-          reason: "Đồng bộ lại từ Chấm công & Live, giữ nguyên các ô đã chỉnh",
         }),
       });
       setPeriod(result);
@@ -558,7 +565,7 @@ export function PayrollWorkspace({
     try {
       const result = await api<PayrollPeriodDto>(`/api/payroll/periods/${period.id}/send`, {
         method: "POST",
-        body: JSON.stringify({ version: period.version, reason }),
+        body: JSON.stringify({ version: period.version }),
       });
       setPeriod(result);
       setNotice("Đã gửi phiếu lương mới nhất cho nhân viên.");
@@ -579,7 +586,7 @@ export function PayrollWorkspace({
     try {
       await api<PayrollExportJobDto>(`/api/payroll/periods/${period.id}/exports`, {
         method: "POST",
-        body: JSON.stringify({ kind, staffId: staffId ?? null, reason }),
+        body: JSON.stringify({ kind, staffId: staffId ?? null }),
       });
       await loadJobs(period.id);
       setNotice("Đã đưa file vào hàng đợi xuất dữ liệu.");
@@ -587,6 +594,25 @@ export function PayrollWorkspace({
       setError(caught instanceof Error ? caught.message : "Không thể tạo file.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  function printPayroll(): void {
+    if (!period || period.entries.length === 0) return;
+    if (dirty) {
+      setError("Bạn đang có thay đổi chưa lưu. Hãy lưu trước khi in bảng lương.");
+      return;
+    }
+    const params = new URLSearchParams();
+    if (selectedStaffId !== "ALL") params.set("staffId", selectedStaffId);
+    const target = `/api/payroll/periods/${period.id}/print${
+      params.size > 0 ? `?${params.toString()}` : ""
+    }`;
+    const opened = window.open(target, "_blank");
+    if (!opened) {
+      setError("Trình duyệt đã chặn cửa sổ in. Hãy cho phép pop-up rồi thử lại.");
+    } else {
+      opened.opener = null;
     }
   }
 
@@ -740,7 +766,7 @@ export function PayrollWorkspace({
                 aria-label="Tìm nhân viên Payroll"
                 className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
                 onChange={(event) => setEmployeeSearch(event.target.value)}
-                placeholder="Tìm theo mã hoặc tên"
+                placeholder="Tìm theo tên, mã hồ sơ hoặc mã máy"
                 value={employeeSearch}
               />
               <select
@@ -753,7 +779,8 @@ export function PayrollWorkspace({
                 <option value="ALL">Tất cả nhân viên</option>
                 {filteredEntries.map((entry) => (
                   <option key={entry.staff.id} value={entry.staff.id}>
-                    {entry.staff.staffCode} — {entry.staff.fullName}
+                    {entry.staff.fullName} · {entry.staff.staffCode} ·{" "}
+                    {machineCodeLabel(entry.staff)}
                   </option>
                 ))}
               </select>
@@ -796,6 +823,14 @@ export function PayrollWorkspace({
             {canManagePayroll && period.entries.length > 0 ? (
               <div className="flex gap-2">
                 <button
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
+                  disabled={busy}
+                  onClick={printPayroll}
+                  type="button"
+                >
+                  In bảng lương
+                </button>
+                <button
                   className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
                   disabled={busy}
                   onClick={() => void loadWorkspace(true)}
@@ -823,10 +858,11 @@ export function PayrollWorkspace({
             ) : null}
           </div>
           <div className="max-h-[58vh] overflow-auto rounded-xl border border-slate-200">
-            <table className="min-w-[1180px] text-left text-sm">
+            <table className="min-w-[1080px] text-left text-sm">
               <thead className="sticky top-0 z-20 bg-slate-100 text-xs uppercase text-slate-600">
                 <tr>
                   <th className="sticky left-0 z-30 bg-slate-100 px-3 py-3">Nhân viên</th>
+                  <th className="px-3 py-3">Mã máy chấm công</th>
                   <th className="px-3 py-3">Lương cơ bản</th>
                   <th className="px-3 py-3">Ngày làm việc</th>
                   <th className="px-3 py-3">Tổng công</th>
@@ -836,7 +872,6 @@ export function PayrollWorkspace({
                   <th className="px-3 py-3">Tổng phạt</th>
                   <th className="px-3 py-3">Tạm ứng</th>
                   <th className="px-3 py-3">Thực nhận</th>
-                  <th className="px-3 py-3">Trạng thái</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -859,6 +894,12 @@ export function PayrollWorkspace({
                         <div className="font-medium">{entry.staff.fullName}</div>
                         <div className="text-xs text-slate-500">{entry.staff.staffCode}</div>
                       </td>
+                      <td
+                        className="max-w-[180px] whitespace-normal px-3 py-3 [overflow-wrap:anywhere]"
+                        title={machineCodeLabel(entry.staff)}
+                      >
+                        {machineCodeLabel(entry.staff)}
+                      </td>
                       <td className="px-3 py-3">{money(entry.baseSalary)}</td>
                       <td className="px-3 py-3">{entry.workedDayCount} ngày</td>
                       <td className="px-3 py-3">{entry.workUnits}</td>
@@ -872,9 +913,6 @@ export function PayrollWorkspace({
                       <td className="px-3 py-3 text-rose-700">{money(entry.penalties)}</td>
                       <td className="px-3 py-3">{money(entry.advance)}</td>
                       <td className="px-3 py-3 font-semibold">{money(entry.totalIncome)}</td>
-                      <td className="px-3 py-3">
-                        {entry.worksheetOverride ? "Đã lưu chỉnh sửa" : "Theo dữ liệu gốc"}
-                      </td>
                     </tr>
                   );
                 })}
@@ -894,6 +932,9 @@ export function PayrollWorkspace({
               <div className="text-xs text-slate-500">
                 {period.branch.name} · kỳ {period.month.slice(5, 7)}/{period.month.slice(0, 4)}
               </div>
+              <div className="mt-1 text-xs font-medium text-slate-700">
+                Mã máy chấm công: {machineCodeLabel(selectedEntry.staff)}
+              </div>
             </div>
             <div className="flex flex-wrap gap-2">
               {canManagePayroll ? (
@@ -908,7 +949,7 @@ export function PayrollWorkspace({
                   </button>
                   <button
                     className="rounded-lg bg-sky-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-                    disabled={busy || !dirty || reason.trim().length < 3}
+                    disabled={busy || !dirty}
                     onClick={() => void saveWorksheet()}
                     type="button"
                   >
@@ -924,6 +965,14 @@ export function PayrollWorkspace({
                   </button>
                 </>
               ) : null}
+              <button
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
+                disabled={busy}
+                onClick={printPayroll}
+                type="button"
+              >
+                In phiếu lương
+              </button>
               <button
                 className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm disabled:opacity-50"
                 disabled={busy}
@@ -944,7 +993,7 @@ export function PayrollWorkspace({
           </div>
 
           {canManagePayroll ? (
-            <div className="mt-3 grid gap-3 lg:grid-cols-[180px_230px_minmax(300px,1fr)]">
+            <div className="mt-3 grid gap-3 lg:grid-cols-[180px_230px]">
               <label className="text-xs font-medium text-slate-700">
                 Ngày nghỉ chuẩn / tháng
                 <input
@@ -979,25 +1028,15 @@ export function PayrollWorkspace({
                   {period.standardDaysOff.daysInMonth} ngày trong tháng − ngày nghỉ
                 </span>
               </label>
-              <label className="text-xs font-medium text-slate-700">
-                Lý do sửa
-                <input
-                  className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                  maxLength={500}
-                  onChange={(event) => setReason(event.target.value)}
-                  value={reason}
-                />
-              </label>
             </div>
           ) : null}
 
           <div className="mt-4 max-h-[52vh] overflow-auto rounded-xl border border-slate-200">
-            <table className="min-w-[1940px] text-left text-xs">
+            <table className="min-w-[1830px] text-left text-xs">
               <thead className="sticky top-0 z-30 bg-slate-100 text-[11px] uppercase text-slate-600">
                 <tr>
                   <th className="sticky left-0 z-40 w-[100px] bg-slate-100 px-2 py-3">Ngày</th>
                   <th className="sticky left-[100px] z-40 w-[72px] bg-slate-100 px-2 py-3">Thứ</th>
-                  <th className="px-2 py-3">Trạng thái</th>
                   <th className="px-2 py-3">Check-in</th>
                   <th className="px-2 py-3">Check-out</th>
                   <th className="px-2 py-3">Thời lượng Live</th>
@@ -1025,30 +1064,6 @@ export function PayrollWorkspace({
                       </td>
                       <td className="sticky left-[100px] z-20 w-[72px] bg-white px-2 py-2">
                         {weekday(row.businessDate)}
-                      </td>
-                      <td className="px-2 py-2">
-                        <CellShell
-                          onReset={() => reset("status")}
-                          overridden={isOverridden("status")}
-                        >
-                          <select
-                            className={fieldClass(isOverridden("status"), "w-[100px]")}
-                            disabled={!canManagePayroll}
-                            onChange={(event) =>
-                              updateDay(
-                                row.businessDate,
-                                "status",
-                                event.target.value as DayOverride["status"],
-                              )
-                            }
-                            value={String(value("status") ?? "DRAFT")}
-                          >
-                            <option value="DRAFT">Nháp</option>
-                            <option value="PRESENT">Có mặt</option>
-                            <option value="ABSENT">Vắng</option>
-                            <option value="LEAVE">Nghỉ phép</option>
-                          </select>
-                        </CellShell>
                       </td>
                       {(["checkInTime", "checkOutTime"] as const).map((field) => (
                         <td className="px-2 py-2" key={field}>
@@ -1185,7 +1200,7 @@ export function PayrollWorkspace({
                   <td className="sticky left-0 z-30 bg-sky-100 px-2 py-3" colSpan={2}>
                     TỔNG
                   </td>
-                  <td className="px-2 py-3" colSpan={3} />
+                  <td className="px-2 py-3" colSpan={2} />
                   <td className="px-2 py-3">
                     {formatDuration(
                       editableRows.reduce(
@@ -1412,7 +1427,7 @@ export function PayrollWorkspace({
               {canManagePayroll ? (
                 <button
                   className="rounded-lg bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                  disabled={busy || reason.trim().length < 3}
+                  disabled={busy}
                   onClick={() => void saveWorksheet()}
                   type="button"
                 >

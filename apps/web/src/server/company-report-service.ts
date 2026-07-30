@@ -147,6 +147,7 @@ export async function getCompanyMonthlyReport(
           },
           select: {
             branchId: true,
+            attendanceMachineCode: true,
             staff: {
               select: {
                 id: true,
@@ -178,7 +179,11 @@ export async function getCompanyMonthlyReport(
               },
             },
           },
-          orderBy: [{ branchId: "asc" }, { staff: { staffCode: "asc" } }],
+          orderBy: [
+            { branchId: "asc" },
+            { staff: { staffCode: "asc" } },
+            { effectiveFrom: "asc" },
+          ],
         });
   const uniquePairs = new Map(
     assignments.map((assignment) => [`${assignment.branchId}:${assignment.staff.id}`, assignment]),
@@ -315,6 +320,7 @@ export async function getCompanyMonthlyReport(
           staff: {
             id: assignment.staff.id,
             staffCode: assignment.staff.staffCode,
+            attendanceMachineCode: assignment.attendanceMachineCode,
             fullName: assignment.staff.fullName,
             employmentCategory: employment.employmentCategory,
             employmentStatus: employment.employmentStatus,
@@ -476,6 +482,7 @@ export async function getManagerCompanyReport(
             branchId: true,
             effectiveFrom: true,
             effectiveTo: true,
+            attendanceMachineCode: true,
             staff: {
               select: {
                 id: true,
@@ -508,7 +515,11 @@ export async function getManagerCompanyReport(
               },
             },
           },
-          orderBy: [{ branchId: "asc" }, { staff: { staffCode: "asc" } }],
+          orderBy: [
+            { branchId: "asc" },
+            { staff: { staffCode: "asc" } },
+            { effectiveFrom: "asc" },
+          ],
         });
 
   const assignmentsByPair = new Map<string, typeof assignments>();
@@ -632,6 +643,7 @@ export async function getManagerCompanyReport(
           staff: {
             id: person.id,
             staffCode: person.staffCode,
+            attendanceMachineCode: pairAssignments.at(-1)?.attendanceMachineCode ?? null,
             fullName: person.fullName,
             employmentCategory: employment.employmentCategory,
             employmentStatus: employment.employmentStatus,

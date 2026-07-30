@@ -218,7 +218,6 @@ beforeAll(async () => {
         businessDate: "2026-08-15",
         status: "PRESENT",
         revenueAmount: "9999999",
-        reason: "Fixture attendance A",
       },
       metadata,
     ),
@@ -228,7 +227,6 @@ beforeAll(async () => {
         staffId: liveBId,
         businessDate: "2026-08-15",
         status: "PRESENT",
-        reason: "Fixture attendance B",
       },
       metadata,
     ),
@@ -238,7 +236,7 @@ beforeAll(async () => {
 
   const ruleSet = await createPenaltyRuleSet(
     gm,
-    { name: `Quy định Live ${runId}`, reason: "Tạo rule test" },
+    { name: `Quy định Live ${runId}` },
     metadata,
   );
   const draft = ruleSet.versions[0]!;
@@ -248,7 +246,6 @@ beforeAll(async () => {
     {
       notes: "Version đầu",
       rowVersion: draft.rowVersion,
-      reason: "Thêm danh mục lỗi",
       items: [
         {
           code: "LATE",
@@ -270,7 +267,6 @@ beforeAll(async () => {
       effectiveFrom: "2026-08-01",
       effectiveTo: "2026-09-01",
       rowVersion: saved.rowVersion,
-      reason: "Publish version đầu",
     },
     metadata,
     new Date("2026-07-20T03:00:00.000Z"),
@@ -399,7 +395,6 @@ describe("effective date và published immutable", () => {
         {
           notes: "Không được sửa",
           rowVersion: versionOneRowVersion,
-          reason: "Thử sửa published",
           items: [],
         },
         metadata,
@@ -423,7 +418,6 @@ describe("violation snapshot, totals và branch scope", () => {
         attendanceId: attendanceAId,
         penaltyItemId: penaltyItemOneId,
         detail: "Đi muộn 15 phút",
-        reason: "Ghi nhận lỗi tháng 8",
       },
       metadata,
     );
@@ -436,7 +430,6 @@ describe("violation snapshot, totals và branch scope", () => {
       {
         effectiveTo: "2026-09-01",
         rowVersion: versionOneRowVersion,
-        reason: "Kết thúc version 1",
       },
       metadata,
       new Date("2026-08-20T03:00:00.000Z"),
@@ -446,7 +439,6 @@ describe("violation snapshot, totals và branch scope", () => {
       {
         ruleSetId: retired.ruleSetId,
         cloneFromVersionId: retired.id,
-        reason: "Clone version mới",
       },
       metadata,
     );
@@ -456,7 +448,6 @@ describe("violation snapshot, totals và branch scope", () => {
       {
         notes: "Tăng mức phạt",
         rowVersion: draft.rowVersion,
-        reason: "Cập nhật mức phạt",
         items: draft.items.map((item) => ({
           code: item.code,
           name: item.name,
@@ -476,7 +467,6 @@ describe("violation snapshot, totals và branch scope", () => {
         effectiveFrom: "2026-09-01",
         effectiveTo: null,
         rowVersion: saved.rowVersion,
-        reason: "Publish version 2",
       },
       metadata,
       new Date("2026-08-20T03:00:00.000Z"),
@@ -515,7 +505,6 @@ describe("violation snapshot, totals và branch scope", () => {
       {
         staffId: liveAId,
         businessDate: "2026-09-02",
-        reason: "Attendance tháng 9",
       },
       metadata,
     );
@@ -526,7 +515,6 @@ describe("violation snapshot, totals và branch scope", () => {
         attendanceId: septemberAttendance.id,
         penaltyItemId: septemberPenaltyItem.id,
         detail: "Đi muộn tháng 9",
-        reason: "Ghi nhận lỗi tháng 9",
       },
       metadata,
     );
@@ -542,7 +530,6 @@ describe("violation snapshot, totals và branch scope", () => {
       {
         ruleSetId: versionTwo.ruleSetId,
         cloneFromVersionId: versionTwo.id,
-        reason: "Clone để thử overlap",
       },
       metadata,
     );
@@ -554,7 +541,6 @@ describe("violation snapshot, totals và branch scope", () => {
           effectiveFrom: "2026-09-15",
           effectiveTo: null,
           rowVersion: overlapDraft.rowVersion,
-          reason: "Thử publish overlap",
         },
         metadata,
         new Date("2026-08-20T03:00:00.000Z"),
@@ -585,7 +571,6 @@ describe("violation snapshot, totals và branch scope", () => {
           attendanceId: attendanceBId,
           penaltyItemId: penaltyItemOneId,
           detail: "Thử IDOR",
-          reason: "Thử IDOR branch",
         },
         metadata,
       ),
@@ -602,7 +587,6 @@ describe("violation snapshot, totals và branch scope", () => {
           detail: "Thử override",
           amountOverride: "1",
           overrideReason: "Không có quyền",
-          reason: "Thử quyền override",
         },
         metadata,
       ),
@@ -622,7 +606,6 @@ describe("evidence authorization", () => {
         mimeType: "image/png",
         sizeBytes: bytes.byteLength,
         checksumSha256,
-        reason: "Integration upload evidence",
       },
       metadata,
     );

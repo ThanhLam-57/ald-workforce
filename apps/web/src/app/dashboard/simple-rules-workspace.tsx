@@ -1192,6 +1192,7 @@ export function SimpleRulesWorkspace({
                                 type === "CHECK_IN_LATE"
                                   ? {
                                       type,
+                                      thresholdSource: "STAFF_SHIFT",
                                       scheduledStartMinutes: 9 * 60,
                                       graceMinutes: 15,
                                       branchId: null,
@@ -1199,6 +1200,7 @@ export function SimpleRulesWorkspace({
                                   : type === "LIVE_DURATION_SHORT"
                                     ? {
                                         type,
+                                        thresholdSource: "STAFF_SHIFT",
                                         requiredLiveMinutes: 6 * 60,
                                         graceMinutes: 15,
                                         branchId: null,
@@ -1216,7 +1218,37 @@ export function SimpleRulesWorkspace({
                         </select>
                       </label>
 
-                      {row.automaticCondition.type === "CHECK_IN_LATE" ? (
+                      {row.automaticCondition.type !== "MANUAL" ? (
+                        <label className="grid gap-1 text-sm font-medium">
+                          Nguồn giờ chuẩn
+                          <select
+                            aria-label={`Nguồn giờ chuẩn lỗi ${index + 1}`}
+                            disabled={!canEdit}
+                            onChange={(event) => {
+                              const condition = row.automaticCondition;
+                              if (condition.type === "MANUAL") return;
+                              updatePenalty(row.key, {
+                                automaticCondition: {
+                                  ...condition,
+                                  thresholdSource: event.target.value as
+                                    | "STAFF_SHIFT"
+                                    | "RULE_FIXED",
+                                },
+                              });
+                            }}
+                            value={
+                              row.automaticCondition.thresholdSource ?? "RULE_FIXED"
+                            }
+                          >
+                            <option value="STAFF_SHIFT">Ca của từng nhân viên</option>
+                            <option value="RULE_FIXED">Giờ cố định trong rule</option>
+                          </select>
+                        </label>
+                      ) : null}
+
+                      {row.automaticCondition.type === "CHECK_IN_LATE" &&
+                      (row.automaticCondition.thresholdSource ?? "RULE_FIXED") ===
+                        "RULE_FIXED" ? (
                         <label className="grid gap-1 text-sm font-medium">
                           Giờ bắt đầu ca
                           <input
@@ -1235,12 +1267,16 @@ export function SimpleRulesWorkspace({
                               });
                             }}
                             type="time"
-                            value={minutesToTime(row.automaticCondition.scheduledStartMinutes)}
+                            value={minutesToTime(
+                              row.automaticCondition.scheduledStartMinutes ?? 9 * 60,
+                            )}
                           />
                         </label>
                       ) : null}
 
-                      {row.automaticCondition.type === "LIVE_DURATION_SHORT" ? (
+                      {row.automaticCondition.type === "LIVE_DURATION_SHORT" &&
+                      (row.automaticCondition.thresholdSource ?? "RULE_FIXED") ===
+                        "RULE_FIXED" ? (
                         <label className="grid gap-1 text-sm font-medium">
                           Thời lượng Live tiêu chuẩn
                           <input
@@ -1261,7 +1297,9 @@ export function SimpleRulesWorkspace({
                             }}
                             step="60"
                             type="time"
-                            value={minutesToTime(row.automaticCondition.requiredLiveMinutes)}
+                            value={minutesToTime(
+                              row.automaticCondition.requiredLiveMinutes ?? 6 * 60,
+                            )}
                           />
                         </label>
                       ) : null}
@@ -1275,7 +1313,7 @@ export function SimpleRulesWorkspace({
                               disabled={!canEdit}
                               max={
                                 row.automaticCondition.type === "LIVE_DURATION_SHORT"
-                                  ? row.automaticCondition.requiredLiveMinutes
+                                  ? (row.automaticCondition.requiredLiveMinutes ?? 720)
                                   : 720
                               }
                               min="0"
@@ -1328,33 +1366,54 @@ export function SimpleRulesWorkspace({
 
                     {row.automaticCondition.type === "CHECK_IN_LATE" ? (
                       <p className="mt-3 break-words text-sm text-sky-900 [overflow-wrap:anywhere]">
-                        Ca bắt đầu{" "}
-                        <strong>
-                          {minutesToTime(row.automaticCondition.scheduledStartMinutes)}
-                        </strong>
+                        {(row.automaticCondition.thresholdSource ?? "RULE_FIXED") ===
+                        "STAFF_SHIFT"
+                          ? "Giờ bắt đầu lấy từ ca hiệu lực của từng nhân viên"
+                          : `Ca bắt đầu ${minutesToTime(
+                              row.automaticCondition.scheduledStartMinutes ?? 9 * 60,
+                            )}`}
                         , du di {row.automaticCondition.graceMinutes} phút. Check-in đến{" "}
-                        <strong>
-                          {minutesToTime(
-                            row.automaticCondition.scheduledStartMinutes +
-                              row.automaticCondition.graceMinutes,
-                          )}
-                        </strong>{" "}
+                        {(row.automaticCondition.thresholdSource ?? "RULE_FIXED") ===
+                        "RULE_FIXED" ? (
+                          <strong>
+                            {minutesToTime(
+                              (row.automaticCondition.scheduledStartMinutes ?? 9 * 60) +
+                                row.automaticCondition.graceMinutes,
+                            )}
+                          </strong>
+                        ) : (
+                          "giờ bắt đầu ca cộng số phút du di"
+                        )}{" "}
                         không bị phạt; sau mốc này sẽ tự động tính lỗi.
                       </p>
                     ) : row.automaticCondition.type === "LIVE_DURATION_SHORT" ? (
                       <p className="mt-3 break-words text-sm text-sky-900 [overflow-wrap:anywhere]">
                         Yêu cầu Live{" "}
-                        <strong>{minutesToTime(row.automaticCondition.requiredLiveMinutes)}</strong>
+                        {(row.automaticCondition.thresholdSource ?? "RULE_FIXED") ===
+                        "STAFF_SHIFT" ? (
+                          "lấy từ ca hiệu lực của từng nhân viên"
+                        ) : (
+                          <strong>
+                            {minutesToTime(
+                              row.automaticCondition.requiredLiveMinutes ?? 6 * 60,
+                            )}
+                          </strong>
+                        )}
                         , du di {row.automaticCondition.graceMinutes} phút. Live từ{" "}
-                        <strong>
-                          {minutesToTime(
-                            Math.max(
-                              0,
-                              row.automaticCondition.requiredLiveMinutes -
-                                row.automaticCondition.graceMinutes,
-                            ),
-                          )}
-                        </strong>{" "}
+                        {(row.automaticCondition.thresholdSource ?? "RULE_FIXED") ===
+                        "RULE_FIXED" ? (
+                          <strong>
+                            {minutesToTime(
+                              Math.max(
+                                0,
+                                (row.automaticCondition.requiredLiveMinutes ?? 6 * 60) -
+                                  row.automaticCondition.graceMinutes,
+                              ),
+                            )}
+                          </strong>
+                        ) : (
+                          "thời lượng ca trừ số phút du di"
+                        )}{" "}
                         được tính là đạt; thấp hơn sẽ tự động tính lỗi.
                       </p>
                     ) : (

@@ -1,4 +1,5 @@
 import { AdministrationWorkspace } from "@/app/dashboard/administration-workspace";
+import { staffWorkspaceCapabilitiesFor } from "@/app/dashboard/staff-workspace-capabilities";
 import { listBranches, listStaff } from "@/server/services";
 
 import { PageHeader } from "../page-header";
@@ -32,6 +33,7 @@ export default async function AdministrationPage() {
           id: branch.id,
           label: `${branch.code} — ${branch.name}`,
         }))}
+        capabilities={staffWorkspaceCapabilitiesFor(actor.role)}
         staffOptions={staff.map((person) => ({
           id: person.id,
           label: `${person.staffCode} — ${person.fullName}`,

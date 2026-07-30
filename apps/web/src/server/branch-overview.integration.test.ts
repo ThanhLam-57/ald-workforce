@@ -144,6 +144,7 @@ beforeAll(async () => {
         branchId: branchAId,
         staffId: liveAId,
         assignmentType: "MEMBER",
+        attendanceMachineCode: "OVERVIEW-A-001",
         effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
       },
     }),
@@ -153,6 +154,7 @@ beforeAll(async () => {
         branchId: branchBId,
         staffId: liveBId,
         assignmentType: "MEMBER",
+        attendanceMachineCode: "OVERVIEW-B-001",
         effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
       },
     }),
@@ -188,7 +190,6 @@ beforeAll(async () => {
         overtimeMinutes: 30,
         actualLiveMinutes: 180,
         revenueAmount: "1200000",
-        reason: "Fixture overview branch A",
       },
       metadata,
     ),
@@ -201,7 +202,6 @@ beforeAll(async () => {
         workUnits: "1",
         actualLiveMinutes: 999,
         revenueAmount: "987654321",
-        reason: "Fixture bí mật branch B",
       },
       metadata,
     ),
@@ -336,6 +336,7 @@ describe("branch monthly overview projection", () => {
     ]);
     expect(overview.rows).toHaveLength(1);
     expect(overview.rows[0]?.staff).toMatchObject({
+      attendanceMachineCode: "OVERVIEW-A-001",
       fullName: "Live An Toàn",
       streamingAlias: "ACC-AN-TOAN",
       performanceLevel: { id: levelId, name: "Live Xuất Sắc" },
@@ -408,7 +409,6 @@ describe("branch overview write-through và optimistic lock", () => {
       gm,
       {
         branchId: branchAId,
-        reason: "Sửa từ grid tổng quan",
         edits: [
           {
             clientId: "edit-existing",
@@ -437,7 +437,6 @@ describe("branch overview write-through và optimistic lock", () => {
       gm,
       {
         branchId: branchAId,
-        reason: "Paste ô mới từ grid",
         edits: [
           {
             clientId: "create-day",
@@ -458,7 +457,6 @@ describe("branch overview write-through và optimistic lock", () => {
       gm,
       {
         branchId: branchAId,
-        reason: "Thử stale version",
         edits: [
           {
             clientId: "stale",
@@ -486,7 +484,6 @@ describe("branch scope và XLSX export", () => {
         managerA,
         {
           branchId: branchAId,
-          reason: "Thử sửa grid chỉ xem",
           edits: [
             {
               clientId: "read-only",
@@ -514,7 +511,6 @@ describe("branch scope và XLSX export", () => {
         managerA,
         {
           branchId: branchBId,
-          reason: "Thử IDOR branch B",
           edits: [
             {
               clientId: "idor",
@@ -534,6 +530,46 @@ describe("branch scope và XLSX export", () => {
       month: "2026-07",
     });
     expect(gmOverview.rows[0]?.staff.id).toBe(liveBId);
+  });
+
+  it("báo cáo tháng cũ giữ đúng mã máy của assignment cũ sau khi chuyển cơ sở", async () => {
+    const oldAssignment = await prisma.branchAssignment.findFirstOrThrow({
+      where: {
+        companyId,
+        branchId: branchAId,
+        staffId: liveAId,
+        assignmentType: "MEMBER",
+      },
+    });
+    await prisma.branchAssignment.update({
+      where: { id: oldAssignment.id },
+      data: { effectiveTo: new Date("2026-08-01T00:00:00.000Z") },
+    });
+    await prisma.branchAssignment.create({
+      data: {
+        companyId,
+        branchId: branchBId,
+        staffId: liveAId,
+        assignmentType: "MEMBER",
+        attendanceMachineCode: "OVERVIEW-B-TRANSFER",
+        effectiveFrom: new Date("2026-08-01T00:00:00.000Z"),
+      },
+    });
+
+    const july = await getBranchMonthlyOverview(managerA, {
+      branchId: branchAId,
+      month: "2026-07",
+    });
+    const august = await getBranchMonthlyOverview(gm, {
+      branchId: branchBId,
+      month: "2026-08",
+    });
+    expect(july.rows.find(({ staff }) => staff.id === liveAId)?.staff.attendanceMachineCode).toBe(
+      "OVERVIEW-A-001",
+    );
+    expect(august.rows.find(({ staff }) => staff.id === liveAId)?.staff.attendanceMachineCode).toBe(
+      "OVERVIEW-B-TRANSFER",
+    );
   });
 
   it("workbook chỉ chứa projection đã scope của branch A", async () => {

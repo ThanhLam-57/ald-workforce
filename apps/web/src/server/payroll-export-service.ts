@@ -4,7 +4,7 @@ import { DomainError, requirePermission, type ActorContext } from "@ald/domain";
 
 import { enqueuePayrollExport } from "./job-queue";
 import { createPrivateDownloadUrl } from "./object-storage";
-import { appendSecureAudit } from "./audit-service";
+import { appendSecureAudit, systemAuditReason } from "./audit-service";
 import type { RequestMetadata } from "./request-metadata";
 
 function toJobDto(job: {
@@ -127,7 +127,7 @@ export async function createPayrollExport(
         staffId: input.kind === "BULK_ZIP" ? null : staffId,
         kind: input.kind,
         requestedByUserId: actor.userId,
-        requestReason: input.reason,
+        requestReason: systemAuditReason("PAYROLL_EXPORT_REQUEST"),
       },
       select: jobSelect,
     });
@@ -138,7 +138,7 @@ export async function createPayrollExport(
         action: "PAYROLL_EXPORT_REQUEST",
         entityType: "PayrollExportJob",
         entityId: created.id,
-        reason: input.reason,
+        reason: systemAuditReason("PAYROLL_EXPORT_REQUEST"),
         after: {
           payrollPeriodId: period.id,
           staffId: input.kind === "BULK_ZIP" ? null : staffId,
@@ -259,7 +259,7 @@ export async function getPayrollExportDownload(
     entityType: "PayrollExportJob",
     entityId: job.id,
     branchId: job.branchId,
-    reason: "Tải file payroll bằng signed URL ngắn hạn.",
+    reason: systemAuditReason("PAYROLL_EXPORT_DOWNLOAD"),
     after: {
       payrollPeriodId: job.payrollPeriodId,
       staffId: job.staffId,

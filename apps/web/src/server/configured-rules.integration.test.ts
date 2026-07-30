@@ -152,7 +152,6 @@ beforeAll(async () => {
         workUnits: "1",
         actualLiveMinutes: 300,
         revenueAmount: "1500",
-        reason: "Fixture doanh số level cao",
       },
       metadata,
     ),
@@ -165,7 +164,6 @@ beforeAll(async () => {
         workUnits: "1",
         actualLiveMinutes: 200,
         revenueAmount: "500",
-        reason: "Fixture doanh số level thấp",
       },
       metadata,
     ),
@@ -176,7 +174,6 @@ beforeAll(async () => {
     {
       name: `Thưởng ngày ${runId}`,
       type: "DAILY_REWARD_TIERS",
-      reason: "Tạo fixture thưởng ngày",
     },
     metadata,
   );
@@ -187,7 +184,6 @@ beforeAll(async () => {
     {
       rowVersion: dailySet.versions[0]!.rowVersion,
       notes: "Version đang hiệu lực",
-      reason: "Cấu hình thưởng ngày",
       configuration: {
         kind: "DAILY_REWARD_TIERS",
         gapPolicy: "REQUIRE_CONTIGUOUS",
@@ -214,7 +210,6 @@ beforeAll(async () => {
       effectiveFrom: "2026-09-01",
       effectiveTo: "2026-10-01",
       rowVersion: savedDaily.rowVersion,
-      reason: "Publish tháng 9",
     },
     metadata,
     new Date("2026-08-20T03:00:00.000Z"),
@@ -225,7 +220,6 @@ beforeAll(async () => {
     {
       ruleSetId: dailyRuleSetId,
       cloneFromVersionId: publishedDaily.id,
-      reason: "Clone để preview",
     },
     metadata,
   );
@@ -235,7 +229,6 @@ beforeAll(async () => {
     {
       rowVersion: clonedDaily.rowVersion,
       notes: "Tăng thưởng",
-      reason: "Tăng thưởng để kiểm tra impact",
       configuration: {
         kind: "DAILY_REWARD_TIERS",
         gapPolicy: "REQUIRE_CONTIGUOUS",
@@ -263,7 +256,6 @@ beforeAll(async () => {
     {
       name: `Level tháng ${runId}`,
       type: "MONTHLY_LEVEL_RULES",
-      reason: "Tạo fixture level",
     },
     metadata,
   );
@@ -273,7 +265,6 @@ beforeAll(async () => {
     {
       rowVersion: monthlySet.versions[0]!.rowVersion,
       notes: "Level tháng 9",
-      reason: "Cấu hình level",
       configuration: {
         kind: "MONTHLY_LEVEL_RULES",
         gapPolicy: "REQUIRE_CONTIGUOUS",
@@ -324,7 +315,6 @@ beforeAll(async () => {
       effectiveFrom: "2026-09-01",
       effectiveTo: "2026-10-01",
       rowVersion: savedMonthly.rowVersion,
-      reason: "Publish level tháng 9",
     },
     metadata,
     new Date("2026-08-20T03:00:00.000Z"),
@@ -400,7 +390,6 @@ describe("configured rule lifecycle and permissions", () => {
         {
           name: "Không được tạo",
           type: "SALARY_RULES",
-          reason: "Kiểm tra quyền",
         },
         metadata,
       ),
@@ -418,7 +407,6 @@ describe("configured rule lifecycle and permissions", () => {
         {
           rowVersion: 2,
           notes: null,
-          reason: "Không được sửa published",
           configuration: {
             kind: "DAILY_REWARD_TIERS",
             gapPolicy: "REQUIRE_CONTIGUOUS",
@@ -457,7 +445,6 @@ describe("configured rule lifecycle and permissions", () => {
           effectiveFrom: "2026-09-15",
           effectiveTo: "2026-10-15",
           rowVersion: draftDailyRowVersion,
-          reason: "Khoảng overlap để kiểm tra",
         },
         metadata,
         new Date("2026-08-20T03:00:00.000Z"),
@@ -493,7 +480,7 @@ describe("impact preview and level history", () => {
   it("confirms and overrides suggestions with level effective next month", async () => {
     const proposals = await generateLevelProposals(
       gm,
-      { month: "2026-09", reason: "Tạo đề xuất tháng 9" },
+      { month: "2026-09" },
       metadata,
     );
     const liveOne = proposals.find((proposal) => proposal.staff.id === liveOneId)!;
@@ -504,7 +491,7 @@ describe("impact preview and level history", () => {
     const confirmed = await confirmLevelProposal(
       gm,
       liveOne.id,
-      { version: liveOne.version, reason: "Xác nhận theo rule" },
+      { version: liveOne.version },
       metadata,
     );
     const overridden = await confirmLevelProposal(
@@ -513,7 +500,6 @@ describe("impact preview and level history", () => {
       {
         version: liveTwo.version,
         performanceLevelId: liveOne.suggestedLevel.id,
-        reason: "Override theo đánh giá GM",
       },
       metadata,
     );

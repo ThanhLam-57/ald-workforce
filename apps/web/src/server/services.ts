@@ -7,6 +7,7 @@ import type {
   BranchUpdateInput,
   StaffArchiveInput,
   StaffCreateInput,
+  StaffTerminateInput,
   StaffUpdateInput,
   UserCreateInput,
   UserUpdateInput,
@@ -15,9 +16,14 @@ import { prisma, type Prisma } from "@ald/db";
 import { DomainError, requirePermission, type ActorContext, type AuthRole } from "@ald/domain";
 
 import { auth } from "./auth";
+import { systemAuditReason } from "./audit-service";
 import { parseBusinessDate, toBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
+import {
+  safeAssignmentAuditSnapshot,
+  safeStaffAuditSnapshot,
+} from "./staff-audit-snapshot";
 
 type Transaction = Prisma.TransactionClient;
 
@@ -37,11 +43,21 @@ const staffDirectorySelect = {
   staffCode: true,
   fullName: true,
   streamingAlias: true,
+  tiktokChannelId: true,
   email: true,
   phone: true,
+  dateOfBirth: true,
+  citizenIdNumber: true,
+  bankAccountNumber: true,
+  bankName: true,
+  permanentAddress: true,
+  temporaryAddress: true,
+  facebookUrl: true,
+  university: true,
   jobTitle: true,
   joinedDate: true,
   officialDate: true,
+  terminationDate: true,
   employmentCategory: true,
   employmentStatus: true,
   version: true,
@@ -62,6 +78,8 @@ function staffResponse(staff: SelectedStaff) {
     baseSalaryAmount: staff.baseSalaryAmount.toString(),
     joinedDate: staff.joinedDate?.toISOString().slice(0, 10) ?? null,
     officialDate: staff.officialDate?.toISOString().slice(0, 10) ?? null,
+    terminationDate: staff.terminationDate?.toISOString().slice(0, 10) ?? null,
+    dateOfBirth: staff.dateOfBirth?.toISOString().slice(0, 10) ?? null,
   };
 }
 
@@ -123,36 +141,6 @@ function branchAuditShape(branch: {
   };
 }
 
-function staffAuditShape(staff: {
-  staffCode: string;
-  fullName: string;
-  streamingAlias: string | null;
-  email: string | null;
-  phone: string | null;
-  jobTitle: string;
-  baseSalaryAmount: bigint;
-  joinedDate: Date | null;
-  officialDate: Date | null;
-  employmentCategory: string;
-  employmentStatus: string;
-  version: number;
-}): Record<string, unknown> {
-  return {
-    staffCode: staff.staffCode,
-    fullName: staff.fullName,
-    streamingAlias: staff.streamingAlias,
-    email: staff.email,
-    phone: staff.phone,
-    jobTitle: staff.jobTitle,
-    baseSalaryAmount: staff.baseSalaryAmount.toString(),
-    joinedDate: staff.joinedDate?.toISOString().slice(0, 10) ?? null,
-    officialDate: staff.officialDate?.toISOString().slice(0, 10) ?? null,
-    employmentCategory: staff.employmentCategory,
-    employmentStatus: staff.employmentStatus,
-    version: staff.version,
-  };
-}
-
 export async function listBranches(actor: ActorContext) {
   requirePermission(actor, "branch:read");
   return prisma.branch.findMany({
@@ -205,7 +193,7 @@ export async function createBranch(
       action: "branch.create",
       entityType: "Branch",
       entityId: branch.id,
-      reason: input.reason,
+      reason: systemAuditReason("BRANCH_CREATED_FROM_UI"),
       after: branchAuditShape(branch),
       metadata,
     });
@@ -276,7 +264,13 @@ export async function updateBranch(
           : "branch.update",
       entityType: "Branch",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason(
+        before.isActive !== after.isActive
+          ? after.isActive
+            ? "BRANCH_REACTIVATED_FROM_UI"
+            : "BRANCH_DEACTIVATED_FROM_UI"
+          : "BRANCH_UPDATED_FROM_UI",
+      ),
       before: branchAuditShape(before),
       after: branchAuditShape(after),
       metadata,
@@ -319,14 +313,41 @@ export async function createStaff(
   return prisma.$transaction(async (tx) => {
     const joinedDate = parseBusinessDate(input.joinedDate);
     const officialDate = input.officialDate ? parseBusinessDate(input.officialDate) : null;
+    const duplicate = await tx.staffMember.findFirst({
+      where: {
+        companyId: actor.companyId,
+        OR: [
+          { staffCode: input.staffCode.toUpperCase() },
+          ...(input.citizenIdNumber ? [{ citizenIdNumber: input.citizenIdNumber }] : []),
+        ],
+      },
+      select: { staffCode: true, citizenIdNumber: true },
+    });
+    if (duplicate) {
+      throw new DomainError(
+        "CONFLICT",
+        duplicate.staffCode === input.staffCode.toUpperCase()
+          ? "Mã hồ sơ đã tồn tại trong công ty."
+          : "Số CCCD/CMND đã tồn tại trong công ty.",
+      );
+    }
     const staff = await tx.staffMember.create({
       data: {
         companyId: actor.companyId,
         staffCode: input.staffCode.toUpperCase(),
         fullName: input.fullName,
         streamingAlias: input.streamingAlias || null,
+        tiktokChannelId: input.tiktokChannelId ?? null,
         email: input.email?.toLowerCase() ?? null,
         phone: input.phone || null,
+        dateOfBirth: input.dateOfBirth ? parseBusinessDate(input.dateOfBirth) : null,
+        citizenIdNumber: input.citizenIdNumber || null,
+        bankAccountNumber: input.bankAccountNumber || null,
+        bankName: input.bankName || null,
+        permanentAddress: input.permanentAddress || null,
+        temporaryAddress: input.temporaryAddress || null,
+        facebookUrl: input.facebookUrl || null,
+        university: input.university || null,
         jobTitle: input.jobTitle,
         baseSalaryAmount: BigInt(input.baseSalaryAmount ?? "0"),
         joinedDate,
@@ -345,13 +366,17 @@ export async function createStaff(
         createdByUserId: actor.userId,
       },
     });
+    const auditSnapshot = safeStaffAuditSnapshot(staff);
     await appendAudit(tx, {
       actor,
       action: "staff.create",
       entityType: "StaffMember",
       entityId: staff.id,
-      reason: input.reason,
-      after: staffAuditShape(staff),
+      reason: systemAuditReason("STAFF_CREATED_FROM_UI"),
+      after: {
+        ...auditSnapshot,
+        changedFields: Object.keys(auditSnapshot),
+      },
       metadata,
     });
     return staffResponse(staff);
@@ -366,74 +391,305 @@ export async function updateStaff(
   now = new Date(),
 ) {
   requirePermission(actor, "staff:update");
-  return prisma.$transaction(async (tx) => {
-    const before = await tx.staffMember.findFirst({
-      where: { id, companyId: actor.companyId, archivedAt: null },
-      select: staffSelect,
-    });
-    if (!before) {
-      throw new DomainError("NOT_FOUND", "Không tìm thấy nhân sự.");
-    }
+  return prisma.$transaction(
+    async (tx) => {
+      const before = await tx.staffMember.findFirst({
+        where: { id, companyId: actor.companyId, archivedAt: null },
+        select: staffSelect,
+      });
+      if (!before) {
+        throw new DomainError("NOT_FOUND", "Không tìm thấy nhân sự.");
+      }
+      if (input.staffCode !== undefined) {
+        const normalizedStaffCode = input.staffCode.toUpperCase();
+        const duplicateStaffCode = await tx.staffMember.findFirst({
+          where: {
+            id: { not: id },
+            companyId: actor.companyId,
+            staffCode: normalizedStaffCode,
+          },
+          select: { id: true },
+        });
+        if (duplicateStaffCode) {
+          throw new DomainError("CONFLICT", "Mã hồ sơ đã tồn tại trong công ty.");
+        }
+      }
+      if (input.citizenIdNumber) {
+        const duplicateCitizenId = await tx.staffMember.findFirst({
+          where: {
+            id: { not: id },
+            companyId: actor.companyId,
+            citizenIdNumber: input.citizenIdNumber,
+          },
+          select: { id: true },
+        });
+        if (duplicateCitizenId) {
+          throw new DomainError("CONFLICT", "Số CCCD/CMND đã tồn tại trong công ty.");
+        }
+      }
 
-    const data: Prisma.StaffMemberUpdateManyMutationInput = {
-      version: { increment: 1 },
-    };
-    if (input.fullName !== undefined) data.fullName = input.fullName;
-    if (input.streamingAlias !== undefined) {
-      data.streamingAlias = input.streamingAlias || null;
-    }
-    if (input.email !== undefined) data.email = input.email.toLowerCase();
-    if (input.phone !== undefined) data.phone = input.phone;
-    if (input.jobTitle !== undefined) data.jobTitle = input.jobTitle;
-    if (input.baseSalaryAmount !== undefined) {
-      data.baseSalaryAmount = BigInt(input.baseSalaryAmount);
-    }
-    const joinedDate =
-      input.joinedDate === undefined
-        ? before.joinedDate
-        : input.joinedDate === null
-          ? null
-          : parseBusinessDate(input.joinedDate);
-    const officialDate =
-      input.officialDate === undefined
-        ? before.officialDate
-        : input.officialDate === null
-          ? null
-          : parseBusinessDate(input.officialDate);
-    if (joinedDate && officialDate && officialDate < joinedDate) {
-      throw new DomainError(
-        "VALIDATION_ERROR",
-        "Ngày lên chính thức phải bằng hoặc sau ngày gia nhập công ty.",
-      );
-    }
-    if (input.joinedDate !== undefined) data.joinedDate = joinedDate;
-    if (input.officialDate !== undefined) data.officialDate = officialDate;
-    const changesEmployment =
-      input.employmentStatus !== undefined || input.employmentCategory !== undefined;
-    const effectiveFrom = input.effectiveFrom ? parseBusinessDate(input.effectiveFrom) : null;
-    const businessDate = toBusinessDate(now);
-    if (changesEmployment && (!effectiveFrom || effectiveFrom > businessDate)) {
-      throw new DomainError(
-        "VALIDATION_ERROR",
-        "Ngày hiệu lực việc làm là bắt buộc và không được nằm trong tương lai.",
-      );
-    }
+      if (
+        input.employmentStatus === "TERMINATED" ||
+        (before.employmentStatus === "TERMINATED" && input.employmentStatus !== undefined)
+      ) {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "Hãy dùng thao tác “Cho nghỉ việc” để cập nhật trạng thái và ngày nghỉ việc.",
+        );
+      }
 
-    const result = await tx.staffMember.updateMany({
-      where: { id, companyId: actor.companyId, version: input.version, archivedAt: null },
-      data,
-    });
-    if (result.count !== 1) {
-      throw new DomainError("CONFLICT", "Nhân sự đã được cập nhật bởi người khác.");
-    }
+      const data: Prisma.StaffMemberUpdateManyMutationInput = {
+        version: { increment: 1 },
+      };
+      if (input.staffCode !== undefined) data.staffCode = input.staffCode.toUpperCase();
+      if (input.fullName !== undefined) data.fullName = input.fullName;
+      if (input.streamingAlias !== undefined) {
+        data.streamingAlias = input.streamingAlias || null;
+      }
+      if (input.tiktokChannelId !== undefined) data.tiktokChannelId = input.tiktokChannelId;
+      if (input.email !== undefined) data.email = input.email?.toLowerCase() ?? null;
+      if (input.phone !== undefined) data.phone = input.phone || null;
+      if (input.dateOfBirth !== undefined) {
+        data.dateOfBirth = input.dateOfBirth ? parseBusinessDate(input.dateOfBirth) : null;
+      }
+      if (input.citizenIdNumber !== undefined) {
+        data.citizenIdNumber = input.citizenIdNumber || null;
+      }
+      if (input.bankAccountNumber !== undefined) {
+        data.bankAccountNumber = input.bankAccountNumber || null;
+      }
+      if (input.bankName !== undefined) data.bankName = input.bankName || null;
+      if (input.permanentAddress !== undefined) {
+        data.permanentAddress = input.permanentAddress || null;
+      }
+      if (input.temporaryAddress !== undefined) {
+        data.temporaryAddress = input.temporaryAddress || null;
+      }
+      if (input.facebookUrl !== undefined) data.facebookUrl = input.facebookUrl || null;
+      if (input.university !== undefined) data.university = input.university || null;
+      if (input.jobTitle !== undefined) data.jobTitle = input.jobTitle;
+      if (input.baseSalaryAmount !== undefined) {
+        data.baseSalaryAmount = BigInt(input.baseSalaryAmount);
+      }
+      const joinedDate =
+        input.joinedDate === undefined
+          ? before.joinedDate
+          : input.joinedDate === null
+            ? null
+            : parseBusinessDate(input.joinedDate);
+      const officialDate =
+        input.officialDate === undefined
+          ? before.officialDate
+          : input.officialDate === null
+            ? null
+            : parseBusinessDate(input.officialDate);
+      if (joinedDate && officialDate && officialDate < joinedDate) {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "Ngày lên chính thức phải bằng hoặc sau ngày gia nhập công ty.",
+        );
+      }
+      if (input.joinedDate !== undefined) data.joinedDate = joinedDate;
+      if (input.officialDate !== undefined) data.officialDate = officialDate;
+      const changesEmployment =
+        input.employmentStatus !== undefined || input.employmentCategory !== undefined;
+      const effectiveFrom = input.effectiveFrom ? parseBusinessDate(input.effectiveFrom) : null;
+      const businessDate = toBusinessDate(now);
+      if (changesEmployment && (!effectiveFrom || effectiveFrom > businessDate)) {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "Ngày hiệu lực việc làm là bắt buộc và không được nằm trong tương lai.",
+        );
+      }
 
-    if (changesEmployment && effectiveFrom) {
-      const currentAtEffectiveDate = await tx.staffEmploymentHistory.findFirst({
+      const result = await tx.staffMember.updateMany({
+        where: { id, companyId: actor.companyId, version: input.version, archivedAt: null },
+        data,
+      });
+      if (result.count !== 1) {
+        throw new DomainError("CONFLICT", "Nhân sự đã được cập nhật bởi người khác.");
+      }
+
+      if (changesEmployment && effectiveFrom) {
+        const currentAtEffectiveDate = await tx.staffEmploymentHistory.findFirst({
+          where: {
+            companyId: actor.companyId,
+            staffId: id,
+            effectiveFrom: { lte: effectiveFrom },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveFrom } }],
+          },
+          orderBy: { effectiveFrom: "desc" },
+        });
+        const nextHistory = await tx.staffEmploymentHistory.findFirst({
+          where: {
+            companyId: actor.companyId,
+            staffId: id,
+            effectiveFrom: { gt: effectiveFrom },
+          },
+          orderBy: { effectiveFrom: "asc" },
+        });
+        const nextStatus =
+          input.employmentStatus ??
+          currentAtEffectiveDate?.employmentStatus ??
+          before.employmentStatus;
+        const nextCategory =
+          input.employmentCategory ??
+          currentAtEffectiveDate?.employmentCategory ??
+          before.employmentCategory;
+
+        if (currentAtEffectiveDate?.effectiveFrom.getTime() === effectiveFrom.getTime()) {
+          await tx.staffEmploymentHistory.update({
+            where: { id: currentAtEffectiveDate.id },
+            data: {
+              employmentStatus: nextStatus,
+              employmentCategory: nextCategory,
+              version: { increment: 1 },
+            },
+          });
+        } else {
+          if (currentAtEffectiveDate) {
+            await tx.staffEmploymentHistory.update({
+              where: { id: currentAtEffectiveDate.id },
+              data: { effectiveTo: effectiveFrom, version: { increment: 1 } },
+            });
+          }
+          await tx.staffEmploymentHistory.create({
+            data: {
+              companyId: actor.companyId,
+              staffId: id,
+              employmentStatus: nextStatus,
+              employmentCategory: nextCategory,
+              effectiveFrom,
+              effectiveTo: nextHistory?.effectiveFrom ?? null,
+              createdByUserId: actor.userId,
+            },
+          });
+        }
+        const effectiveToday = await tx.staffEmploymentHistory.findFirstOrThrow({
+          where: {
+            companyId: actor.companyId,
+            staffId: id,
+            effectiveFrom: { lte: businessDate },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gt: businessDate } }],
+          },
+          orderBy: { effectiveFrom: "desc" },
+        });
+        await tx.staffMember.update({
+          where: { id },
+          data: {
+            employmentStatus: effectiveToday.employmentStatus,
+            employmentCategory: effectiveToday.employmentCategory,
+          },
+        });
+      }
+      const after = await tx.staffMember.findUniqueOrThrow({ where: { id }, select: staffSelect });
+      const auditAssignment = await tx.branchAssignment.findFirst({
         where: {
           companyId: actor.companyId,
           staffId: id,
-          effectiveFrom: { lte: effectiveFrom },
-          OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveFrom } }],
+          archivedAt: null,
+          effectiveFrom: { lte: businessDate },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: businessDate } }],
+        },
+        orderBy: { effectiveFrom: "desc" },
+      });
+      const assignmentSnapshot = auditAssignment
+        ? safeAssignmentAuditSnapshot(auditAssignment)
+        : null;
+      await appendAudit(tx, {
+        actor,
+        action: changesEmployment ? "staff.status-change" : "staff.update",
+        entityType: "StaffMember",
+        entityId: id,
+        reason: systemAuditReason(
+          changesEmployment ? "STAFF_STATUS_UPDATED_FROM_UI" : "STAFF_UPDATED_FROM_UI",
+        ),
+        before: {
+          ...safeStaffAuditSnapshot(before),
+          ...(auditAssignment ? { branchId: auditAssignment.branchId } : {}),
+          ...(assignmentSnapshot ? { assignment: assignmentSnapshot } : {}),
+        },
+        after: {
+          ...safeStaffAuditSnapshot(after),
+          ...(auditAssignment ? { branchId: auditAssignment.branchId } : {}),
+          ...(assignmentSnapshot ? { assignment: assignmentSnapshot } : {}),
+          changedFields: Object.keys(input).filter(
+            (field) => !["version", "effectiveFrom"].includes(field),
+          ),
+        },
+        metadata,
+      });
+      return staffResponse(after);
+    },
+    { maxWait: 10_000, timeout: 30_000 },
+  );
+}
+
+export async function terminateStaff(
+  actor: ActorContext,
+  id: string,
+  input: StaffTerminateInput,
+  metadata: RequestMetadata,
+  now = new Date(),
+) {
+  requirePermission(actor, "staff:update");
+  const terminationDate = parseBusinessDate(input.terminationDate);
+  const businessDate = toBusinessDate(now);
+  if (terminationDate > businessDate) {
+    throw new DomainError("VALIDATION_ERROR", "Ngày nghỉ việc không được nằm trong tương lai.");
+  }
+  const assignmentCutoff = new Date(
+    Date.UTC(terminationDate.getUTCFullYear(), terminationDate.getUTCMonth() + 1, 1),
+  );
+
+  return prisma.$transaction(
+    async (tx) => {
+      const before = await tx.staffMember.findFirst({
+        where: { id, companyId: actor.companyId, archivedAt: null },
+        select: staffSelect,
+      });
+      if (!before) {
+        throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên.");
+      }
+      if (before.joinedDate && terminationDate < before.joinedDate) {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "Ngày nghỉ việc không được trước ngày gia nhập công ty.",
+        );
+      }
+      if (before.employmentStatus === "TERMINATED" && before.terminationDate) {
+        throw new DomainError(
+          "CONFLICT",
+          "Nhân viên đã có ngày nghỉ việc. Không thể thực hiện lại thao tác cho nghỉ việc.",
+        );
+      }
+
+      const updated = await tx.staffMember.updateMany({
+        where: {
+          id,
+          companyId: actor.companyId,
+          archivedAt: null,
+          version: input.version,
+        },
+        data: {
+          employmentStatus: "TERMINATED",
+          terminationDate,
+          version: { increment: 1 },
+        },
+      });
+      if (updated.count !== 1) {
+        throw new DomainError(
+          "CONFLICT",
+          "Hồ sơ nhân viên đã được cập nhật bởi người khác. Hãy tải lại.",
+        );
+      }
+
+      const currentHistory = await tx.staffEmploymentHistory.findFirst({
+        where: {
+          companyId: actor.companyId,
+          staffId: id,
+          effectiveFrom: { lte: terminationDate },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: terminationDate } }],
         },
         orderBy: { effectiveFrom: "desc" },
       });
@@ -441,77 +697,102 @@ export async function updateStaff(
         where: {
           companyId: actor.companyId,
           staffId: id,
-          effectiveFrom: { gt: effectiveFrom },
+          effectiveFrom: { gt: terminationDate },
         },
         orderBy: { effectiveFrom: "asc" },
       });
-      const nextStatus =
-        input.employmentStatus ??
-        currentAtEffectiveDate?.employmentStatus ??
-        before.employmentStatus;
-      const nextCategory =
-        input.employmentCategory ??
-        currentAtEffectiveDate?.employmentCategory ??
-        before.employmentCategory;
 
-      if (currentAtEffectiveDate?.effectiveFrom.getTime() === effectiveFrom.getTime()) {
+      if (currentHistory?.effectiveFrom.getTime() === terminationDate.getTime()) {
         await tx.staffEmploymentHistory.update({
-          where: { id: currentAtEffectiveDate.id },
-          data: {
-            employmentStatus: nextStatus,
-            employmentCategory: nextCategory,
-            version: { increment: 1 },
-          },
+          where: { id: currentHistory.id },
+          data: { employmentStatus: "TERMINATED", version: { increment: 1 } },
         });
       } else {
-        if (currentAtEffectiveDate) {
+        if (currentHistory) {
           await tx.staffEmploymentHistory.update({
-            where: { id: currentAtEffectiveDate.id },
-            data: { effectiveTo: effectiveFrom, version: { increment: 1 } },
+            where: { id: currentHistory.id },
+            data: { effectiveTo: terminationDate, version: { increment: 1 } },
           });
         }
         await tx.staffEmploymentHistory.create({
           data: {
             companyId: actor.companyId,
             staffId: id,
-            employmentStatus: nextStatus,
-            employmentCategory: nextCategory,
-            effectiveFrom,
+            employmentStatus: "TERMINATED",
+            employmentCategory: currentHistory?.employmentCategory ?? before.employmentCategory,
+            effectiveFrom: terminationDate,
             effectiveTo: nextHistory?.effectiveFrom ?? null,
             createdByUserId: actor.userId,
           },
         });
       }
-      const effectiveToday = await tx.staffEmploymentHistory.findFirstOrThrow({
+      await tx.staffEmploymentHistory.updateMany({
         where: {
           companyId: actor.companyId,
           staffId: id,
-          effectiveFrom: { lte: businessDate },
-          OR: [{ effectiveTo: null }, { effectiveTo: { gt: businessDate } }],
+          effectiveFrom: { gt: terminationDate },
+          employmentStatus: { not: "TERMINATED" },
         },
-        orderBy: { effectiveFrom: "desc" },
+        data: { employmentStatus: "TERMINATED", version: { increment: 1 } },
       });
-      await tx.staffMember.update({
+
+      const endedAssignments = await tx.branchAssignment.updateMany({
+        where: {
+          companyId: actor.companyId,
+          staffId: id,
+          archivedAt: null,
+          effectiveFrom: { lt: assignmentCutoff },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: assignmentCutoff } }],
+        },
+        data: { effectiveTo: assignmentCutoff, version: { increment: 1 } },
+      });
+      const cancelledFutureAssignments = await tx.branchAssignment.updateMany({
+        where: {
+          companyId: actor.companyId,
+          staffId: id,
+          archivedAt: null,
+          effectiveFrom: { gte: assignmentCutoff },
+        },
+        data: { archivedAt: now, version: { increment: 1 } },
+      });
+
+      const linkedUser = await tx.user.findFirst({
+        where: { companyId: actor.companyId, staffId: id },
+        select: { id: true },
+      });
+      if (linkedUser) {
+        await tx.user.update({
+          where: { id: linkedUser.id },
+          data: { active: false, version: { increment: 1 } },
+        });
+        await tx.session.deleteMany({ where: { userId: linkedUser.id } });
+      }
+
+      const after = await tx.staffMember.findUniqueOrThrow({
         where: { id },
-        data: {
-          employmentStatus: effectiveToday.employmentStatus,
-          employmentCategory: effectiveToday.employmentCategory,
-        },
+        select: staffSelect,
       });
-    }
-    const after = await tx.staffMember.findUniqueOrThrow({ where: { id }, select: staffSelect });
-    await appendAudit(tx, {
-      actor,
-      action: changesEmployment ? "staff.status-change" : "staff.update",
-      entityType: "StaffMember",
-      entityId: id,
-      reason: input.reason,
-      before: staffAuditShape(before),
-      after: staffAuditShape(after),
-      metadata,
-    });
-    return staffResponse(after);
-  });
+      await appendAudit(tx, {
+        actor,
+        action: "staff.terminate",
+        entityType: "StaffMember",
+        entityId: id,
+        reason: systemAuditReason("STAFF_TERMINATED_FROM_UI"),
+        before: safeStaffAuditSnapshot(before),
+        after: {
+          ...safeStaffAuditSnapshot(after),
+          assignmentCutoff: assignmentCutoff.toISOString().slice(0, 10),
+          endedAssignments: endedAssignments.count,
+          cancelledFutureAssignments: cancelledFutureAssignments.count,
+          disabledUserId: linkedUser?.id ?? null,
+          sessionsRevoked: linkedUser !== null,
+        },
+        metadata,
+      });
+      return staffResponse(after);
+    },
+    { maxWait: 10_000, timeout: 30_000 },
+  );
 }
 
 export async function archiveStaff(
@@ -564,14 +845,18 @@ export async function archiveStaff(
     if (result.count !== 1) {
       throw new DomainError("CONFLICT", "Nhân sự đã được cập nhật bởi người khác.");
     }
-    const after = { ...staffAuditShape(before), archivedAt: archivedAt.toISOString() };
+    const after = {
+      ...safeStaffAuditSnapshot(before),
+      archivedAt: archivedAt.toISOString(),
+      version: before.version + 1,
+    };
     await appendAudit(tx, {
       actor,
       action: "staff.archive",
       entityType: "StaffMember",
       entityId: id,
-      reason: input.reason,
-      before: staffAuditShape(before),
+      reason: systemAuditReason("STAFF_ARCHIVED_FROM_UI"),
+      before: safeStaffAuditSnapshot(before),
       after,
       metadata,
     });
@@ -626,12 +911,35 @@ export async function createAssignment(
       throw new DomainError("CONFLICT", "Khoảng phân công bị trùng với lịch sử hiện có.");
     }
 
+    if (input.assignmentType === "MEMBER" && input.attendanceMachineCode) {
+      const duplicateMachineCode = await tx.branchAssignment.findFirst({
+        where: {
+          companyId: actor.companyId,
+          branchId: input.branchId,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: input.attendanceMachineCode,
+          archivedAt: null,
+          ...(effectiveTo ? { effectiveFrom: { lt: effectiveTo } } : {}),
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: effectiveFrom } }],
+        },
+        select: { id: true },
+      });
+      if (duplicateMachineCode) {
+        throw new DomainError(
+          "CONFLICT",
+          "Mã máy chấm công đã được dùng trong cơ sở ở khoảng thời gian này.",
+        );
+      }
+    }
+
     const assignment = await tx.branchAssignment.create({
       data: {
         companyId: actor.companyId,
         branchId: input.branchId,
         staffId: input.staffId,
         assignmentType: input.assignmentType,
+        attendanceMachineCode:
+          input.assignmentType === "MEMBER" ? (input.attendanceMachineCode ?? null) : null,
         effectiveFrom,
         effectiveTo,
       },
@@ -641,15 +949,8 @@ export async function createAssignment(
       action: "assignment.create",
       entityType: "BranchAssignment",
       entityId: assignment.id,
-      reason: input.reason,
-      after: {
-        branchId: assignment.branchId,
-        staffId: assignment.staffId,
-        assignmentType: assignment.assignmentType,
-        effectiveFrom: input.effectiveFrom,
-        effectiveTo: input.effectiveTo ?? null,
-        version: assignment.version,
-      },
+      reason: systemAuditReason("ASSIGNMENT_CREATED_FROM_UI"),
+      after: safeAssignmentAuditSnapshot(assignment),
       metadata,
     });
     return assignment;
@@ -693,17 +994,13 @@ export async function updateAssignment(
           : "assignment.update",
       entityType: "BranchAssignment",
       entityId: id,
-      reason: input.reason,
-      before: {
-        effectiveFrom: before.effectiveFrom.toISOString().slice(0, 10),
-        effectiveTo: before.effectiveTo?.toISOString().slice(0, 10) ?? null,
-        version: before.version,
-      },
-      after: {
-        effectiveFrom: after.effectiveFrom.toISOString().slice(0, 10),
-        effectiveTo: after.effectiveTo?.toISOString().slice(0, 10) ?? null,
-        version: after.version,
-      },
+      reason: systemAuditReason(
+        before.effectiveTo?.getTime() !== after.effectiveTo?.getTime() && after.effectiveTo
+          ? "ASSIGNMENT_ENDED_FROM_UI"
+          : "ASSIGNMENT_UPDATED_FROM_UI",
+      ),
+      before: safeAssignmentAuditSnapshot(before),
+      after: safeAssignmentAuditSnapshot(after),
       metadata,
     });
     return after;
@@ -749,6 +1046,12 @@ export async function transferAssignment(
     if (before.staff.archivedAt || before.staff.employmentStatus === "TERMINATED") {
       throw new DomainError("VALIDATION_ERROR", "Không thể chuyển nhân viên đã nghỉ việc.");
     }
+    if (before.assignmentType === "MEMBER" && !input.attendanceMachineCode) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Mã máy chấm công mới là bắt buộc khi chuyển cơ sở.",
+      );
+    }
     const overlap = await tx.branchAssignment.findFirst({
       where: {
         id: { not: id },
@@ -764,6 +1067,27 @@ export async function transferAssignment(
     if (overlap) {
       throw new DomainError("CONFLICT", "Khoảng phân công mới bị trùng với lịch sử hiện có.");
     }
+    if (before.assignmentType === "MEMBER" && input.attendanceMachineCode) {
+      const duplicateMachineCode = await tx.branchAssignment.findFirst({
+        where: {
+          companyId: actor.companyId,
+          branchId: targetBranch.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: input.attendanceMachineCode,
+          archivedAt: null,
+          ...(before.effectiveTo ? { effectiveFrom: { lt: before.effectiveTo } } : {}),
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: transferDate } }],
+        },
+        select: { id: true },
+      });
+      if (duplicateMachineCode) {
+        throw new DomainError(
+          "CONFLICT",
+          "Mã máy chấm công đã được dùng trong cơ sở đích ở khoảng thời gian này.",
+        );
+      }
+    }
+
     const updated = await tx.branchAssignment.updateMany({
       where: {
         id,
@@ -782,6 +1106,8 @@ export async function transferAssignment(
         branchId: targetBranch.id,
         staffId: before.staffId,
         assignmentType: before.assignmentType,
+        attendanceMachineCode:
+          before.assignmentType === "MEMBER" ? (input.attendanceMachineCode ?? null) : null,
         effectiveFrom: transferDate,
         effectiveTo: before.effectiveTo,
       },
@@ -791,20 +1117,15 @@ export async function transferAssignment(
       action: "assignment.transfer",
       entityType: "BranchAssignment",
       entityId: id,
-      reason: input.reason,
-      before: {
-        branchId: before.branchId,
-        branchCode: before.branch.code,
-        effectiveFrom: before.effectiveFrom.toISOString().slice(0, 10),
-        effectiveTo: before.effectiveTo?.toISOString().slice(0, 10) ?? null,
-        version: before.version,
-      },
+      reason: systemAuditReason("ASSIGNMENT_TRANSFERRED_FROM_UI"),
+      before: safeAssignmentAuditSnapshot(before),
       after: {
-        branchId: before.branchId,
+        ...safeAssignmentAuditSnapshot({
+          ...before,
+          effectiveTo: transferDate,
+          version: before.version + 1,
+        }),
         branchCode: before.branch.code,
-        effectiveFrom: before.effectiveFrom.toISOString().slice(0, 10),
-        effectiveTo: input.effectiveFrom,
-        version: before.version + 1,
         transferredToAssignmentId: created.id,
       },
       metadata,
@@ -814,15 +1135,10 @@ export async function transferAssignment(
       action: "assignment.transfer.target",
       entityType: "BranchAssignment",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason("ASSIGNMENT_TRANSFER_TARGET_CREATED_FROM_UI"),
       after: {
-        branchId: created.branchId,
+        ...safeAssignmentAuditSnapshot(created),
         branchCode: targetBranch.code,
-        staffId: created.staffId,
-        assignmentType: created.assignmentType,
-        effectiveFrom: input.effectiveFrom,
-        effectiveTo: created.effectiveTo?.toISOString().slice(0, 10) ?? null,
-        version: created.version,
         transferredFromAssignmentId: id,
       },
       metadata,
@@ -871,20 +1187,13 @@ export async function cancelAssignment(
       action: "assignment.cancel",
       entityType: "BranchAssignment",
       entityId: id,
-      reason: input.reason,
-      before: {
-        branchId: before.branchId,
-        staffId: before.staffId,
-        effectiveFrom: before.effectiveFrom.toISOString().slice(0, 10),
-        effectiveTo: before.effectiveTo?.toISOString().slice(0, 10) ?? null,
-        version: before.version,
-      },
-      after: {
-        branchId: before.branchId,
-        staffId: before.staffId,
-        archivedAt: archivedAt.toISOString(),
+      reason: systemAuditReason("ASSIGNMENT_CANCELLED_FROM_UI"),
+      before: safeAssignmentAuditSnapshot(before),
+      after: safeAssignmentAuditSnapshot({
+        ...before,
+        archivedAt,
         version: before.version + 1,
-      },
+      }),
       metadata,
     });
     return { id, archivedAt: archivedAt.toISOString(), version: before.version + 1 };
@@ -951,7 +1260,7 @@ export async function createUserAccount(
         action: "user.create",
         entityType: "User",
         entityId: user.id,
-        reason: input.reason,
+        reason: systemAuditReason("USER_CREATED_FROM_UI"),
         after: {
           email: user.email,
           name: user.name,
@@ -1082,7 +1391,7 @@ export async function updateUserAccount(
     if (input.active !== undefined) {
       data.active = input.active;
       data.banned = !input.active;
-      data.banReason = input.active ? null : input.reason;
+      data.banReason = input.active ? null : "Vô hiệu hóa từ giao diện quản trị";
     }
 
     const result = await tx.user.updateMany({
@@ -1120,7 +1429,13 @@ export async function updateUserAccount(
           : "user.update",
       entityType: "User",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason(
+        before.active !== after.active
+          ? after.active
+            ? "USER_REACTIVATED_FROM_UI"
+            : "USER_DEACTIVATED_FROM_UI"
+          : "USER_UPDATED_FROM_UI",
+      ),
       before,
       after,
       metadata,

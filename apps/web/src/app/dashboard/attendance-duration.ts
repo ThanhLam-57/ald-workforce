@@ -1,5 +1,9 @@
 export const MAX_ATTENDANCE_DURATION_MINUTES = 2_880;
 
+export function isNextDayCheckout(checkInTime: string, checkOutTime: string): boolean {
+  return checkInTime !== "" && checkOutTime !== "" && checkOutTime < checkInTime;
+}
+
 export function formatDurationMinutes(minutes: number): string {
   if (!Number.isInteger(minutes) || minutes < 0 || minutes > MAX_ATTENDANCE_DURATION_MINUTES) {
     throw new RangeError("Thời lượng phải là số phút nguyên từ 0 đến 2.880.");

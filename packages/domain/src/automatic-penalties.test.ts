@@ -38,6 +38,26 @@ describe("automatic attendance penalties", () => {
     ).toBe("INSUFFICIENT_DATA");
   });
 
+  it("không tự phạt khi rule dùng ca nhân viên nhưng chưa resolve được ca", () => {
+    expect(
+      evaluateAutomaticPenalty(
+        {
+          type: "CHECK_IN_LATE",
+          thresholdSource: "STAFF_SHIFT",
+          graceMinutes: 15,
+          branchId: null,
+        },
+        {
+          ...present,
+          checkInAt: "2026-07-27T03:00:00.000Z",
+        },
+      ),
+    ).toMatchObject({
+      status: "INSUFFICIENT_DATA",
+      configuredMinutes: 0,
+    });
+  });
+
   it("so sánh cả ngày nghiệp vụ thay vì chỉ phần giờ trong ngày", () => {
     expect(
       evaluateAutomaticPenalty(lateCondition, {

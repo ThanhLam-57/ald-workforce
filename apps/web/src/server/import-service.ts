@@ -18,7 +18,7 @@ import {
   type ActorContext,
 } from "@ald/domain";
 
-import { appendSecureAudit } from "./audit-service";
+import { appendSecureAudit, systemAuditReason } from "./audit-service";
 import {
   defaultImportMapping,
   IMPORT_TEMPLATE_DEFINITIONS,
@@ -33,6 +33,15 @@ import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 const IMPORT_BATCH_SIZE = 200;
 const MAX_PERSISTED_ERRORS = 10_000;
 const MANAGER_TEMPLATES = new Set<ImportTemplate>(["STAFF", "ASSIGNMENTS", "ATTENDANCE_LIVE"]);
+
+function assertGenericImportTemplate(template: ImportTemplate): void {
+  if (template === "ATTENDANCE_MACHINE") {
+    throw new DomainError(
+      "FORBIDDEN",
+      "Import máy chấm công chỉ được thực hiện trong hồ sơ Attendance của nhân viên.",
+    );
+  }
+}
 
 type Transaction = Prisma.TransactionClient;
 type ValidationError = Omit<ImportJobDto["errors"][number], "id">;
@@ -169,6 +178,7 @@ export async function presignImportUpload(
   input: ImportPresignInput,
   metadata: RequestMetadata,
 ) {
+  assertGenericImportTemplate(input.template);
   requireImportRole(actor, input.template);
   if (actor.role === "TRAINING_MANAGER") {
     if (!input.branchId || !canAccessBranch(actor, input.branchId)) {
@@ -196,6 +206,7 @@ export async function presignImportUpload(
         companyId: actor.companyId,
         template: input.template,
         checksumSha256: input.checksumSha256,
+        scopeKey: "global",
       },
       include: importJobInclude,
     }));
@@ -223,6 +234,7 @@ export async function presignImportUpload(
       companyId: actor.companyId,
       branchId: input.branchId ?? null,
       template: input.template,
+      scopeKey: "global",
       idempotencyKey: input.idempotencyKey,
       objectKey,
       originalFileName: input.originalFileName,
@@ -230,7 +242,7 @@ export async function presignImportUpload(
       sizeBytes: input.sizeBytes,
       checksumSha256: input.checksumSha256,
       requestedByUserId: actor.userId,
-      reason: input.reason,
+      reason: systemAuditReason("IMPORT_UPLOAD_REQUESTED"),
     },
     include: importJobInclude,
   });
@@ -246,7 +258,7 @@ export async function presignImportUpload(
     entityType: "ImportJob",
     entityId: job.id,
     branchId: job.branchId,
-    reason: input.reason,
+    reason: systemAuditReason("IMPORT_UPLOAD_REQUESTED"),
     after: {
       template: input.template,
       fileName: input.originalFileName,
@@ -264,6 +276,7 @@ export async function completeImportUpload(
   metadata: RequestMetadata,
 ): Promise<ImportJobDto> {
   const current = await authorizedJob(actor, id);
+  assertGenericImportTemplate(current.template);
   if (current.status !== "PENDING_UPLOAD") {
     return toDto(current);
   }
@@ -612,6 +625,7 @@ export async function previewImport(
     maxAttempts: 5,
   });
   const job = await authorizedJob(actor, id);
+  assertGenericImportTemplate(job.template);
   if (!["UPLOADED", "VALIDATED", "FAILED"].includes(job.status)) {
     throw new DomainError("CONFLICT", "Import job chưa sẵn sàng để validate.");
   }
@@ -1457,10 +1471,12 @@ async function commitRows(
 export async function commitImport(
   actor: ActorContext,
   id: string,
-  input: ImportCommitInput,
+  _input: ImportCommitInput,
   metadata: RequestMetadata,
 ): Promise<ImportJobDto> {
+  const commitReason = systemAuditReason("IMPORT_COMMITTED");
   const job = await authorizedJob(actor, id);
+  assertGenericImportTemplate(job.template);
   if (job.status === "SUCCEEDED") return toDto(job);
   if (job.status !== "VALIDATED" || job.errorRows > 0) {
     throw new DomainError("CONFLICT", "Import phải validate thành công và không còn lỗi.");
@@ -1482,7 +1498,7 @@ export async function commitImport(
       job.template,
       validation.rows,
       id,
-      input.reason,
+      commitReason,
       metadata,
     );
     const updated = await prisma.importJob.update({
@@ -1500,7 +1516,7 @@ export async function commitImport(
       entityType: "ImportJob",
       entityId: id,
       branchId: job.branchId,
-      reason: input.reason,
+      reason: commitReason,
       before: { status: job.status, committedRows: job.committedRows },
       after: { status: updated.status, committedRows },
       metadata,
@@ -1518,7 +1534,7 @@ export async function commitImport(
       entityType: "ImportJob",
       entityId: id,
       branchId: job.branchId,
-      reason: input.reason,
+      reason: systemAuditReason("IMPORT_COMMIT_FAILED"),
       after: { status: "FAILED", errorMessage: message },
       metadata,
     });

@@ -9,12 +9,16 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
-import type { PayrollCalculationInput, PayrollCalculationOutput } from "@ald/domain";
+import type {
+  PayrollCalculationInput,
+  PayrollCalculationOutput,
+  PayrollMachineCodeInterval,
+} from "@ald/domain";
 import { prisma, type Prisma } from "@ald/db";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 
-const TEMPLATE_VERSION = "PAYSLIP_V2_COINS";
+const TEMPLATE_VERSION = "PAYSLIP_V3_MACHINE_CODE";
 const FONT_REGULAR_URL = import.meta.resolve(
   "@expo-google-fonts/noto-sans/400Regular/NotoSans_400Regular.ttf",
 );
@@ -37,6 +41,8 @@ export type PayslipExportData = Readonly<{
     code: string;
     fullName: string;
     streamingAlias: string | null;
+    attendanceMachineCode: string | null;
+    attendanceMachineCodeIntervals: readonly PayrollMachineCodeInterval[];
   }>;
   input: PayrollCalculationInput;
   output: PayrollCalculationOutput;
@@ -92,6 +98,17 @@ function weekdayLabel(date: string): string {
 function durationLabel(minutes: number): string {
   const safe = Math.max(0, Math.trunc(minutes));
   return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
+}
+
+function machineCodeLabel(data: PayslipExportData): string {
+  const codes = [
+    ...new Set(
+      data.staff.attendanceMachineCodeIntervals
+        .map((interval) => interval.attendanceMachineCode)
+        .filter((code): code is string => code !== null),
+    ),
+  ];
+  return codes.length > 0 ? codes.join(" → ") : (data.staff.attendanceMachineCode ?? "—");
 }
 
 const statusLabels = {
@@ -159,7 +176,7 @@ export async function createPayslipWorkbook(
     ["Công ty", data.companyName, "Kỳ lương", `${data.month.slice(5)}/${data.month.slice(0, 4)}`],
     ["Nhân viên", `${data.staff.code} — ${data.staff.fullName}`, "Revision", String(data.revision)],
     ["Cơ sở", `${data.branchCode} — ${data.branchName}`, "Calculation", `#${data.calculationNo}`],
-    ["ACC / Alias", data.staff.streamingAlias ?? "—", "Template", TEMPLATE_VERSION],
+    ["ACC / Alias", data.staff.streamingAlias ?? "—", "Mã máy chấm công", machineCodeLabel(data)],
   ];
   metadataRows.forEach((values, index) => {
     const row = summary.getRow(2 + index);
@@ -436,7 +453,7 @@ export async function createPayslipPdf(
     document.text(`Nhân viên: ${data.staff.code} — ${data.staff.fullName}`, 38, metaY + 17);
     document.text(`Cơ sở: ${data.branchCode} — ${data.branchName}`, 330, metaY + 17);
     document.text(`ACC / Alias: ${data.staff.streamingAlias ?? "—"}`, 38, metaY + 34);
-    document.text(`Calculation #${data.calculationNo}`, 330, metaY + 34);
+    document.text(`Mã máy chấm công: ${machineCodeLabel(data)}`, 330, metaY + 34);
     document.text(
       `Ngày làm việc: ${level.workedDayCount}/${level.attendanceRequiredDays ?? "—"} ngày`,
       38,
@@ -639,6 +656,10 @@ async function loadPayslips(jobId: string): Promise<{
     include: exportJobInclude,
   });
   if (!job) throw new Error("Không tìm thấy payroll export job.");
+  const periodFrom = job.payrollPeriod.month;
+  const periodToExclusive = new Date(
+    Date.UTC(periodFrom.getUTCFullYear(), periodFrom.getUTCMonth() + 1, 1),
+  );
   const entries = await prisma.payrollEntry.findMany({
     where: {
       companyId: job.companyId,
@@ -648,7 +669,29 @@ async function loadPayslips(jobId: string): Promise<{
     },
     select: {
       staff: {
-        select: { id: true, staffCode: true, fullName: true, streamingAlias: true },
+        select: {
+          id: true,
+          staffCode: true,
+          fullName: true,
+          streamingAlias: true,
+          assignments: {
+            where: {
+              companyId: job.companyId,
+              branchId: job.branchId,
+              assignmentType: "MEMBER",
+              effectiveFrom: { lt: periodToExclusive },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gt: periodFrom } }],
+            },
+            select: {
+              id: true,
+              attendanceMachineCode: true,
+              effectiveFrom: true,
+              effectiveTo: true,
+              archivedAt: true,
+            },
+            orderBy: [{ effectiveFrom: "asc" }, { id: "asc" }],
+          },
+        },
       },
       currentSnapshot: {
         select: {
@@ -661,31 +704,54 @@ async function loadPayslips(jobId: string): Promise<{
     },
     orderBy: { staff: { staffCode: "asc" } },
   });
-  const payslips = entries.flatMap((entry) =>
-    entry.currentSnapshot
-      ? [
-          {
-            companyName: job.company.name,
-            employeeRevenueVisible: job.company.employeeRevenueVisible,
-            branchCode: job.branch.code,
-            branchName: job.branch.name,
-            month: job.payrollPeriod.month.toISOString().slice(0, 7),
-            revision: job.payrollPeriod.revision,
-            status: job.payrollPeriod.status,
-            calculationNo: entry.currentSnapshot.calculationNo,
-            calculationHash: entry.currentSnapshot.inputHash,
-            staff: {
-              id: entry.staff.id,
-              code: entry.staff.staffCode,
-              fullName: entry.staff.fullName,
-              streamingAlias: entry.staff.streamingAlias,
-            },
-            input: inputFromJson(entry.currentSnapshot.inputs),
-            output: outputFromJson(entry.currentSnapshot.outputs),
-          } satisfies PayslipExportData,
-        ]
-      : [],
-  );
+  const payslips = entries.flatMap((entry) => {
+    if (!entry.currentSnapshot) return [];
+    const input = inputFromJson(entry.currentSnapshot.inputs);
+    const fallbackIntervals = entry.staff.assignments
+      .filter(
+        (assignment) =>
+          assignment.archivedAt === null ||
+          (assignment.archivedAt >= assignment.effectiveFrom &&
+            assignment.archivedAt >= periodFrom),
+      )
+      .map((assignment) => ({
+        assignmentId: assignment.id,
+        attendanceMachineCode: assignment.attendanceMachineCode,
+        effectiveFrom: assignment.effectiveFrom.toISOString().slice(0, 10),
+        effectiveTo: assignment.effectiveTo?.toISOString().slice(0, 10) ?? null,
+      }));
+    const attendanceMachineCodeIntervals =
+      input.staffIdentity?.attendanceMachineCodeIntervals ?? fallbackIntervals;
+    const snapshotIdentity = input.staffIdentity;
+    return [
+      {
+        companyName: job.company.name,
+        employeeRevenueVisible: job.company.employeeRevenueVisible,
+        branchCode: job.branch.code,
+        branchName: job.branch.name,
+        month: job.payrollPeriod.month.toISOString().slice(0, 7),
+        revision: job.payrollPeriod.revision,
+        status: job.payrollPeriod.status,
+        calculationNo: entry.currentSnapshot.calculationNo,
+        calculationHash: entry.currentSnapshot.inputHash,
+        staff: {
+          id: entry.staff.id,
+          code: snapshotIdentity?.staffCode ?? entry.staff.staffCode,
+          fullName: snapshotIdentity?.fullName ?? entry.staff.fullName,
+          streamingAlias: snapshotIdentity
+            ? snapshotIdentity.streamingAlias
+            : entry.staff.streamingAlias,
+          attendanceMachineCode:
+            attendanceMachineCodeIntervals.find(
+              (interval) => interval.attendanceMachineCode !== null,
+            )?.attendanceMachineCode ?? null,
+          attendanceMachineCodeIntervals,
+        },
+        input,
+        output: outputFromJson(entry.currentSnapshot.outputs),
+      } satisfies PayslipExportData,
+    ];
+  });
   if (payslips.length === 0) throw new Error("Kỳ lương chưa có snapshot phù hợp để export.");
   return { job, payslips };
 }

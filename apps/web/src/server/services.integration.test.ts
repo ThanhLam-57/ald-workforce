@@ -198,7 +198,7 @@ describe("tenant và branch scope", () => {
       updateBranch(
         gm,
         branchBId,
-        { name: "Không được sửa", version: 1, reason: "Integration IDOR test" },
+        { name: "Không được sửa", version: 1 },
         metadata,
       ),
     ).rejects.toBeInstanceOf(DomainError);
@@ -212,9 +212,9 @@ describe("tenant và branch scope", () => {
           staffId: memberAId,
           branchId: branchAId,
           assignmentType: "MEMBER",
+          attendanceMachineCode: "MEMBER-A-OVERLAP",
           effectiveFrom: "2026-06-01",
           effectiveTo: null,
-          reason: "Integration overlap test",
         },
         metadata,
       ),
@@ -229,7 +229,6 @@ describe("audit skeleton", () => {
       {
         code: `AUD${runId}`,
         name: "Branch audit",
-        reason: "Integration audit test",
       },
       metadata,
     );
@@ -243,7 +242,7 @@ describe("audit skeleton", () => {
       },
     });
 
-    expect(audit?.reason).toBe("Integration audit test");
+    expect(audit?.reason).toBe("SYSTEM:BRANCH_CREATED_FROM_UI");
     expect(audit?.before).toBeNull();
     expect(audit?.after).toMatchObject({ code: `AUD${runId}`.toUpperCase() });
   });
@@ -259,7 +258,6 @@ describe("audit skeleton", () => {
         name: "Created User",
         role: "LIVE_EMPLOYEE",
         staffId: null,
-        reason: "Integration account provisioning",
       },
       metadata,
     );

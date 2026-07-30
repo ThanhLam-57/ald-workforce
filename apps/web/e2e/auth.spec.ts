@@ -35,7 +35,6 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
     data: {
       code: `E2E${suffix}`,
       name: `Cơ sở E2E ${suffix}`,
-      reason: "E2E tạo cơ sở attendance",
     },
   });
   expect(branchResponse.ok(), await branchResponse.text()).toBe(true);
@@ -51,7 +50,6 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
       employmentCategory: "OFFICIAL",
       joinedDate: businessDate,
       officialDate: businessDate,
-      reason: "E2E tạo nhân viên attendance",
     },
   });
   expect(staffResponse.ok()).toBe(true);
@@ -66,7 +64,6 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
       assignmentType: "MEMBER",
       effectiveFrom: businessDate,
       effectiveTo: null,
-      reason: "E2E phân công attendance",
     },
   });
   expect(assignmentResponse.ok()).toBe(true);
@@ -77,7 +74,6 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
     page.getByLabel("Nhân viên attendance").locator(`option[value="${staffPayload.data.id}"]`),
   ).toHaveCount(1);
   await page.getByLabel("Nhân viên attendance").selectOption(staffPayload.data.id);
-  await page.getByLabel("Lý do thay đổi attendance").fill("E2E autosave attendance");
   let attendanceMutationCount = 0;
   page.on("request", (request) => {
     if (request.url().includes("/api/attendance") && ["POST", "PATCH"].includes(request.method())) {
@@ -194,7 +190,6 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
       data: {
         code: `P${suffix}`,
         name: `Penalty E2E ${suffix}`,
-        reason: "E2E tạo branch penalty",
       },
     });
   expect(branchResponse.ok(), await branchResponse.text()).toBe(true);
@@ -207,7 +202,6 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
         employmentCategory: "OFFICIAL",
         joinedDate: `${month}-01`,
         officialDate: `${month}-01`,
-        reason: "E2E tạo staff penalty",
       },
     });
   expect(staffResponse.ok(), await staffResponse.text()).toBe(true);
@@ -219,7 +213,6 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
       assignmentType: "MEMBER",
       effectiveFrom: `${month}-01`,
       effectiveTo: null,
-      reason: "E2E phân công penalty",
     },
   });
   const attendanceResponse = await page.request.post("/api/attendance", {
@@ -227,7 +220,6 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
       staffId: staff.data.id,
       businessDate,
       status: "PRESENT",
-      reason: "E2E attendance penalty",
     },
   });
   expect(attendanceResponse.ok()).toBe(true);
@@ -270,29 +262,75 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
       page.getByLabel("Nhân viên attendance").locator(`option[value="${staff.data.id}"]`),
     ).toHaveCount(1);
     await page.getByLabel("Nhân viên attendance").selectOption(staff.data.id);
-    await page.getByLabel("Lý do thay đổi attendance").fill("E2E ghi violation");
+    await expect(page.getByLabel("Lý do thay đổi attendance")).toHaveCount(0);
     const [year, monthNumber, day] = businessDate.split("-");
     const row = page.getByRole("row").filter({ hasText: `${day}/${monthNumber}/${year}` });
     await row
-      .getByRole("button", { name: `Mở lỗi và evidence ngày ${businessDate}` })
+      .getByRole("button", {
+        name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
+      })
       .click();
     const dialog = page.getByRole("dialog", { name: `Lỗi và evidence ngày ${businessDate}` });
     await dialog.getByRole("button", { name: "Thêm lỗi" }).click();
     await dialog.getByLabel(`Loại lỗi ${businessDate}`).selectOption(penaltyItem!.id);
     await dialog.getByLabel(`Chi tiết lỗi ${businessDate}`).fill("Đi muộn 10 phút trong E2E");
+
+    let createRequestCount = 0;
+    let createReason: unknown;
+    page.on("request", (request) => {
+      if (request.url().endsWith("/api/violations") && request.method() === "POST") {
+        createRequestCount += 1;
+        createReason = request.postDataJSON().reason;
+      }
+    });
     await dialog.getByRole("button", { name: "Ghi lỗi" }).click();
 
     await expect(page.getByText(/tổng phạt tháng 50\.000/)).toBeVisible();
-    await row
-      .getByRole("button", { name: `Mở lỗi và evidence ngày ${businessDate}` })
-      .click();
+    await expect.poll(() => createRequestCount).toBe(1);
+    expect(createReason).toBeUndefined();
+    await dialog.getByRole("button", { name: "Đóng" }).click();
+    const activeViolationButton = row.getByRole("button", {
+      name: `Mở lỗi và evidence ngày ${businessDate}, 1 lỗi hiện hành`,
+    });
+    await expect(
+      activeViolationButton.getByTitle(`Đi muộn E2E ${suffix}`, { exact: true }),
+    ).toBeVisible();
+    await activeViolationButton.click();
     const refreshedDialog = page.getByRole("dialog", {
       name: `Lỗi và evidence ngày ${businessDate}`,
     });
-    await expect(
-      refreshedDialog.getByText(`Đi muộn E2E ${suffix}`, { exact: true }),
-    ).toBeVisible();
+    await expect(refreshedDialog.getByText(`Đi muộn E2E ${suffix}`, { exact: true })).toBeVisible();
     await expect(refreshedDialog.getByText(/^50\.000/)).toBeVisible();
+
+    let cancelRequestCount = 0;
+    let cancelReason: unknown;
+    page.on("request", (request) => {
+      if (request.url().includes("/api/violations/") && request.method() === "DELETE") {
+        cancelRequestCount += 1;
+        cancelReason = request.postDataJSON().reason;
+      }
+    });
+    await refreshedDialog.getByRole("button", { name: "Hủy lỗi" }).click();
+    await expect.poll(() => cancelRequestCount).toBe(1);
+    expect(cancelReason).toBeUndefined();
+    await expect(refreshedDialog.getByText("Đã hủy", { exact: true })).toBeVisible();
+    await refreshedDialog.getByRole("button", { name: "Đóng" }).click();
+    await expect(
+      row.getByRole("button", {
+        name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
+      }),
+    ).toBeVisible();
+
+    await row
+      .getByRole("button", {
+        name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
+      })
+      .click();
+    const historyDialog = page.getByRole("dialog", {
+      name: `Lỗi và evidence ngày ${businessDate}`,
+    });
+    await expect(historyDialog.getByText(`Đi muộn E2E ${suffix}`, { exact: true })).toBeVisible();
+    await expect(historyDialog.getByText("Đã hủy", { exact: true })).toBeVisible();
   } finally {
     if (
       originalSimpleRules.data.penalty.effectiveFrom &&
@@ -320,7 +358,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
     data: {
       code: `OV${suffix}`,
       name: `Overview E2E ${suffix}`,
-      reason: "E2E tạo branch overview",
     },
   });
   expect(branchResponse.ok(), await branchResponse.text()).toBe(true);
@@ -335,7 +372,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
       employmentCategory: "OFFICIAL",
       joinedDate: businessDate,
       officialDate: businessDate,
-      reason: "E2E tạo staff overview",
     },
   });
   expect(staffResponse.ok()).toBe(true);
@@ -348,7 +384,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
       assignmentType: "MEMBER",
       effectiveFrom: businessDate,
       effectiveTo: null,
-      reason: "E2E phân công overview",
     },
   });
   expect(assignmentResponse.ok()).toBe(true);
@@ -361,7 +396,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
       status: "PRESENT",
       revenueAmount: "100000",
       actualLiveMinutes: 30,
-      reason: "E2E fixture overview",
     },
   });
   expect(attendanceResponse.ok()).toBe(true);
@@ -369,7 +403,7 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
   await page.reload();
   await page.getByLabel("Cơ sở tổng quan").selectOption(branch.data.id);
   await page.getByLabel("Tháng tổng quan cơ sở").fill(month);
-  await page.getByLabel("Lý do chỉnh sửa tổng quan").fill("E2E inline edit overview");
+  await expect(page.getByLabel("Lý do chỉnh sửa tổng quan")).toHaveCount(0);
 
   const weeks = page.getByTestId("overview-week-list");
   await expect(weeks.getByTestId("overview-week-1")).toContainText("Tuần 1 · 01/07–05/07");
@@ -471,7 +505,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
     data: {
       effectiveTo: cleanupDate,
       version: 1,
-      reason: "E2E kết thúc phân công overview",
     },
   });
   expect(endAssignmentResponse.ok()).toBe(true);
@@ -481,7 +514,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
       employmentStatus: "TERMINATED",
       effectiveFrom: cleanupDate,
       version: 1,
-      reason: "E2E kết thúc nhân viên overview",
     },
   });
   expect(terminateStaffResponse.ok()).toBe(true);
@@ -489,7 +521,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
   const archiveStaffResponse = await page.request.post(`/api/staff/${staff.data.id}/archive`, {
     data: {
       version: 2,
-      reason: "E2E dọn fixture overview",
     },
   });
   expect(archiveStaffResponse.ok()).toBe(true);
@@ -498,7 +529,6 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
     data: {
       isActive: false,
       version: 1,
-      reason: "E2E dọn fixture overview",
     },
   });
   expect(deactivateBranchResponse.ok()).toBe(true);

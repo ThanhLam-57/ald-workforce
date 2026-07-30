@@ -145,6 +145,19 @@ export async function getBranchMonthlyOverview(
                         mode: "insensitive" as const,
                       },
                     },
+                    {
+                      assignments: {
+                        some: {
+                          branchId: branch.id,
+                          attendanceMachineCode: {
+                            contains: query.search,
+                            mode: "insensitive" as const,
+                          },
+                          effectiveFrom: { lt: end },
+                          OR: [{ effectiveTo: null }, { effectiveTo: { gt: start } }],
+                        },
+                      },
+                    },
                   ],
                 },
               ],
@@ -158,6 +171,18 @@ export async function getBranchMonthlyOverview(
         streamingAlias: true,
         employmentCategory: true,
         employmentStatus: true,
+        assignments: {
+          where: {
+            branchId: branch.id,
+            assignmentType: "MEMBER",
+            archivedAt: null,
+            effectiveFrom: { lt: end },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gt: start } }],
+          },
+          orderBy: { effectiveFrom: "desc" },
+          take: 1,
+          select: { attendanceMachineCode: true },
+        },
         levelHistories: {
           where: {
             companyId: actor.companyId,
@@ -248,6 +273,7 @@ export async function getBranchMonthlyOverview(
       staff: {
         id: person.id,
         staffCode: person.staffCode,
+        attendanceMachineCode: person.assignments[0]?.attendanceMachineCode ?? null,
         fullName: person.fullName,
         streamingAlias: person.streamingAlias,
         employmentCategory: person.employmentCategory,
@@ -330,7 +356,6 @@ export async function updateBranchOverviewCells(
             existing.id,
             {
               version: edit.version ?? 0,
-              reason: input.reason,
               ...(edit.revenueAmount !== undefined ? { revenueAmount: edit.revenueAmount } : {}),
               ...(edit.actualLiveMinutes !== undefined
                 ? { actualLiveMinutes: edit.actualLiveMinutes }
@@ -347,7 +372,6 @@ export async function updateBranchOverviewCells(
             {
               staffId: edit.staffId,
               businessDate: edit.businessDate,
-              reason: input.reason,
               ...(edit.revenueAmount !== undefined ? { revenueAmount: edit.revenueAmount } : {}),
               ...(edit.actualLiveMinutes !== undefined
                 ? { actualLiveMinutes: edit.actualLiveMinutes }

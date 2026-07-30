@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 import path from "node:path";
 
-const developmentEval = process.env.NODE_ENV === "production" ? "" : " 'unsafe-eval'";
+import { buildContentSecurityPolicy } from "./security-policy";
+
+const development = process.env.NODE_ENV !== "production";
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -28,7 +30,10 @@ const nextConfig: NextConfig = {
           { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
           {
             key: "Content-Security-Policy",
-            value: `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'${developmentEval}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https:; upgrade-insecure-requests`,
+            value: buildContentSecurityPolicy({
+              development,
+              storageEndpoint: process.env.S3_PUBLIC_ENDPOINT ?? process.env.S3_ENDPOINT,
+            }),
           },
           {
             key: "Strict-Transport-Security",

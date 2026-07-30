@@ -46,7 +46,6 @@ export function PenaltyRuleCenter() {
   const [selectedDraftId, setSelectedDraftId] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<readonly EditablePenaltyItem[]>([]);
-  const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [comparison, setComparison] = useState<PenaltyRuleComparisonDto | null>(null);
@@ -124,7 +123,6 @@ export function PenaltyRuleCenter() {
     try {
       const created = (await postJson("/api/rules/penalty", {
         name: String(form.get("name") ?? ""),
-        reason,
       })) as PenaltyRuleSetDto;
       setMessage("Đã tạo bộ rule và draft version 1.");
       event.currentTarget.reset();
@@ -140,7 +138,6 @@ export function PenaltyRuleCenter() {
         ruleSetId,
         cloneFromVersionId: versionId,
         notes: null,
-        reason,
       })) as PenaltyRuleVersionDto;
       setMessage(`Đã clone thành draft version ${created.versionNo}.`);
       await loadRules(created.id);
@@ -163,7 +160,6 @@ export function PenaltyRuleCenter() {
           notes: notes || null,
           items,
           rowVersion: draft.rowVersion,
-          reason,
         }),
       });
       const payload = (await response.json()) as ApiPayload;
@@ -187,7 +183,6 @@ export function PenaltyRuleCenter() {
         effectiveFrom: String(form.get("effectiveFrom") ?? ""),
         effectiveTo: String(form.get("effectiveTo") ?? "") || null,
         rowVersion: draft.rowVersion,
-        reason,
       });
       setMessage(`Đã publish version ${draft.versionNo}.`);
       await loadRules();
@@ -203,7 +198,6 @@ export function PenaltyRuleCenter() {
       await postJson(`/api/rules/penalty/versions/${version.id}/retire`, {
         effectiveTo: String(form.get("effectiveTo") ?? ""),
         rowVersion: version.rowVersion,
-        reason,
       });
       setMessage(`Đã retire version ${version.versionNo}.`);
       await loadRules();
@@ -251,15 +245,6 @@ export function PenaltyRuleCenter() {
             Published version bất biến · khoảng hiệu lực [từ, đến)
           </p>
         </div>
-        <label className="grid min-w-72 gap-1 text-sm">
-          Lý do thao tác
-          <input
-            aria-label="Lý do thay đổi rule"
-            onChange={(event) => setReason(event.target.value)}
-            placeholder="Bắt buộc để ghi audit"
-            value={reason}
-          />
-        </label>
       </div>
       {message ? (
         <p aria-live="polite" className="mt-3 text-sm text-slate-700">
@@ -269,7 +254,7 @@ export function PenaltyRuleCenter() {
 
       <form className="mt-5 flex flex-wrap gap-3" onSubmit={createRuleSet}>
         <input name="name" placeholder="Tên bộ rule phạt" required />
-        <Button disabled={!reason.trim()} type="submit">
+        <Button type="submit">
           Tạo RuleSet
         </Button>
       </form>
@@ -307,7 +292,6 @@ export function PenaltyRuleCenter() {
                         ) : (
                           <button
                             className="text-sky-700 underline"
-                            disabled={!reason.trim()}
                             onClick={() => void cloneVersion(ruleSet.id, version.id)}
                             type="button"
                           >
@@ -328,7 +312,6 @@ export function PenaltyRuleCenter() {
                           />
                           <button
                             className="text-rose-700 underline"
-                            disabled={!reason.trim()}
                             type="submit"
                           >
                             Retire
@@ -463,7 +446,7 @@ export function PenaltyRuleCenter() {
                   >
                     Thêm loại lỗi
                   </Button>
-                  <Button disabled={!reason.trim()} onClick={() => void saveDraft()} type="button">
+                  <Button onClick={() => void saveDraft()} type="button">
                     Lưu draft
                   </Button>
                 </div>
@@ -481,7 +464,7 @@ export function PenaltyRuleCenter() {
                   </label>
                   <Button
                     className="md:col-span-2"
-                    disabled={!reason.trim() || items.length === 0}
+                    disabled={items.length === 0}
                     type="submit"
                   >
                     Publish version

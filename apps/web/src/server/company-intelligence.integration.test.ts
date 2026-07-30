@@ -414,7 +414,6 @@ describe("manager KPI", () => {
         managerStaffId,
         month,
         notes: "Draft KPI",
-        reason: "Tạo KPI integration",
       },
       metadata,
     );
@@ -429,7 +428,6 @@ describe("manager KPI", () => {
       {
         version: evaluation.version,
         notes: "Đã chấm",
-        reason: "Chấm KPI integration",
         criteria: [
           {
             code: "QUALITY",
@@ -451,7 +449,7 @@ describe("manager KPI", () => {
     evaluation = await publishManagerKpiEvaluation(
       gm,
       evaluation.id,
-      { version: evaluation.version, reason: "Publish KPI integration" },
+      { version: evaluation.version },
       metadata,
     );
     expect(evaluation.status).toBe("PUBLISHED");
@@ -461,7 +459,6 @@ describe("manager KPI", () => {
       {
         enabled: true,
         version: setting.version,
-        reason: "Bật KPI self-service integration",
       },
       metadata,
     );

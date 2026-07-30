@@ -163,24 +163,18 @@ export function BranchOverviewWorkspace({
   const [search, setSearch] = useState("");
   const [chartWeekNo, setChartWeekNo] = useState(1);
   const deferredSearch = useDeferredValue(search.trim());
-  const [reason, setReason] = useState("");
   const [dataset, setDataset] = useState<BranchMonthlyOverviewDto | null>(null);
   const [rows, setRows] = useState<readonly EditableRow[]>([]);
   const [loading, setLoading] = useState(branches.length > 0);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const rowsRef = useRef(rows);
-  const reasonRef = useRef(reason);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const loadSequence = useRef(0);
 
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
-  useEffect(() => {
-    reasonRef.current = reason;
-  }, [reason]);
-
   const calendar = dataset?.calendar ?? [];
   const weeks = groupBranchOverviewWeeks(calendar);
 
@@ -330,18 +324,6 @@ export function BranchOverviewWorkspace({
       actualLiveMinutes?: number;
     }>[],
   ) {
-    const auditReason = reasonRef.current.trim();
-    if (!auditReason) {
-      setMessage("Nhập lý do trước khi lưu dữ liệu.");
-      for (const edit of edits) {
-        replaceDay(edit.staffId, edit.businessDate, (day) => ({
-          ...day,
-          saveState: "error",
-          message: "Nhập lý do trước khi lưu.",
-        }));
-      }
-      return;
-    }
     for (const edit of edits) {
       replaceDay(edit.staffId, edit.businessDate, (day) => ({
         ...day,
@@ -356,7 +338,6 @@ export function BranchOverviewWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           branchId,
-          reason: auditReason,
           edits,
         }),
       });
@@ -827,18 +808,6 @@ export function BranchOverviewWorkspace({
           />
         </label>
       </div>
-      {isGeneralManager ? (
-        <label className="mt-3 grid max-w-xl gap-1 text-sm">
-          Lý do chỉnh sửa
-          <input
-            aria-label="Lý do chỉnh sửa tổng quan"
-            onChange={(event) => setReason(event.target.value)}
-            placeholder="Bắt buộc khi inline edit hoặc paste"
-            value={reason}
-          />
-        </label>
-      ) : null}
-
       {message ? (
         <p aria-live="polite" className="mt-3 text-sm text-slate-600">
           {message}

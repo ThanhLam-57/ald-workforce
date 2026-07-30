@@ -11,7 +11,6 @@ describe("data governance contracts", () => {
         from: "2026-07-24T00:00:00.000Z",
         to: "2026-07-23T00:00:00.000Z",
       },
-      reason: "Kiểm thử khoảng thời gian audit.",
     });
     expect(result.success).toBe(false);
   });

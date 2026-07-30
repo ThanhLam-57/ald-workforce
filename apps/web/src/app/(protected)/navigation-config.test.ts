@@ -8,6 +8,7 @@ describe("navigation theo vai trò", () => {
     const hrefs = items.map((item) => item.href);
 
     expect(hrefs).toContain("/attendance");
+    expect(hrefs).toContain("/staff");
     expect(hrefs).toContain("/branch-overview");
     expect(hrefs).toContain("/company-report");
     expect(hrefs).toContain("/manager-kpi");
@@ -33,6 +34,7 @@ describe("navigation theo vai trò", () => {
       "/payroll",
     );
     expect(roleCanOpenPath("TRAINING_MANAGER", "/company-report")).toBe(true);
+    expect(roleCanOpenPath("TRAINING_MANAGER", "/staff")).toBe(true);
     expect(roleCanOpenPath("TRAINING_MANAGER", "/rules")).toBe(true);
     expect(roleCanOpenPath("TRAINING_MANAGER", "/rules/configured")).toBe(false);
     expect(roleCanOpenPath("TRAINING_MANAGER", "/rules/penalties")).toBe(false);

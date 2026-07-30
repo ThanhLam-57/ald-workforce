@@ -78,6 +78,18 @@ enum EvidenceStatus {
   CANCELLED
 }
 
+enum StaffIdentityDocumentSide {
+  CITIZEN_ID_FRONT
+  CITIZEN_ID_BACK
+}
+
+enum StaffIdentityDocumentStatus {
+  PENDING_UPLOAD
+  READY
+  REJECTED
+  SUPERSEDED
+}
+
 enum LevelProposalStatus {
   PENDING
   CONFIRMED
@@ -137,6 +149,7 @@ enum ImportTemplate {
   ASSIGNMENTS
   LEVELS
   ATTENDANCE_LIVE
+  ATTENDANCE_MACHINE
   REWARD_RULES
   PENALTY_RULES
   HISTORICAL_PAYROLL
@@ -203,6 +216,9 @@ model Company {
   penaltyItems                 PenaltyItem[]
   violations                   Violation[]
   evidenceObjects              EvidenceObject[]
+  staffWorkSchedules           StaffWorkSchedule[]
+  staffIdentityDocuments       StaffIdentityDocument[]
+  staffBankQrDocuments         StaffBankQrDocument[]
   performanceLevels            PerformanceLevel[]
   levelHistories               LevelHistory[]
   levelProposals               LevelProposal[]
@@ -241,6 +257,9 @@ model Branch {
   liveDailyMetrics          LiveDailyMetric[]
   violations                Violation[]
   evidenceObjects           EvidenceObject[]
+  staffWorkSchedules        StaffWorkSchedule[]
+  staffIdentityDocuments    StaffIdentityDocument[]
+  staffBankQrDocuments      StaffBankQrDocument[]
   payrollPeriods            PayrollPeriod[]
   payrollEntries            PayrollEntry[]
   payrollLines              PayrollLine[]
@@ -265,12 +284,22 @@ model StaffMember {
   staffCode                 String
   fullName                  String
   streamingAlias            String?
+  tiktokChannelId           String?
   email                     String?
   phone                     String?
+  dateOfBirth               DateTime?                  @db.Date
+  citizenIdNumber           String?
+  bankAccountNumber         String?
+  bankName                  String?
+  permanentAddress          String?
+  temporaryAddress          String?
+  facebookUrl               String?
+  university                String?
   jobTitle                  String
   baseSalaryAmount          BigInt                     @default(0)
   joinedDate                DateTime?                  @db.Date
   officialDate              DateTime?                  @db.Date
+  terminationDate           DateTime?                  @db.Date
   employmentCategory        EmploymentCategory
   employmentStatus          EmploymentStatus           @default(ACTIVE)
   version                   Int                        @default(1)
@@ -290,10 +319,16 @@ model StaffMember {
   payrollExportJobs         PayrollExportJob[]
   payrollDownloadLogs       PayrollDownloadLog[]
   employmentHistories       StaffEmploymentHistory[]
+  workSchedules             StaffWorkSchedule[]
+  identityDocuments         StaffIdentityDocument[]
+  bankQrDocuments           StaffBankQrDocument[]
   managerKpiEvaluations     ManagerKpiEvaluation[]     @relation("ManagerKpiTarget")
+  attendanceMachineImports  ImportJob[]                @relation("AttendanceMachineImportTarget")
 
   @@unique([companyId, staffCode])
+  @@unique([companyId, citizenIdNumber])
   @@index([companyId, employmentStatus, archivedAt])
+  @@index([companyId, terminationDate])
   @@index([companyId, employmentCategory, employmentStatus, archivedAt], map: "staff_members_company_category_status_archived_idx")
   @@map("staff_members")
 }
@@ -335,6 +370,9 @@ model User {
   violationsCreated          Violation[]                @relation("ViolationCreatedBy")
   violationsCancelled        Violation[]                @relation("ViolationCancelledBy")
   evidenceCreated            EvidenceObject[]           @relation("EvidenceCreatedBy")
+  staffWorkSchedulesCreated  StaffWorkSchedule[]         @relation("StaffWorkScheduleCreatedBy")
+  staffIdentityDocsCreated   StaffIdentityDocument[]     @relation("StaffIdentityDocumentCreatedBy")
+  staffBankQrDocsCreated     StaffBankQrDocument[]       @relation("StaffBankQrDocumentCreatedBy")
   levelHistoriesCreated      LevelHistory[]             @relation("LevelHistoryCreatedBy")
   levelProposalsDecided      LevelProposal[]            @relation("LevelProposalDecidedBy")
   payrollPeriodsCreated      PayrollPeriod[]            @relation("PayrollPeriodCreatedBy")
@@ -435,6 +473,7 @@ model BranchAssignment {
   branchId       String         @db.Uuid
   staffId        String         @db.Uuid
   assignmentType AssignmentType @default(MEMBER)
+  attendanceMachineCode String?
   effectiveFrom  DateTime       @db.Date
   effectiveTo    DateTime?      @db.Date
   version        Int            @default(1)
@@ -447,6 +486,7 @@ model BranchAssignment {
 
   @@index([companyId, branchId, effectiveFrom, effectiveTo])
   @@index([companyId, staffId, effectiveFrom, effectiveTo])
+  @@index([companyId, branchId, attendanceMachineCode], map: "branch_assignments_machine_code_idx")
   @@map("branch_assignments")
 }
 
@@ -737,6 +777,94 @@ model EvidenceObject {
 
   @@index([companyId, branchId, violationId, status], map: "evidence_objects_scope_violation_status_idx")
   @@map("evidence_objects")
+}
+
+model StaffWorkSchedule {
+  id                    String      @id @default(uuid()) @db.Uuid
+  companyId             String      @db.Uuid
+  branchId              String      @db.Uuid
+  staffId               String      @db.Uuid
+  name                  String
+  scheduledStartMinutes Int
+  scheduledEndMinutes   Int
+  spansNextDay          Boolean     @default(false)
+  requiredLiveMinutes   Int
+  effectiveFrom         DateTime    @db.Date
+  effectiveTo           DateTime?   @db.Date
+  version               Int         @default(1)
+  archivedAt            DateTime?   @db.Timestamptz(3)
+  createdByUserId       String      @db.Uuid
+  createdAt             DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime    @updatedAt @db.Timestamptz(3)
+  company               Company     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch                Branch      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  staff                 StaffMember @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  createdBy             User        @relation("StaffWorkScheduleCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, effectiveFrom, effectiveTo], map: "staff_work_schedules_scope_interval_idx")
+  @@index([companyId, staffId, effectiveFrom, effectiveTo], map: "staff_work_schedules_staff_interval_idx")
+  @@map("staff_work_schedules")
+}
+
+model StaffIdentityDocument {
+  id               String                      @id @default(uuid()) @db.Uuid
+  companyId        String                      @db.Uuid
+  branchId         String                      @db.Uuid
+  staffId          String                      @db.Uuid
+  side             StaffIdentityDocumentSide
+  objectKey        String                      @unique
+  originalFileName String
+  mimeType         String
+  sizeBytes        BigInt
+  checksumSha256   String
+  status           StaffIdentityDocumentStatus @default(PENDING_UPLOAD)
+  version          Int                         @default(1)
+  createdByUserId  String                      @db.Uuid
+  uploadedAt       DateTime?                   @db.Timestamptz(3)
+  verifiedAt       DateTime?                   @db.Timestamptz(3)
+  rejectedAt       DateTime?                   @db.Timestamptz(3)
+  rejectionReason  String?
+  supersededAt     DateTime?                   @db.Timestamptz(3)
+  createdAt        DateTime                    @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime                    @updatedAt @db.Timestamptz(3)
+  company          Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch           Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  staff            StaffMember                 @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  createdBy        User                        @relation("StaffIdentityDocumentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, staffId, status], map: "staff_identity_documents_scope_status_idx")
+  @@index([companyId, staffId, side, supersededAt], map: "staff_identity_documents_current_side_idx")
+  @@map("staff_identity_documents")
+}
+
+model StaffBankQrDocument {
+  id               String                      @id @default(uuid()) @db.Uuid
+  companyId        String                      @db.Uuid
+  branchId         String                      @db.Uuid
+  staffId          String                      @db.Uuid
+  objectKey        String                      @unique
+  originalFileName String
+  mimeType         String
+  sizeBytes        BigInt
+  checksumSha256   String
+  status           StaffIdentityDocumentStatus @default(PENDING_UPLOAD)
+  version          Int                         @default(1)
+  createdByUserId  String                      @db.Uuid
+  uploadedAt       DateTime?                   @db.Timestamptz(3)
+  verifiedAt       DateTime?                   @db.Timestamptz(3)
+  rejectedAt       DateTime?                   @db.Timestamptz(3)
+  rejectionReason  String?
+  supersededAt     DateTime?                   @db.Timestamptz(3)
+  createdAt        DateTime                    @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime                    @updatedAt @db.Timestamptz(3)
+  company          Company                     @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  branch           Branch                      @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  staff            StaffMember                 @relation(fields: [staffId], references: [id], onDelete: Restrict)
+  createdBy        User                        @relation("StaffBankQrDocumentCreatedBy", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([companyId, branchId, staffId, status], map: "staff_bank_qr_documents_scope_status_idx")
+  @@index([companyId, staffId, supersededAt], map: "staff_bank_qr_documents_current_idx")
+  @@map("staff_bank_qr_documents")
 }
 
 model PayrollPeriod {
@@ -1075,7 +1203,10 @@ model ImportJob {
   id                String          @id @default(uuid()) @db.Uuid
   companyId         String          @db.Uuid
   branchId          String?         @db.Uuid
+  targetStaffId     String?         @db.Uuid
+  targetMonth       String?
   template          ImportTemplate
+  scopeKey          String          @default("global")
   status            ImportJobStatus @default(PENDING_UPLOAD)
   idempotencyKey    String
   objectKey         String          @unique
@@ -1100,13 +1231,15 @@ model ImportJob {
   committedAt       DateTime?       @db.Timestamptz(3)
   company           Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch            Branch?         @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  targetStaff       StaffMember?     @relation("AttendanceMachineImportTarget", fields: [targetStaffId], references: [id], onDelete: Restrict)
   requestedBy       User            @relation("ImportRequestedBy", fields: [requestedByUserId], references: [id], onDelete: Restrict)
   errors            ImportError[]
 
   @@unique([companyId, idempotencyKey], map: "import_jobs_company_idempotency_key")
-  @@unique([companyId, template, checksumSha256], map: "import_jobs_company_template_checksum_key")
+  @@unique([companyId, template, checksumSha256, scopeKey], map: "import_jobs_company_template_checksum_scope_key")
   @@index([companyId, status, createdAt(sort: Desc)], map: "import_jobs_company_status_created_idx")
   @@index([companyId, branchId, createdAt(sort: Desc)], map: "import_jobs_company_branch_created_idx")
+  @@index([companyId, branchId, targetStaffId, targetMonth], map: "import_jobs_attendance_machine_target_idx")
   @@map("import_jobs")
 }
 

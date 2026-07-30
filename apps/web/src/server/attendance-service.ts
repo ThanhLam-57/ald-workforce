@@ -20,6 +20,7 @@ import {
   type ActorContext,
 } from "@ald/domain";
 
+import { systemAuditReason } from "./audit-service";
 import { parseBusinessDate, toBusinessDate } from "./business-date";
 import { createEvidenceViewUrl } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
@@ -372,12 +373,29 @@ async function assertExistingRecordAccess(
   return target;
 }
 
-async function resolveMonthTarget(actor: ActorContext, staffId: string, start: Date, end: Date) {
+async function resolveMonthTarget(
+  actor: ActorContext,
+  staffId: string,
+  start: Date,
+  end: Date,
+  expectedBranchId?: string,
+) {
+  if (
+    expectedBranchId &&
+    actor.role === "TRAINING_MANAGER" &&
+    !actor.activeBranchIds.includes(expectedBranchId)
+  ) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
+  }
   const staff = await prisma.staffMember.findFirst({
     where: {
       id: staffId,
       companyId: actor.companyId,
-      archivedAt: null,
+      AND: [
+        { OR: [{ archivedAt: null }, { archivedAt: { gte: start } }] },
+        { OR: [{ joinedDate: null }, { joinedDate: { lt: end } }] },
+        { OR: [{ terminationDate: null }, { terminationDate: { gte: start } }] },
+      ],
     },
     select: {
       id: true,
@@ -393,6 +411,7 @@ async function resolveMonthTarget(actor: ActorContext, staffId: string, start: D
       },
       assignments: {
         where: {
+          ...(expectedBranchId ? { branchId: expectedBranchId } : {}),
           archivedAt: null,
           effectiveFrom: { lt: end },
           OR: [{ effectiveTo: null }, { effectiveTo: { gt: start } }],
@@ -400,7 +419,10 @@ async function resolveMonthTarget(actor: ActorContext, staffId: string, start: D
         select: {
           branchId: true,
           assignmentType: true,
+          attendanceMachineCode: true,
+          effectiveFrom: true,
         },
+        orderBy: { effectiveFrom: "desc" },
       },
     },
   });
@@ -518,6 +540,8 @@ export async function getAttendanceFilterOptions(
       companyId: actor.companyId,
       AND: [
         { OR: [{ archivedAt: null }, { archivedAt: { gte: start } }] },
+        { OR: [{ joinedDate: null }, { joinedDate: { lt: end } }] },
+        { OR: [{ terminationDate: null }, { terminationDate: { gte: start } }] },
         {
           OR: [
             { user: { is: null } },
@@ -542,6 +566,19 @@ export async function getAttendanceFilterOptions(
       staffCode: true,
       fullName: true,
       jobTitle: true,
+      assignments: {
+        where: {
+          companyId: actor.companyId,
+          branchId: selectedBranchId,
+          assignmentType: "MEMBER",
+          archivedAt: null,
+          effectiveFrom: { lt: end },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: start } }],
+        },
+        select: { attendanceMachineCode: true },
+        orderBy: { effectiveFrom: "desc" },
+        take: 1,
+      },
     },
     orderBy: [{ staffCode: "asc" }],
   });
@@ -550,7 +587,10 @@ export async function getAttendanceFilterOptions(
     month,
     selectedBranchId,
     branches,
-    staff,
+    staff: staff.map(({ assignments, ...person }) => ({
+      ...person,
+      attendanceMachineCode: assignments[0]?.attendanceMachineCode ?? null,
+    })),
   };
 }
 
@@ -558,19 +598,22 @@ export async function getAttendanceMonth(
   actor: ActorContext,
   staffId: string,
   month: string,
+  branchId?: string,
 ): Promise<AttendanceMonthDto> {
   requirePermission(actor, "attendance:read");
   const { days, start, end } = monthBounds(month);
-  const target = await resolveMonthTarget(actor, staffId, start, end);
+  const target = await resolveMonthTarget(actor, staffId, start, end, branchId);
 
   const records = await prisma.attendanceDay.findMany({
     where: {
       companyId: actor.companyId,
       staffId,
       businessDate: { gte: start, lt: end },
-      ...(actor.role === "TRAINING_MANAGER"
-        ? { branchId: { in: [...actor.activeBranchIds] } }
-        : {}),
+      ...(branchId
+        ? { branchId }
+        : actor.role === "TRAINING_MANAGER"
+          ? { branchId: { in: [...actor.activeBranchIds] } }
+          : {}),
     },
     select: attendanceSelect,
     orderBy: { businessDate: "asc" },
@@ -587,9 +630,11 @@ export async function getAttendanceMonth(
       companyId: actor.companyId,
       staffId,
       businessDate: { gte: start, lt: end },
-      ...(actor.role === "TRAINING_MANAGER"
-        ? { branchId: { in: [...actor.activeBranchIds] } }
-        : {}),
+      ...(branchId
+        ? { branchId }
+        : actor.role === "TRAINING_MANAGER"
+          ? { branchId: { in: [...actor.activeBranchIds] } }
+          : {}),
     },
     select: violationSelect,
     orderBy: [{ businessDate: "asc" }, { createdAt: "asc" }],
@@ -618,6 +663,11 @@ export async function getAttendanceMonth(
       staffCode: target.staffCode,
       fullName: target.fullName,
       jobTitle: target.jobTitle,
+      attendanceMachineCode:
+        target.assignments.find(
+          (assignment) =>
+            assignment.assignmentType === "MEMBER" && assignment.attendanceMachineCode,
+        )?.attendanceMachineCode ?? null,
     },
     revenueConfig: {
       unit: target.company.revenueUnit,
@@ -700,7 +750,7 @@ export async function createAttendance(
         actor,
         action: "attendance.create",
         entityId: created.id,
-        reason: input.reason,
+        reason: systemAuditReason("ATTENDANCE_CREATED_FROM_MONTH_GRID"),
         after: attendanceAuditShape(created),
         metadata,
       });
@@ -708,7 +758,7 @@ export async function createAttendance(
         tx,
         actor,
         created.id,
-        input.reason,
+        systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_CREATE"),
         metadata,
       );
       return { record: created, automaticViolationSummary };
@@ -813,7 +863,7 @@ export async function updateAttendance(
       actor,
       action: existing.archivedAt ? "attendance.restore-and-update" : "attendance.update",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason("ATTENDANCE_UPDATED_FROM_MONTH_GRID"),
       before: attendanceAuditShape(existing),
       after: attendanceAuditShape(after),
       metadata,
@@ -822,7 +872,7 @@ export async function updateAttendance(
       tx,
       actor,
       after.id,
-      input.reason,
+      systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_UPDATE"),
       metadata,
     );
     return { record: after, automaticViolationSummary };
@@ -839,6 +889,11 @@ function mergeAutomaticViolationSummaries(
     reactivatedCount: summaries.reduce((total, summary) => total + summary.reactivatedCount, 0),
     cancelledCount: summaries.reduce((total, summary) => total + summary.cancelledCount, 0),
     unchangedCount: summaries.reduce((total, summary) => total + summary.unchangedCount, 0),
+    missingScheduleCount: summaries.reduce(
+      (total, summary) => total + summary.missingScheduleCount,
+      0,
+    ),
+    warnings: summaries.flatMap((summary) => summary.warnings),
     attendanceActivePenaltyTotal: last?.attendanceActivePenaltyTotal ?? "0",
     staffMonthActivePenaltyTotal: last?.staffMonthActivePenaltyTotal ?? "0",
   };
@@ -882,7 +937,7 @@ export async function reconcileAutomaticViolationsForMonth(
           tx,
           actor,
           record.id,
-          input.reason,
+          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_FOR_MONTH"),
           metadata,
         ),
       );
@@ -902,6 +957,8 @@ export async function reconcileAutomaticViolationsForMonth(
       reactivatedCount: 0,
       cancelledCount: 0,
       unchangedCount: 0,
+      missingScheduleCount: 0,
+      warnings: [],
       attendanceActivePenaltyTotal: "0",
       staffMonthActivePenaltyTotal: (existingTotal._sum.amount ?? 0n).toString(),
     };

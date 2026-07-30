@@ -33,6 +33,7 @@ import {
 } from "@ald/domain";
 
 import { parseBusinessDate } from "./business-date";
+import { systemAuditReason } from "./audit-service";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 
@@ -63,7 +64,24 @@ const periodInclude = {
     where: { included: true },
     include: {
       staff: {
-        select: { id: true, staffCode: true, fullName: true, streamingAlias: true },
+        select: {
+          id: true,
+          staffCode: true,
+          fullName: true,
+          streamingAlias: true,
+          assignments: {
+            where: { assignmentType: "MEMBER" },
+            select: {
+              id: true,
+              branchId: true,
+              attendanceMachineCode: true,
+              effectiveFrom: true,
+              effectiveTo: true,
+              archivedAt: true,
+            },
+            orderBy: [{ effectiveFrom: "asc" as const }, { id: "asc" as const }],
+          },
+        },
       },
       currentSnapshot: {
         include: { lines: { orderBy: { displayOrder: "asc" as const } } },
@@ -170,6 +188,26 @@ function previousBusinessMonth(month: string): string {
   const [yearText, monthText] = month.split("-");
   const date = new Date(Date.UTC(Number(yearText), Number(monthText) - 2, 1));
   return date.toISOString().slice(0, 7);
+}
+
+function assignmentWasEffective(assignment: {
+  effectiveFrom: Date;
+  archivedAt: Date | null;
+}): boolean {
+  return assignment.archivedAt === null || assignment.archivedAt >= assignment.effectiveFrom;
+}
+
+function assignmentWasAvailableInPeriod(
+  assignment: {
+    effectiveFrom: Date;
+    archivedAt: Date | null;
+  },
+  periodFrom: Date,
+): boolean {
+  return (
+    assignmentWasEffective(assignment) &&
+    (assignment.archivedAt === null || assignment.archivedAt >= periodFrom)
+  );
 }
 
 function timeInBusinessZone(value: Date | null): string | null {
@@ -488,6 +526,11 @@ function entryDto(
   entry: PeriodRecord["entries"][number],
   revenueVisible: boolean,
   worksheetOverride: PeriodRecord["worksheetOverrides"][number] | undefined,
+  periodScope: Readonly<{
+    branchId: string;
+    from: string;
+    toExclusive: string;
+  }>,
 ): PayrollEntryDto {
   if (!entry.currentSnapshot) {
     throw new Error(`Payroll entry ${entry.id} thiếu current snapshot.`);
@@ -498,9 +541,39 @@ function entryDto(
   const previousTotal = previous
     ? parseStoredOutput(previous.outputs).components.totalIncome
     : null;
+  const fallbackMachineCodeIntervals = entry.staff.assignments
+    .filter(
+      (assignment) =>
+        assignmentWasAvailableInPeriod(assignment, parseBusinessDate(periodScope.from)) &&
+        assignment.branchId === periodScope.branchId &&
+        assignment.effectiveFrom.toISOString().slice(0, 10) < periodScope.toExclusive &&
+        (assignment.effectiveTo === null ||
+          assignment.effectiveTo.toISOString().slice(0, 10) > periodScope.from),
+    )
+    .map((assignment) => ({
+      assignmentId: assignment.id,
+      attendanceMachineCode: assignment.attendanceMachineCode,
+      effectiveFrom: assignment.effectiveFrom.toISOString().slice(0, 10),
+      effectiveTo: assignment.effectiveTo?.toISOString().slice(0, 10) ?? null,
+    }));
+  const attendanceMachineCodeIntervals =
+    input.staffIdentity?.attendanceMachineCodeIntervals ?? fallbackMachineCodeIntervals;
+  const attendanceMachineCode =
+    attendanceMachineCodeIntervals.find((interval) => interval.attendanceMachineCode !== null)
+      ?.attendanceMachineCode ?? null;
+  const snapshotIdentity = input.staffIdentity;
   return {
     id: entry.id,
-    staff: entry.staff,
+    staff: {
+      id: entry.staff.id,
+      staffCode: snapshotIdentity?.staffCode ?? entry.staff.staffCode,
+      fullName: snapshotIdentity?.fullName ?? entry.staff.fullName,
+      streamingAlias: snapshotIdentity
+        ? snapshotIdentity.streamingAlias
+        : entry.staff.streamingAlias,
+      attendanceMachineCode,
+      attendanceMachineCodeIntervals,
+    },
     workUnits: entry.workUnits.toString(),
     workedDayCount: output.aggregates.workedDayCount,
     overtimeMinutes: entry.overtimeMinutes,
@@ -574,6 +647,8 @@ function entryDto(
 }
 
 function periodDto(record: PeriodRecord, actor: ActorContext): PayrollPeriodDto {
+  const month = record.month.toISOString().slice(0, 7);
+  const bounds = periodBounds(month);
   const entries = record.entries
     .filter((entry) => actor.role !== "LIVE_EMPLOYEE" || entry.staffId === actor.staffId)
     .map((entry) =>
@@ -581,6 +656,11 @@ function periodDto(record: PeriodRecord, actor: ActorContext): PayrollPeriodDto 
         entry,
         actor.role !== "LIVE_EMPLOYEE" || record.company.employeeRevenueVisible,
         record.worksheetOverrides.find((item) => item.staffId === entry.staffId),
+        {
+          branchId: record.branchId,
+          from: bounds.from,
+          toExclusive: bounds.toExclusive,
+        },
       ),
     );
   const firstSnapshot = record.entries[0]?.currentSnapshot;
@@ -607,7 +687,7 @@ function periodDto(record: PeriodRecord, actor: ActorContext): PayrollPeriodDto 
   return {
     id: record.id,
     branch: record.branch,
-    month: record.month.toISOString().slice(0, 7),
+    month,
     revision: record.revision,
     status: record.status,
     version: record.version,
@@ -719,6 +799,49 @@ export async function getPayrollPeriod(
   return periodDto(await getPeriodRecord(prisma, actor, periodId), actor);
 }
 
+export async function getPayrollPrintData(
+  actor: ActorContext,
+  periodId: string,
+  requestedStaffId: string | undefined,
+  metadata: RequestMetadata,
+): Promise<
+  Readonly<{
+    period: PayrollPeriodDto;
+    entry: PayrollEntryDto | null;
+  }>
+> {
+  requirePayrollRead(actor);
+  await verifyEmployeeSelfService(prisma, actor);
+  return prisma.$transaction(async (tx) => {
+    const period = periodDto(await getPeriodRecord(tx, actor, periodId), actor);
+    if (period.entries.length === 0) {
+      throw new DomainError("VALIDATION_ERROR", "Kỳ lương chưa có dữ liệu đã tính để in.");
+    }
+    const staffId = actor.role === "LIVE_EMPLOYEE" ? actor.staffId! : requestedStaffId;
+    const entry = staffId
+      ? (period.entries.find((item) => item.staff.id === staffId) ?? null)
+      : null;
+    if (staffId && !entry) {
+      throw new DomainError("NOT_FOUND", "Không tìm thấy phiếu lương trong phạm vi được phép.");
+    }
+    await appendAudit(tx, {
+      actor,
+      action: entry ? "PAYROLL_PAYSLIP_PRINT" : "PAYROLL_BRANCH_PRINT",
+      entityType: "PayrollPeriod",
+      entityId: period.id,
+      reason: systemAuditReason(entry ? "PAYROLL_PAYSLIP_PRINT" : "PAYROLL_BRANCH_PRINT"),
+      after: {
+        branchId: period.branch.id,
+        month: period.month,
+        revision: period.revision,
+        staffId: entry?.staff.id ?? null,
+      },
+      metadata,
+    });
+    return { period, entry };
+  });
+}
+
 export async function createPayrollPeriod(
   actor: ActorContext,
   input: PayrollPeriodCreateInput,
@@ -753,7 +876,7 @@ export async function createPayrollPeriod(
         month: bounds.monthDate,
         revision: 1,
         createdByUserId: actor.userId,
-        creationReason: input.reason,
+        creationReason: systemAuditReason("PAYROLL_PERIOD_CREATE"),
       },
       select: { id: true },
     });
@@ -762,7 +885,7 @@ export async function createPayrollPeriod(
       action: "PAYROLL_PERIOD_CREATE",
       entityType: "PayrollPeriod",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason("PAYROLL_PERIOD_CREATE"),
       after: { branchId: input.branchId, month: input.month, revision: 1, status: "DRAFT" },
       metadata,
     });
@@ -806,7 +929,7 @@ export async function ensurePayrollPeriod(
         month: bounds.monthDate,
         revision: 1,
         createdByUserId: actor.userId,
-        creationReason: input.reason,
+        creationReason: systemAuditReason("PAYROLL_PERIOD_ENSURE_CREATE"),
       },
       select: { id: true },
     });
@@ -815,7 +938,7 @@ export async function ensurePayrollPeriod(
       action: "PAYROLL_PERIOD_ENSURE_CREATE",
       entityType: "PayrollPeriod",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason("PAYROLL_PERIOD_ENSURE_CREATE"),
       after: {
         branchId: input.branchId,
         month: input.month,
@@ -1000,13 +1123,26 @@ async function buildCalculations(
     where: {
       companyId: actor.companyId,
       branchId: period.branchId,
+      assignmentType: "MEMBER",
       effectiveFrom: { lt: toDate },
       OR: [{ effectiveTo: null }, { effectiveTo: { gt: fromDate } }],
+      staff: {
+        OR: [{ joinedDate: null }, { joinedDate: { lt: toDate } }],
+        AND: [{ OR: [{ terminationDate: null }, { terminationDate: { gte: fromDate } }] }],
+      },
     },
     select: {
+      id: true,
+      attendanceMachineCode: true,
+      effectiveFrom: true,
+      effectiveTo: true,
+      archivedAt: true,
       staff: {
         select: {
           id: true,
+          staffCode: true,
+          fullName: true,
+          streamingAlias: true,
           baseSalaryAmount: true,
           joinedDate: true,
           officialDate: true,
@@ -1014,12 +1150,34 @@ async function buildCalculations(
         },
       },
     },
-    distinct: ["staffId"],
+    orderBy: [{ staffId: "asc" }, { effectiveFrom: "asc" }, { id: "asc" }],
   });
+  const effectiveAssignments = assignments.filter((assignment) =>
+    assignmentWasAvailableInPeriod(assignment, fromDate),
+  );
   const staffById = new Map(
-    assignments.map((assignment) => [assignment.staff.id, assignment.staff]),
+    effectiveAssignments.map((assignment) => [assignment.staff.id, assignment.staff]),
   );
   const staffIds = [...staffById.keys()].sort();
+  const machineCodeIntervalsByStaff = new Map<
+    string,
+    Array<{
+      assignmentId: string;
+      attendanceMachineCode: string | null;
+      effectiveFrom: string;
+      effectiveTo: string | null;
+    }>
+  >();
+  for (const assignment of effectiveAssignments) {
+    const intervals = machineCodeIntervalsByStaff.get(assignment.staff.id) ?? [];
+    intervals.push({
+      assignmentId: assignment.id,
+      attendanceMachineCode: assignment.attendanceMachineCode,
+      effectiveFrom: assignment.effectiveFrom.toISOString().slice(0, 10),
+      effectiveTo: assignment.effectiveTo?.toISOString().slice(0, 10) ?? null,
+    });
+    machineCodeIntervalsByStaff.set(assignment.staff.id, intervals);
+  }
   if (staffIds.length === 0) {
     throw new DomainError("VALIDATION_ERROR", "Cơ sở không có nhân viên trong kỳ.");
   }
@@ -1223,6 +1381,12 @@ async function buildCalculations(
       : undefined;
     const input: PayrollCalculationInput = {
       staffId,
+      staffIdentity: {
+        staffCode: staffById.get(staffId)!.staffCode,
+        fullName: staffById.get(staffId)!.fullName,
+        streamingAlias: staffById.get(staffId)!.streamingAlias,
+        attendanceMachineCodeIntervals: machineCodeIntervalsByStaff.get(staffId) ?? [],
+      },
       baseSalaryAmount: worksheet?.baseSalaryAmount ?? staffSalary,
       sourceBaseSalaryAmount: staffSalary,
       employment: {
@@ -1231,6 +1395,7 @@ async function buildCalculations(
         category: staffById.get(staffId)!.employmentCategory,
       },
       period: {
+        branchId: period.branchId,
         month,
         from: bounds.from,
         toExclusive: bounds.toExclusive,
@@ -1531,7 +1696,7 @@ export async function calculatePayrollPeriod(
       action: "PAYROLL_CALCULATE",
       entityType: "PayrollPeriod",
       entityId: period.id,
-      reason: input.reason,
+      reason: systemAuditReason("PAYROLL_CALCULATE"),
       before: {
         status: period.status,
         version: period.version,
@@ -1566,13 +1731,7 @@ export async function savePayrollWorksheet(
     let period = await loadPeriodForActor(tx, actor, periodId, true);
     const createdRevision = period.status === "LOCKED" || period.status === "PUBLISHED";
     if (createdRevision) {
-      const revisionId = await createRevisionInTransaction(
-        tx,
-        actor,
-        period,
-        { reason: `Sửa bảng lương sau khi đã gửi: ${input.reason}` },
-        metadata,
-      );
+      const revisionId = await createRevisionInTransaction(tx, actor, period, {}, metadata);
       period = await loadPeriodForActor(tx, actor, revisionId, true);
     } else if (period.version !== input.periodVersion) {
       throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
@@ -1583,16 +1742,31 @@ export async function savePayrollWorksheet(
     if (input.standardDaysOffOverride !== null) {
       standardPayableDays(month, input.standardDaysOffOverride);
     }
-    const assignment = await tx.branchAssignment.findFirst({
+    const assignmentCandidates = await tx.branchAssignment.findMany({
       where: {
         companyId: actor.companyId,
         branchId: period.branchId,
         staffId: input.staffId,
+        assignmentType: "MEMBER",
         effectiveFrom: { lt: parseBusinessDate(bounds.toExclusive) },
         OR: [{ effectiveTo: null }, { effectiveTo: { gt: parseBusinessDate(bounds.from) } }],
+        staff: {
+          OR: [{ joinedDate: null }, { joinedDate: { lt: parseBusinessDate(bounds.toExclusive) } }],
+          AND: [
+            {
+              OR: [
+                { terminationDate: null },
+                { terminationDate: { gte: parseBusinessDate(bounds.from) } },
+              ],
+            },
+          ],
+        },
       },
-      select: { id: true },
+      select: { id: true, effectiveFrom: true, archivedAt: true },
     });
+    const assignment = assignmentCandidates.find((candidate) =>
+      assignmentWasAvailableInPeriod(candidate, parseBusinessDate(bounds.from)),
+    );
     if (!assignment) {
       throw new DomainError("NOT_FOUND", "Nhân viên không thuộc cơ sở trong kỳ lương.");
     }
@@ -1707,7 +1881,7 @@ export async function savePayrollWorksheet(
       action: "PAYROLL_WORKSHEET_SAVE",
       entityType: "PayrollWorksheetOverride",
       entityId: overrideId,
-      reason: input.reason,
+      reason: systemAuditReason("PAYROLL_WORKSHEET_SAVE"),
       before: existing
         ? {
             payrollPeriodId: period.id,
@@ -1731,12 +1905,7 @@ export async function savePayrollWorksheet(
 
   const target = await getPayrollPeriod(actor, targetId);
   try {
-    return await calculatePayrollPeriod(
-      actor,
-      targetId,
-      { version: target.version, reason: input.reason },
-      metadata,
-    );
+    return await calculatePayrollPeriod(actor, targetId, { version: target.version }, metadata);
   } catch (error) {
     if (
       error instanceof DomainError &&
@@ -1782,7 +1951,7 @@ export async function sendPayrollPeriod(
         status: "PUBLISHED",
         publishedByUserId: actor.userId,
         publishedAt: now,
-        publishReason: input.reason,
+        publishReason: systemAuditReason("PAYROLL_SEND"),
         version: { increment: 1 },
       },
     });
@@ -1791,7 +1960,7 @@ export async function sendPayrollPeriod(
       action: "PAYROLL_SEND",
       entityType: "PayrollPeriod",
       entityId: period.id,
-      reason: input.reason,
+      reason: systemAuditReason("PAYROLL_SEND"),
       before: { status: period.status, version: period.version },
       after: { status: "PUBLISHED", version: period.version + 1, includedEntries },
       metadata,
@@ -1830,7 +1999,7 @@ async function transitionPayroll(
               status: target,
               reviewedByUserId: actor.userId,
               reviewedAt: now,
-              reviewReason: input.reason,
+              reviewReason: systemAuditReason("PAYROLL_REVIEW"),
               version: { increment: 1 },
             }
           : transition === "LOCK"
@@ -1838,14 +2007,14 @@ async function transitionPayroll(
                 status: target,
                 lockedByUserId: actor.userId,
                 lockedAt: now,
-                lockReason: input.reason,
+                lockReason: systemAuditReason("PAYROLL_LOCK"),
                 version: { increment: 1 },
               }
             : {
                 status: target,
                 publishedByUserId: actor.userId,
                 publishedAt: now,
-                publishReason: input.reason,
+                publishReason: systemAuditReason("PAYROLL_PUBLISH"),
                 version: { increment: 1 },
               },
     });
@@ -1854,7 +2023,7 @@ async function transitionPayroll(
       action: `PAYROLL_${transition}`,
       entityType: "PayrollPeriod",
       entityId: period.id,
-      reason: input.reason,
+      reason: systemAuditReason(`PAYROLL_${transition}`),
       before: { status: period.status, version: period.version },
       after: { status: target, version: period.version + 1 },
       metadata,
@@ -1888,7 +2057,7 @@ async function createRevisionInTransaction(
   tx: Transaction,
   actor: ActorContext,
   source: Awaited<ReturnType<typeof loadPeriodForActor>>,
-  input: PayrollRevisionCreateInput,
+  _input: PayrollRevisionCreateInput,
   metadata: RequestMetadata,
 ) {
   if (!["LOCKED", "PUBLISHED"].includes(source.status)) {
@@ -1925,7 +2094,7 @@ async function createRevisionInTransaction(
       sourcePeriodId: source.id,
       standardDaysOffOverride: source.standardDaysOffOverride,
       createdByUserId: actor.userId,
-      creationReason: input.reason,
+      creationReason: systemAuditReason("PAYROLL_REVISION_CREATE"),
     },
     select: { id: true, revision: true },
   });
@@ -1972,7 +2141,7 @@ async function createRevisionInTransaction(
     action: "PAYROLL_REVISION_CREATE",
     entityType: "PayrollPeriod",
     entityId: created.id,
-    reason: input.reason,
+    reason: systemAuditReason("PAYROLL_REVISION_CREATE"),
     before: { sourcePeriodId: source.id, sourceRevision: source.revision, status: source.status },
     after: { revision: created.revision, status: "DRAFT" },
     metadata,
@@ -2004,29 +2173,37 @@ export async function createPayrollAdjustment(
   const targetId = await prisma.$transaction(async (tx) => {
     let period = await loadPeriodForActor(tx, actor, periodId, true);
     if (["LOCKED", "PUBLISHED"].includes(period.status)) {
-      const revisionId = await createRevisionInTransaction(
-        tx,
-        actor,
-        period,
-        { reason: `Điều chỉnh sau khóa: ${input.reason}` },
-        metadata,
-      );
+      const revisionId = await createRevisionInTransaction(tx, actor, period, {}, metadata);
       period = await loadPeriodForActor(tx, actor, revisionId, true);
     } else if (period.version !== input.periodVersion) {
       throw new DomainError("CONFLICT", "Kỳ lương đã được cập nhật. Hãy tải lại.");
     }
     const bounds = periodBounds(period.month.toISOString().slice(0, 7));
-    const assignment = await tx.branchAssignment.findFirst({
+    const assignmentCandidates = await tx.branchAssignment.findMany({
       where: {
         companyId: actor.companyId,
         branchId: period.branchId,
         staffId: input.staffId,
-        archivedAt: null,
+        assignmentType: "MEMBER",
         effectiveFrom: { lt: parseBusinessDate(bounds.toExclusive) },
         OR: [{ effectiveTo: null }, { effectiveTo: { gt: parseBusinessDate(bounds.from) } }],
+        staff: {
+          OR: [{ joinedDate: null }, { joinedDate: { lt: parseBusinessDate(bounds.toExclusive) } }],
+          AND: [
+            {
+              OR: [
+                { terminationDate: null },
+                { terminationDate: { gte: parseBusinessDate(bounds.from) } },
+              ],
+            },
+          ],
+        },
       },
-      select: { id: true },
+      select: { id: true, effectiveFrom: true, archivedAt: true },
     });
+    const assignment = assignmentCandidates.find((candidate) =>
+      assignmentWasAvailableInPeriod(candidate, parseBusinessDate(bounds.from)),
+    );
     if (!assignment) {
       throw new DomainError("NOT_FOUND", "Nhân viên không thuộc cơ sở trong kỳ.");
     }
@@ -2054,12 +2231,13 @@ export async function createPayrollAdjustment(
       action: "PAYROLL_ADJUSTMENT_CREATE",
       entityType: "PayrollAdjustment",
       entityId: adjustment.id,
-      reason: input.reason,
+      reason: systemAuditReason("PAYROLL_ADJUSTMENT_CREATE"),
       after: {
         payrollPeriodId: period.id,
         staffId: input.staffId,
         type: input.type,
         amount: input.amount,
+        businessReason: input.reason,
         approvedByUserId: actor.userId,
       },
       metadata,

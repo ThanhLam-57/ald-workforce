@@ -19,6 +19,7 @@ import {
   type ActorContext,
 } from "@ald/domain";
 
+import { systemAuditReason } from "./audit-service";
 import { parseBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
 
@@ -403,7 +404,7 @@ export async function createManagerKpiEvaluation(
       action: "MANAGER_KPI_CREATE",
       entityType: "ManagerKpiEvaluation",
       entityId: evaluation.id,
-      reason: input.reason,
+      reason: systemAuditReason("MANAGER_KPI_CREATED"),
       after: {
         managerStaffId: candidate.id,
         branchId: candidate.branch.id,
@@ -478,7 +479,7 @@ export async function updateManagerKpiEvaluation(
       action: "MANAGER_KPI_UPDATE",
       entityType: "ManagerKpiEvaluation",
       entityId: current.id,
-      reason: input.reason,
+      reason: systemAuditReason("MANAGER_KPI_UPDATED"),
       before: { version: current.version, totalScore: current.totalScore.toString() },
       after: { version: current.version + 1, totalScore: calculated.totalScore },
     });
@@ -531,7 +532,7 @@ export async function publishManagerKpiEvaluation(
       action: "MANAGER_KPI_PUBLISH",
       entityType: "ManagerKpiEvaluation",
       entityId: current.id,
-      reason: input.reason,
+      reason: systemAuditReason("MANAGER_KPI_PUBLISHED"),
       before: { status: current.status, version: current.version },
       after: { status: "PUBLISHED", version: current.version + 1 },
     });
@@ -573,7 +574,7 @@ export async function updateManagerKpiSetting(
       action: "MANAGER_KPI_SELF_SERVICE_UPDATE",
       entityType: "Company",
       entityId: actor.companyId,
-      reason: input.reason,
+      reason: systemAuditReason("MANAGER_KPI_SELF_SERVICE_UPDATED"),
       before: { enabled: current.managerKpiSelfServiceEnabled, version: current.version },
       after: {
         enabled: updated.managerKpiSelfServiceEnabled,

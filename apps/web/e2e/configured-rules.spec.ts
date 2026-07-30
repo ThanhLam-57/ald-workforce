@@ -8,7 +8,6 @@ test("GM chỉnh draft salary rule và publish từ Rule Center", async ({ page 
     data: {
       name,
       type: "SALARY_RULES",
-      reason: "E2E tạo salary rule",
     },
   });
   expect(createdResponse.ok()).toBe(true);
@@ -25,7 +24,7 @@ test("GM chỉnh draft salary rule và publish từ Rule Center", async ({ page 
   await expect(center).toBeVisible();
   await center.getByLabel("Version", { exact: true }).selectOption(created.data.versions[0]!.id);
   await center.getByLabel("Lương cơ bản (VND)", { exact: true }).fill("13000000");
-  await center.getByLabel("Lý do thay đổi", { exact: true }).fill("E2E cập nhật lương cơ bản");
+  await expect(center.getByLabel("Lý do thay đổi", { exact: true })).toHaveCount(0);
   await center.getByRole("button", { name: "Lưu draft" }).click();
   await expect(center.getByText("Đã lưu draft.")).toBeVisible();
 
@@ -58,7 +57,6 @@ test("GM chỉnh draft salary rule và publish từ Rule Center", async ({ page 
         effectiveFrom: date,
         effectiveTo: null,
         rowVersion: saved.rowVersion,
-        reason: "E2E publish salary rule",
       },
     },
   );

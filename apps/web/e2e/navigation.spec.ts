@@ -186,7 +186,6 @@ test("GM nhập và sửa ngày gia nhập, ngày chính thức trong hồ sơ n
       .evaluate((element) => (element as HTMLInputElement).validity.valid),
   ).toBe(false);
   await createDialog.getByLabel("Ngày lên chính thức").fill("2026-07-15");
-  await createDialog.getByLabel("Lý do thao tác").fill("Kiểm thử tạo hồ sơ có ngày");
   await createDialog.getByRole("button", { name: "Lưu dữ liệu" }).click();
   await expect.poll(() => createdBody).not.toBeNull();
   expect(createdBody).toMatchObject({
@@ -201,7 +200,6 @@ test("GM nhập và sửa ngày gia nhập, ngày chính thức trong hồ sơ n
   await expect(editDialog.getByLabel("Ngày lên chính thức")).toHaveValue("2026-07-15");
   await editDialog.getByLabel("Ngày gia nhập công ty").fill("2026-07-02");
   await editDialog.getByLabel("Ngày lên chính thức").fill("2026-07-20");
-  await editDialog.getByLabel("Lý do thao tác").fill("Kiểm thử sửa ngày hồ sơ");
   await editDialog.getByRole("button", { name: "Xác nhận và lưu" }).click();
   await expect.poll(() => updatedBody).not.toBeNull();
   expect(updatedBody).toMatchObject({

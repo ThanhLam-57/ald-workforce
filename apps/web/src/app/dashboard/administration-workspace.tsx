@@ -6,10 +6,26 @@ import type {
   AdminPageDto,
   AdminStaffDto,
   AdminUserDto,
+  StaffWorkScheduleDto,
 } from "@ald/contracts";
 import { Button } from "@ald/ui";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+
+import {
+  uploadStaffPrivateDocument,
+  type StaffPrivateDocumentKind,
+} from "./private-document-upload";
+import {
+  apiErrorMessage,
+  staffProfileFieldErrorsFrom,
+} from "./staff-profile-field-errors";
+import {
+  StaffProfileFields,
+  type StaffProfileEditorValues,
+  type StaffProfileFieldErrors,
+} from "./staff-profile-fields";
+import type { StaffWorkspaceCapabilities } from "./staff-workspace-capabilities";
 
 type Option = Readonly<{ id: string; label: string }>;
 type Tab = "branches" | "staff" | "assignments" | "users";
@@ -20,7 +36,10 @@ type PageData =
   | AdminPageDto<AdminUserDto>;
 type EditorState =
   | Readonly<{ kind: "branch-edit" | "branch-toggle"; item: AdminBranchDto }>
-  | Readonly<{ kind: "staff-edit" | "staff-archive"; item: AdminStaffDto }>
+  | Readonly<{
+      kind: "staff-edit" | "staff-terminate" | "staff-archive";
+      item: AdminStaffDto;
+    }>
   | Readonly<{
       kind: "assignment-end" | "assignment-transfer" | "assignment-cancel";
       item: AdminAssignmentDto;
@@ -76,23 +95,59 @@ function displayBusinessDate(value: string | null): string {
   return year && month && day ? `${day}/${month}/${year}` : value;
 }
 
+function privateDocumentStatus(value: string | null): string {
+  if (value === "READY") return "Đã tải lên";
+  if (value === "PENDING_UPLOAD") return "Chờ tải lên";
+  if (value === "REJECTED") return "Tải lên thất bại";
+  if (value === "SUPERSEDED") return "Đã được thay thế";
+  return "Chưa có";
+}
+
+type IdentityDocument = AdminStaffDto["identityDocuments"][number];
+type BankQrDocument = NonNullable<AdminStaffDto["bankQrDocument"]>;
+type ProfileDocument =
+  | Readonly<{ kind: "IDENTITY"; title: string; document: IdentityDocument }>
+  | Readonly<{ kind: "BANK_QR"; title: string; document: BankQrDocument }>;
+type DocumentPreview = Readonly<{
+  source: ProfileDocument;
+  phase: "LOADING" | "READY" | "FAILED";
+  url: string | null;
+  expiresInSeconds: number | null;
+  error: string | null;
+}>;
+
+function minutesAsTime(value: number): string {
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+}
+
+function timeAsMinutes(value: string): number | null {
+  const match = /^(\d{2}):([0-5]\d)$/.exec(value);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  return hours <= 23 ? hours * 60 + minutes : null;
+}
+
+function fileSize(value: string): string {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return value;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toLocaleString("vi-VN", { maximumFractionDigits: 1 })} KB`;
+  }
+  return `${(bytes / 1024 / 1024).toLocaleString("vi-VN", { maximumFractionDigits: 1 })} MB`;
+}
+
+function optionalText(value: string | null | undefined): string {
+  return value?.trim() || "Chưa cập nhật";
+}
+
 function activeTab(value: string | null): Tab {
   return tabs.some(({ id }) => id === value) ? (value as Tab) : "branches";
 }
 
 function apiError(payload: unknown): string {
-  if (
-    typeof payload === "object" &&
-    payload !== null &&
-    "error" in payload &&
-    typeof payload.error === "object" &&
-    payload.error !== null &&
-    "message" in payload.error &&
-    typeof payload.error.message === "string"
-  ) {
-    return payload.error.message;
-  }
-  return "Không thể xử lý yêu cầu.";
+  return apiErrorMessage(payload, "Không thể xử lý yêu cầu.");
 }
 
 function field(form: FormData, name: string): string {
@@ -103,6 +158,61 @@ function businessDate(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
   }).format(new Date());
+}
+
+function emptyAdminStaffProfileValues(): StaffProfileEditorValues {
+  return {
+    staffCode: "",
+    attendanceMachineCode: "",
+    fullName: "",
+    streamingAlias: "",
+    tiktokChannelId: "",
+    email: "",
+    phone: "",
+    dateOfBirth: "",
+    citizenIdNumber: "",
+    bankAccountNumber: "",
+    bankName: "",
+    permanentAddress: "",
+    temporaryAddress: "",
+    facebookUrl: "",
+    university: "",
+    jobTitle: "Nhân viên Live",
+    joinedDate: businessDate(),
+    officialDate: "",
+    employmentCategory: "PROBATION",
+    employmentStatus: "ACTIVE",
+    effectiveFrom: businessDate(),
+    baseSalaryAmount: "0",
+  };
+}
+
+function adminStaffProfileValues(staff: AdminStaffDto | null): StaffProfileEditorValues {
+  if (!staff) return emptyAdminStaffProfileValues();
+  return {
+    staffCode: staff.staffCode,
+    attendanceMachineCode: "",
+    fullName: staff.fullName,
+    streamingAlias: staff.streamingAlias ?? "",
+    tiktokChannelId: staff.tiktokChannelId ?? "",
+    email: staff.email ?? "",
+    phone: staff.phone ?? "",
+    dateOfBirth: staff.dateOfBirth ?? "",
+    citizenIdNumber: staff.citizenIdNumber ?? "",
+    bankAccountNumber: staff.bankAccountNumber ?? "",
+    bankName: staff.bankName ?? "",
+    permanentAddress: staff.permanentAddress ?? "",
+    temporaryAddress: staff.temporaryAddress ?? "",
+    facebookUrl: staff.facebookUrl ?? "",
+    university: staff.university ?? "",
+    jobTitle: staff.jobTitle,
+    joinedDate: staff.joinedDate ?? "",
+    officialDate: staff.officialDate ?? "",
+    employmentCategory: staff.employmentCategory,
+    employmentStatus: staff.employmentStatus,
+    effectiveFrom: businessDate(),
+    baseSalaryAmount: staff.baseSalaryAmount,
+  };
 }
 
 function dateTime(value: string): string {
@@ -137,17 +247,25 @@ function Drawer({
   children,
   onClose,
   title,
-}: Readonly<{ children: ReactNode; onClose: () => void; title: string }>) {
+  wide = false,
+}: Readonly<{ children: ReactNode; onClose: () => void; title: string; wide?: boolean }>) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     document.body.style.overflow = "hidden";
     closeRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !panelRef.current) return;
@@ -171,8 +289,9 @@ function Drawer({
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50">
@@ -185,7 +304,9 @@ function Drawer({
       <section
         aria-labelledby="administration-drawer-title"
         aria-modal="true"
-        className="absolute inset-y-0 right-0 flex w-full max-w-xl min-w-0 flex-col overflow-hidden bg-white shadow-2xl"
+        className={`absolute inset-y-0 right-0 flex w-full min-w-0 flex-col overflow-hidden bg-white shadow-2xl ${
+          wide ? "max-w-5xl" : "max-w-xl"
+        }`}
         ref={panelRef}
         role="dialog"
       >
@@ -253,22 +374,23 @@ function ActionButton({
 
 function CreateForm({
   branches,
+  capabilities,
   onSaved,
   staff,
   tab,
 }: Readonly<{
   branches: readonly Option[];
+  capabilities: StaffWorkspaceCapabilities;
   onSaved: (message: string) => void;
   staff: readonly Option[];
   tab: Tab;
-}>) {
+  }>) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [staffCategory, setStaffCategory] = useState<
-    "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN"
-  >("PROBATION");
-  const [staffJoinedDate, setStaffJoinedDate] = useState(businessDate());
-  const [staffOfficialDate, setStaffOfficialDate] = useState("");
+  const [staffFieldErrors, setStaffFieldErrors] = useState<StaffProfileFieldErrors>({});
+  const [staffProfile, setStaffProfile] = useState<StaffProfileEditorValues>(
+    emptyAdminStaffProfileValues,
+  );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -281,7 +403,6 @@ function CreateForm({
           code: field(form, "code"),
           name: field(form, "name"),
           address: field(form, "address") || undefined,
-          reason: field(form, "reason"),
         },
       },
       staff: {
@@ -291,14 +412,22 @@ function CreateForm({
           staffCode: field(form, "staffCode"),
           fullName: field(form, "fullName"),
           streamingAlias: field(form, "streamingAlias") || null,
-          email: field(form, "email") || undefined,
-          phone: field(form, "phone") || undefined,
+          tiktokChannelId: field(form, "tiktokChannelId") || null,
+          email: field(form, "email") || null,
+          phone: field(form, "phone") || null,
+          dateOfBirth: field(form, "dateOfBirth") || null,
+          citizenIdNumber: field(form, "citizenIdNumber") || null,
+          bankAccountNumber: field(form, "bankAccountNumber") || null,
+          bankName: field(form, "bankName") || null,
+          permanentAddress: field(form, "permanentAddress") || null,
+          temporaryAddress: field(form, "temporaryAddress") || null,
+          facebookUrl: field(form, "facebookUrl") || null,
+          university: field(form, "university") || null,
           jobTitle: field(form, "jobTitle"),
           baseSalaryAmount: field(form, "baseSalaryAmount"),
           joinedDate: field(form, "joinedDate"),
           officialDate: field(form, "officialDate") || null,
           employmentCategory: field(form, "employmentCategory"),
-          reason: field(form, "reason"),
         },
       },
       assignments: {
@@ -308,9 +437,9 @@ function CreateForm({
           staffId: field(form, "staffId"),
           branchId: field(form, "branchId"),
           assignmentType: field(form, "assignmentType"),
+          attendanceMachineCode: field(form, "attendanceMachineCode") || null,
           effectiveFrom: field(form, "effectiveFrom"),
           effectiveTo: field(form, "effectiveTo") || null,
-          reason: field(form, "reason"),
         },
       },
       users: {
@@ -324,13 +453,13 @@ function CreateForm({
           role: field(form, "role"),
           canManagePayroll: form.get("canManagePayroll") === "on",
           staffId: field(form, "staffId") || null,
-          reason: field(form, "reason"),
         },
       },
     } as const;
     const configuration = configurations[tab];
     setPending(true);
     setError(null);
+    setStaffFieldErrors({});
     try {
       const response = await fetch(configuration.path, {
         method: "POST",
@@ -338,7 +467,12 @@ function CreateForm({
         body: JSON.stringify(configuration.body),
       });
       const payload: unknown = await response.json();
-      if (!response.ok) throw new Error(apiError(payload));
+      if (!response.ok) {
+        if (tab === "staff") {
+          setStaffFieldErrors(staffProfileFieldErrorsFrom(payload, response.status));
+        }
+        throw new Error(apiError(payload));
+      }
       onSaved(configuration.success);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Không thể lưu dữ liệu.");
@@ -364,75 +498,22 @@ function CreateForm({
       ) : null}
 
       {tab === "staff" ? (
-        <>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <FormField label="Mã nhân viên">
-              <input name="staffCode" required />
-            </FormField>
-            <FormField label="Họ và tên">
-              <input name="fullName" required />
-            </FormField>
-            <FormField label="ACC / alias Live">
-              <input name="streamingAlias" />
-            </FormField>
-            <FormField label="Vị trí công việc">
-              <input name="jobTitle" required />
-            </FormField>
-            <FormField label="Email">
-              <input name="email" type="email" />
-            </FormField>
-            <FormField label="Số điện thoại">
-              <input name="phone" />
-            </FormField>
-            <FormField label="Lương cơ bản (VND)">
-              <input
-                defaultValue="0"
-                inputMode="numeric"
-                min="0"
-                name="baseSalaryAmount"
-                required
-                step="1"
-                type="number"
-              />
-            </FormField>
-            <FormField label="Ngày gia nhập công ty">
-              <input
-                name="joinedDate"
-                onChange={(event) => setStaffJoinedDate(event.target.value)}
-                required
-                type="date"
-                value={staffJoinedDate}
-              />
-            </FormField>
-            <FormField label="Ngày lên chính thức">
-              <input
-                min={staffJoinedDate}
-                name="officialDate"
-                onChange={(event) => setStaffOfficialDate(event.target.value)}
-                required={staffCategory === "OFFICIAL"}
-                type="date"
-                value={staffOfficialDate}
-              />
-            </FormField>
-          </div>
-          <FormField label="Loại hình nhân sự">
-            <select
-              name="employmentCategory"
-              onChange={(event) =>
-                setStaffCategory(
-                  event.target.value as "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN",
-                )
-              }
-              value={staffCategory}
-            >
-              {Object.entries(employmentCategoryLabels).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </FormField>
-        </>
+        <StaffProfileFields
+          capabilities={capabilities}
+          errors={staffFieldErrors}
+          joinedDateRequired
+          onChange={(fieldName, value) => {
+            setError(null);
+            setStaffFieldErrors((current) => ({ ...current, [fieldName]: undefined }));
+            setStaffProfile(
+              (current) => ({ ...current, [fieldName]: value }) as StaffProfileEditorValues,
+            );
+          }}
+          officialDateRequired
+          showAttendanceMachineCode={false}
+          today={businessDate()}
+          values={staffProfile}
+        />
       ) : null}
 
       {tab === "assignments" ? (
@@ -465,6 +546,9 @@ function CreateForm({
                 </option>
               ))}
             </select>
+          </FormField>
+          <FormField label="Mã máy chấm công (bắt buộc với nhân viên)">
+            <input name="attendanceMachineCode" />
           </FormField>
           <div className="grid gap-4 sm:grid-cols-2">
             <FormField label="Hiệu lực từ">
@@ -528,9 +612,6 @@ function CreateForm({
         </>
       ) : null}
 
-      <FormField label="Lý do thao tác">
-        <textarea name="reason" required rows={3} />
-      </FormField>
       {error ? (
         <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">
           {error}
@@ -549,6 +630,10 @@ function editorTitle(editor: EditorState): string {
       return editor.item.isActive ? "Ngừng hoạt động cơ sở" : "Kích hoạt lại cơ sở";
     case "staff-edit":
       return "Sửa hồ sơ nhân viên";
+    case "staff-terminate":
+      return editor.item.employmentStatus === "TERMINATED"
+        ? "Bổ sung ngày nghỉ việc"
+        : "Cho nhân viên nghỉ việc";
     case "staff-archive":
       return "Lưu trữ hồ sơ nhân viên";
     case "assignment-end":
@@ -566,12 +651,14 @@ function editorTitle(editor: EditorState): string {
 
 function MutationForm({
   branches,
+  capabilities,
   editor,
   onReload,
   onSaved,
   staff,
 }: Readonly<{
   branches: readonly Option[];
+  capabilities: StaffWorkspaceCapabilities;
   editor: EditorState;
   onReload: () => void;
   onSaved: (message: string) => void;
@@ -581,14 +668,14 @@ function MutationForm({
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const editableStaff = editor.kind === "staff-edit" ? editor.item : null;
-  const [staffCategory, setStaffCategory] = useState(editableStaff?.employmentCategory);
-  const [staffJoinedDate, setStaffJoinedDate] = useState(editableStaff?.joinedDate ?? "");
-  const [staffOfficialDate, setStaffOfficialDate] = useState(editableStaff?.officialDate ?? "");
+  const [staffFieldErrors, setStaffFieldErrors] = useState<StaffProfileFieldErrors>({});
+  const [staffProfile, setStaffProfile] = useState<StaffProfileEditorValues>(() =>
+    adminStaffProfileValues(editableStaff),
+  );
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const reason = field(form, "reason");
     let request: Readonly<{
       path: string;
       method: "PATCH" | "POST";
@@ -605,7 +692,6 @@ function MutationForm({
             name: field(form, "name"),
             address: field(form, "address"),
             version: editor.item.version,
-            reason,
           },
           success: "Đã cập nhật cơ sở.",
         };
@@ -614,7 +700,7 @@ function MutationForm({
         request = {
           path: `/api/branches/${editor.item.id}`,
           method: "PATCH",
-          body: { isActive: !editor.item.isActive, version: editor.item.version, reason },
+          body: { isActive: !editor.item.isActive, version: editor.item.version },
           success: editor.item.isActive ? "Đã ngừng hoạt động cơ sở." : "Đã kích hoạt cơ sở.",
         };
         break;
@@ -628,10 +714,20 @@ function MutationForm({
           path: `/api/staff/${editor.item.id}`,
           method: "PATCH",
           body: {
+            staffCode: field(form, "staffCode"),
             fullName: field(form, "fullName"),
             streamingAlias: field(form, "streamingAlias") || null,
-            email: field(form, "email") || undefined,
-            phone: field(form, "phone") || undefined,
+            tiktokChannelId: field(form, "tiktokChannelId") || null,
+            email: field(form, "email") || null,
+            phone: field(form, "phone") || null,
+            dateOfBirth: field(form, "dateOfBirth") || null,
+            citizenIdNumber: field(form, "citizenIdNumber") || null,
+            bankAccountNumber: field(form, "bankAccountNumber") || null,
+            bankName: field(form, "bankName") || null,
+            permanentAddress: field(form, "permanentAddress") || null,
+            temporaryAddress: field(form, "temporaryAddress") || null,
+            facebookUrl: field(form, "facebookUrl") || null,
+            university: field(form, "university") || null,
             jobTitle: field(form, "jobTitle"),
             baseSalaryAmount: field(form, "baseSalaryAmount"),
             joinedDate: field(form, "joinedDate") || null,
@@ -640,17 +736,27 @@ function MutationForm({
             employmentStatus: changesEmployment ? employmentStatus : undefined,
             effectiveFrom: changesEmployment ? field(form, "effectiveFrom") : undefined,
             version: editor.item.version,
-            reason,
           },
           success: "Đã cập nhật hồ sơ nhân viên.",
         };
         break;
       }
+      case "staff-terminate":
+        request = {
+          path: `/api/staff/${editor.item.id}/terminate`,
+          method: "POST",
+          body: {
+            terminationDate: field(form, "terminationDate"),
+            version: editor.item.version,
+          },
+          success: "Đã cập nhật ngày nghỉ việc và đóng phạm vi làm việc từ tháng kế tiếp.",
+        };
+        break;
       case "staff-archive":
         request = {
           path: `/api/staff/${editor.item.id}/archive`,
           method: "POST",
-          body: { version: editor.item.version, reason },
+          body: { version: editor.item.version },
           success: "Đã lưu trữ hồ sơ nhân viên.",
         };
         break;
@@ -661,7 +767,6 @@ function MutationForm({
           body: {
             effectiveTo: field(form, "effectiveTo"),
             version: editor.item.version,
-            reason,
           },
           success: "Đã kết thúc phân công.",
         };
@@ -672,9 +777,9 @@ function MutationForm({
           method: "POST",
           body: {
             targetBranchId: field(form, "targetBranchId"),
+            attendanceMachineCode: field(form, "attendanceMachineCode") || null,
             effectiveFrom: field(form, "effectiveFrom"),
             version: editor.item.version,
-            reason,
           },
           success: "Đã chuyển cơ sở và lưu lịch sử phân công.",
         };
@@ -683,7 +788,7 @@ function MutationForm({
         request = {
           path: `/api/assignments/${editor.item.id}/cancel`,
           method: "POST",
-          body: { version: editor.item.version, reason },
+          body: { version: editor.item.version },
           success: "Đã hủy phân công sắp hiệu lực.",
         };
         break;
@@ -696,7 +801,6 @@ function MutationForm({
             canManagePayroll: form.get("canManagePayroll") === "on",
             staffId: field(form, "staffId") || null,
             version: editor.item.version,
-            reason,
           },
           success: "Đã cập nhật tài khoản.",
         };
@@ -705,7 +809,7 @@ function MutationForm({
         request = {
           path: `/api/users/${editor.item.id}`,
           method: "PATCH",
-          body: { active: !editor.item.active, version: editor.item.version, reason },
+          body: { active: !editor.item.active, version: editor.item.version },
           success: editor.item.active ? "Đã vô hiệu hóa tài khoản." : "Đã kích hoạt tài khoản.",
         };
         break;
@@ -714,6 +818,7 @@ function MutationForm({
     setPending(true);
     setError(null);
     setConflict(false);
+    setStaffFieldErrors({});
     try {
       const response = await fetch(request.path, {
         method: request.method,
@@ -723,6 +828,9 @@ function MutationForm({
       const payload: unknown = await response.json();
       if (!response.ok) {
         setConflict(response.status === 409);
+        if (editor.kind === "staff-edit") {
+          setStaffFieldErrors(staffProfileFieldErrorsFrom(payload, response.status));
+        }
         throw new Error(apiError(payload));
       }
       onSaved(request.success);
@@ -756,91 +864,41 @@ function MutationForm({
             : `Cơ sở ${editor.item.code} sẽ xuất hiện lại trong các lựa chọn phân công mới.`}
         </p>
       ) : null}
-
       {editor.kind === "staff-edit" ? (
+        <StaffProfileFields
+          capabilities={capabilities}
+          errors={staffFieldErrors}
+          onChange={(fieldName, value) => {
+            setError(null);
+            setStaffFieldErrors((current) => ({ ...current, [fieldName]: undefined }));
+            setStaffProfile(
+              (current) => ({ ...current, [fieldName]: value }) as StaffProfileEditorValues,
+            );
+          }}
+          showAttendanceMachineCode={false}
+          showEmploymentControls
+          today={businessDate()}
+          values={staffProfile}
+        />
+      ) : null}
+
+      {editor.kind === "staff-terminate" ? (
         <>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <FormField label="Họ và tên">
-              <input defaultValue={editor.item.fullName} name="fullName" required />
-            </FormField>
-            <FormField label="ACC / alias Live">
-              <input defaultValue={editor.item.streamingAlias ?? ""} name="streamingAlias" />
-            </FormField>
-            <FormField label="Vị trí công việc">
-              <input defaultValue={editor.item.jobTitle} name="jobTitle" required />
-            </FormField>
-            <FormField label="Email">
-              <input defaultValue={editor.item.email ?? ""} name="email" type="email" />
-            </FormField>
-            <FormField label="Số điện thoại">
-              <input defaultValue={editor.item.phone ?? ""} name="phone" />
-            </FormField>
-            <FormField label="Lương cơ bản (VND)">
-              <input
-                defaultValue={editor.item.baseSalaryAmount}
-                inputMode="numeric"
-                min="0"
-                name="baseSalaryAmount"
-                required
-                step="1"
-                type="number"
-              />
-            </FormField>
-            <FormField label="Ngày gia nhập công ty">
-              <input
-                name="joinedDate"
-                onChange={(event) => setStaffJoinedDate(event.target.value)}
-                type="date"
-                value={staffJoinedDate}
-              />
-            </FormField>
-            <FormField label="Ngày lên chính thức">
-              <input
-                min={staffJoinedDate || undefined}
-                name="officialDate"
-                onChange={(event) => setStaffOfficialDate(event.target.value)}
-                type="date"
-                value={staffOfficialDate}
-              />
-            </FormField>
-            <FormField label="Loại hình nhân sự">
-              <select
-                name="employmentCategory"
-                onChange={(event) =>
-                  setStaffCategory(
-                    event.target.value as "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN",
-                  )
-                }
-                value={staffCategory}
-              >
-                {Object.entries(employmentCategoryLabels).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </FormField>
-            <FormField label="Trạng thái việc làm">
-              <select defaultValue={editor.item.employmentStatus} name="employmentStatus">
-                {Object.entries(employmentStatusLabels).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </FormField>
-            <FormField label="Ngày hiệu lực nếu đổi loại/trạng thái">
-              <input
-                defaultValue={businessDate()}
-                max={businessDate()}
-                name="effectiveFrom"
-                type="date"
-              />
-            </FormField>
-          </div>
-          <p className="text-sm text-slate-500">
-            Thay đổi loại hoặc trạng thái sẽ tạo lịch sử hiệu lực; không ghi đè lịch sử cũ.
+          <p className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
+            Nhân viên vẫn được chấm công và tính lương trong toàn bộ tháng nghỉ việc. Từ tháng kế
+            tiếp, nhân viên sẽ không còn xuất hiện trong Chấm công và Payroll. Tài khoản liên kết
+            cũng sẽ bị vô hiệu hóa.
           </p>
+          <FormField label="Ngày nghỉ việc">
+            <input
+              defaultValue={editor.item.terminationDate ?? businessDate()}
+              max={businessDate()}
+              min={editor.item.joinedDate ?? undefined}
+              name="terminationDate"
+              required
+              type="date"
+            />
+          </FormField>
         </>
       ) : null}
 
@@ -899,6 +957,12 @@ function MutationForm({
         </>
       ) : null}
 
+      {editor.kind === "assignment-transfer" && editor.item.assignmentType === "MEMBER" ? (
+        <FormField label="Mã máy chấm công tại cơ sở mới">
+          <input name="attendanceMachineCode" required />
+        </FormField>
+      ) : null}
+
       {editor.kind === "assignment-cancel" ? (
         <p className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800">
           Phân công bắt đầu ngày {editor.item.effectiveFrom} sẽ được đánh dấu đã hủy và vẫn còn
@@ -949,9 +1013,6 @@ function MutationForm({
         </p>
       ) : null}
 
-      <FormField label="Lý do thao tác">
-        <textarea name="reason" required rows={3} />
-      </FormField>
       {error ? (
         <div className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">
           <p>{error}</p>
@@ -1082,12 +1143,949 @@ function BranchRows({
   );
 }
 
+function ProfileSection({ children, title }: Readonly<{ children: ReactNode; title: string }>) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-4">
+      <h3 className="text-base font-semibold text-slate-900">{title}</h3>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function ProfileInfo({ label, children }: Readonly<{ label: string; children: ReactNode }>) {
+  return (
+    <div className="min-w-0 rounded-lg bg-slate-50 p-3">
+      <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</dt>
+      <dd className="mt-1 break-words text-sm text-slate-900 [overflow-wrap:anywhere]">
+        {children}
+      </dd>
+    </div>
+  );
+}
+
+function PrivateDocumentMetadataCard({
+  document,
+  onView,
+  title,
+}: Readonly<{
+  document: IdentityDocument | BankQrDocument | null;
+  onView: (source: ProfileDocument) => void;
+  title: string;
+}>) {
+  const source: ProfileDocument | null = document
+    ? "side" in document
+      ? { kind: "IDENTITY", title, document }
+      : { kind: "BANK_QR", title, document }
+    : null;
+  return (
+    <article className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <h4 className="font-semibold text-slate-900">{title}</h4>
+        <Badge
+          tone={
+            document?.status === "READY"
+              ? "green"
+              : document?.status === "PENDING_UPLOAD"
+                ? "amber"
+                : document?.status === "REJECTED"
+                  ? "rose"
+                  : "slate"
+          }
+        >
+          {privateDocumentStatus(document?.status ?? null)}
+        </Badge>
+      </div>
+      {document ? (
+        <dl className="mt-3 grid gap-2 text-sm">
+          <div className="min-w-0">
+            <dt className="text-xs text-slate-500">Tên file</dt>
+            <dd
+              className="break-words font-medium [overflow-wrap:anywhere]"
+              title={document.originalFileName}
+            >
+              {document.originalFileName}
+            </dd>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <dt className="text-xs text-slate-500">Dung lượng</dt>
+              <dd>{fileSize(document.sizeBytes)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-slate-500">Loại file</dt>
+              <dd className="break-words">{document.mimeType}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-slate-500">Phiên bản</dt>
+              <dd>v{document.version}</dd>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div>
+              <dt className="text-xs text-slate-500">Tải lên</dt>
+              <dd>{document.uploadedAt ? dateTime(document.uploadedAt) : "Chưa hoàn tất"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-slate-500">Xác minh</dt>
+              <dd>{document.verifiedAt ? dateTime(document.verifiedAt) : "Chưa xác minh"}</dd>
+            </div>
+          </div>
+        </dl>
+      ) : (
+        <p className="mt-3 text-sm text-slate-500">Nhân viên chưa tải tài liệu này.</p>
+      )}
+      {source && document?.status === "READY" ? (
+        <button
+          className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-800 hover:bg-sky-100"
+          onClick={() => onView(source)}
+          type="button"
+        >
+          Xem ảnh
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
+type CurrentAdminAssignment = AdminStaffDto["currentAssignments"][number];
+
+function AssignmentMachineCodeEditor({
+  assignment,
+  onChanged,
+  staffId,
+  staffVersion,
+}: Readonly<{
+  assignment: CurrentAdminAssignment;
+  onChanged: (message: string) => void;
+  staffId: string;
+  staffVersion: number;
+}>) {
+  const [value, setValue] = useState(assignment.attendanceMachineCode ?? "");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const attendanceMachineCode = value.trim();
+    if (!attendanceMachineCode) {
+      setError("Mã máy chấm công không được để trống.");
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/staff/${encodeURIComponent(staffId)}/profile`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attendanceMachineCode,
+          assignmentId: assignment.id,
+          assignmentVersion: assignment.version,
+          version: staffVersion,
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) throw new Error(apiError(payload));
+      onChanged(`Đã cập nhật mã máy chấm công tại ${assignment.branchName}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể cập nhật mã máy chấm công.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form className="mt-3 grid gap-2" onSubmit={(event) => void save(event)}>
+      <label className="grid gap-1 text-xs font-medium text-slate-600">
+        Mã máy chấm công
+        <input
+          autoCapitalize="characters"
+          className="font-mono"
+          maxLength={30}
+          onChange={(event) => setValue(event.target.value)}
+          pattern="[A-Za-z0-9_-]+"
+          required
+          value={value}
+        />
+      </label>
+      <p className="text-xs text-slate-500">
+        Mã được lưu dạng chuỗi nên giữ nguyên số 0 ở đầu.
+      </p>
+      {error ? (
+        <p className="text-xs text-rose-700" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <button
+        className="justify-self-start rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-800 disabled:opacity-50"
+        disabled={pending || value.trim() === assignment.attendanceMachineCode}
+        type="submit"
+      >
+        {pending ? "Đang lưu…" : "Lưu mã máy"}
+      </button>
+    </form>
+  );
+}
+
+type ScheduleEditorValue = Readonly<{
+  id: string | null;
+  version: number | null;
+  name: string;
+  scheduledStart: string;
+  scheduledEnd: string;
+  requiredLive: string;
+  effectiveFrom: string;
+  effectiveTo: string;
+}>;
+
+function scheduleEditorValue(schedule?: StaffWorkScheduleDto | null): ScheduleEditorValue {
+  return schedule
+    ? {
+        id: schedule.id,
+        version: schedule.version,
+        name: schedule.name,
+        scheduledStart: minutesAsTime(schedule.scheduledStartMinutes),
+        scheduledEnd: minutesAsTime(schedule.scheduledEndMinutes),
+        requiredLive: minutesAsTime(schedule.requiredLiveMinutes),
+        effectiveFrom: schedule.effectiveFrom,
+        effectiveTo: schedule.effectiveTo ?? "",
+      }
+    : {
+        id: null,
+        version: null,
+        name: "Ca Live",
+        scheduledStart: "09:00",
+        scheduledEnd: "15:00",
+        requiredLive: "06:00",
+        effectiveFrom: businessDate(),
+        effectiveTo: "",
+      };
+}
+
+function AdministrationScheduleEditor({
+  currentSchedule,
+  onChanged,
+  staffId,
+}: Readonly<{
+  currentSchedule: StaffWorkScheduleDto | null;
+  onChanged: (message: string) => void;
+  staffId: string;
+}>) {
+  const [form, setForm] = useState<ScheduleEditorValue>(() => scheduleEditorValue());
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function update<K extends keyof ScheduleEditorValue>(
+    key: K,
+    value: ScheduleEditorValue[K],
+  ): void {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const scheduledStartMinutes = timeAsMinutes(form.scheduledStart);
+    const scheduledEndMinutes = timeAsMinutes(form.scheduledEnd);
+    const requiredLiveMinutes = timeAsMinutes(form.requiredLive);
+    if (
+      scheduledStartMinutes === null ||
+      scheduledEndMinutes === null ||
+      requiredLiveMinutes === null
+    ) {
+      setError("Giờ ca và thời lượng Live phải đúng định dạng HH:mm.");
+      return;
+    }
+
+    setPending(true);
+    setError(null);
+    try {
+      const updating = Boolean(form.id && form.version);
+      const endpoint = updating
+        ? `/api/staff/${encodeURIComponent(staffId)}/schedules/${encodeURIComponent(form.id!)}`
+        : `/api/staff/${encodeURIComponent(staffId)}/schedules`;
+      const response = await fetch(endpoint, {
+        method: updating ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: form.name.trim(),
+          scheduledStartMinutes,
+          scheduledEndMinutes,
+          spansNextDay: scheduledEndMinutes <= scheduledStartMinutes,
+          requiredLiveMinutes,
+          effectiveFrom: form.effectiveFrom,
+          effectiveTo: form.effectiveTo || null,
+          ...(updating ? { version: form.version } : {}),
+        }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) throw new Error(apiError(payload));
+      setForm(scheduleEditorValue());
+      onChanged(updating ? "Đã cập nhật ca làm." : "Đã thêm ca làm theo ngày hiệu lực.");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Không thể lưu ca làm.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4" onSubmit={(event) => void save(event)}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-semibold">{form.id ? "Sửa ca hiện tại" : "Thêm ca mới"}</h4>
+        <div className="flex flex-wrap gap-2">
+          {currentSchedule ? (
+            <button
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold"
+              onClick={() => {
+                setError(null);
+                setForm(scheduleEditorValue(currentSchedule));
+              }}
+              type="button"
+            >
+              Sửa ca hiện tại
+            </button>
+          ) : null}
+          <button
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold"
+            onClick={() => {
+              setError(null);
+              setForm(scheduleEditorValue());
+            }}
+            type="button"
+          >
+            Thêm ca mới
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <FormField label="Tên ca">
+          <input
+            onChange={(event) => update("name", event.target.value)}
+            required
+            value={form.name}
+          />
+        </FormField>
+        <FormField label="Check-in chuẩn">
+          <input
+            onChange={(event) => update("scheduledStart", event.target.value)}
+            required
+            type="time"
+            value={form.scheduledStart}
+          />
+        </FormField>
+        <FormField label="Check-out chuẩn">
+          <input
+            onChange={(event) => update("scheduledEnd", event.target.value)}
+            required
+            type="time"
+            value={form.scheduledEnd}
+          />
+        </FormField>
+        <FormField label="Live cơ bản (HH:mm)">
+          <input
+            inputMode="numeric"
+            onChange={(event) => update("requiredLive", event.target.value)}
+            pattern="\d{2}:[0-5]\d"
+            placeholder="06:00"
+            required
+            value={form.requiredLive}
+          />
+        </FormField>
+        <FormField label="Hiệu lực từ">
+          <input
+            onChange={(event) => update("effectiveFrom", event.target.value)}
+            required
+            type="date"
+            value={form.effectiveFrom}
+          />
+        </FormField>
+        <FormField label="Hiệu lực đến">
+          <input
+            onChange={(event) => update("effectiveTo", event.target.value)}
+            type="date"
+            value={form.effectiveTo}
+          />
+        </FormField>
+      </div>
+      {error ? (
+        <p className="mt-3 text-sm text-rose-700" role="alert">
+          {error}
+        </p>
+      ) : null}
+      <Button className="mt-3" disabled={pending}>
+        {pending ? "Đang lưu…" : form.id ? "Lưu sửa ca" : "Lưu ca mới"}
+      </Button>
+    </form>
+  );
+}
+
+function AdminPrivateDocumentUpload({
+  kind,
+  onChanged,
+  staffId,
+}: Readonly<{
+  kind: StaffPrivateDocumentKind;
+  onChanged: (message: string) => void;
+  staffId: string;
+}>) {
+  const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const label =
+    kind === "CITIZEN_ID_FRONT"
+      ? "Tải CCCD mặt trước"
+      : kind === "CITIZEN_ID_BACK"
+        ? "Tải CCCD mặt sau"
+        : "Tải QR ngân hàng";
+
+  async function upload(file: File): Promise<void> {
+    setPending(true);
+    setError(null);
+    try {
+      await uploadStaffPrivateDocument({
+        staffId,
+        kind,
+        file,
+        onPhase: (phase) =>
+          setStatus(
+            phase === "PREPARING"
+              ? "Đang chuẩn bị…"
+              : phase === "UPLOADING"
+                ? "Đang tải ảnh…"
+                : "Đang xác minh…",
+          ),
+      });
+      setStatus("Tải ảnh thành công.");
+      onChanged("Đã cập nhật tài liệu riêng tư.");
+    } catch (caught) {
+      setStatus(null);
+      setError(caught instanceof Error ? caught.message : "Không thể tải ảnh.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <label className="mt-3 grid gap-1 rounded-lg border border-dashed border-slate-300 p-3 text-xs font-semibold text-slate-700">
+      {label}
+      <input
+        accept="image/jpeg,image/png,image/webp"
+        className="block w-full text-xs"
+        disabled={pending}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void upload(file);
+          event.target.value = "";
+        }}
+        type="file"
+      />
+      {status ? <p className="mt-1 text-xs text-sky-700">{status}</p> : null}
+      {error ? (
+        <p className="mt-1 text-xs text-rose-700" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </label>
+  );
+}
+
+function AdminStaffProfile({
+  onEdit,
+  onChanged,
+  onManageAssignments,
+  staff,
+}: Readonly<{
+  onEdit: () => void;
+  onChanged: (message: string) => void;
+  onManageAssignments: () => void;
+  staff: AdminStaffDto;
+}>) {
+  const [preview, setPreview] = useState<DocumentPreview | null>(null);
+  const previewRequest = useRef<AbortController | null>(null);
+  const front =
+    staff.identityDocuments.find((document) => document.side === "CITIZEN_ID_FRONT") ?? null;
+  const back =
+    staff.identityDocuments.find((document) => document.side === "CITIZEN_ID_BACK") ?? null;
+  const mayEdit = !staff.archivedAt && staff.employmentStatus !== "TERMINATED";
+
+  useEffect(
+    () => () => {
+      previewRequest.current?.abort();
+    },
+    [],
+  );
+
+  async function loadPreview(source: ProfileDocument): Promise<void> {
+    previewRequest.current?.abort();
+    const controller = new AbortController();
+    previewRequest.current = controller;
+    setPreview({
+      source,
+      phase: "LOADING",
+      url: null,
+      expiresInSeconds: null,
+      error: null,
+    });
+    try {
+      const documentId = encodeURIComponent(source.document.id);
+      const staffId = encodeURIComponent(staff.id);
+      const path =
+        source.kind === "BANK_QR"
+          ? `/api/staff/${staffId}/bank-qr/${documentId}/view`
+          : `/api/staff/${staffId}/identity-documents/${documentId}/view`;
+      const response = await fetch(path, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      const payload: unknown = await response.json();
+      if (
+        !response.ok ||
+        typeof payload !== "object" ||
+        payload === null ||
+        !("data" in payload) ||
+        typeof payload.data !== "object" ||
+        payload.data === null ||
+        !("url" in payload.data) ||
+        typeof payload.data.url !== "string"
+      ) {
+        throw new Error(apiError(payload));
+      }
+      const expiresInSeconds =
+        "expiresInSeconds" in payload.data && typeof payload.data.expiresInSeconds === "number"
+          ? payload.data.expiresInSeconds
+          : null;
+      setPreview({
+        source,
+        phase: "READY",
+        url: payload.data.url,
+        expiresInSeconds,
+        error: null,
+      });
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      setPreview({
+        source,
+        phase: "FAILED",
+        url: null,
+        expiresInSeconds: null,
+        error: caught instanceof Error ? caught.message : "Không thể mở ảnh.",
+      });
+    }
+  }
+
+  function closePreview(): void {
+    previewRequest.current?.abort();
+    previewRequest.current = null;
+    setPreview(null);
+  }
+
+  return (
+    <div className="space-y-4" data-testid="administration-staff-profile">
+      <div className="flex flex-wrap items-start justify-between gap-3 rounded-xl bg-slate-50 p-4">
+        <div className="min-w-0">
+          <p className="break-words text-lg font-semibold">{staff.fullName}</p>
+          <p className="break-words text-sm text-slate-600">
+            {staff.staffCode} · {optionalText(staff.jobTitle)}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            tone={
+              staff.employmentStatus === "ACTIVE"
+                ? "green"
+                : staff.employmentStatus === "ON_LEAVE"
+                  ? "amber"
+                  : "slate"
+            }
+          >
+            {employmentStatusLabels[staff.employmentStatus]}
+          </Badge>
+          {staff.archivedAt ? <Badge tone="slate">Đã lưu trữ</Badge> : null}
+          {mayEdit ? (
+            <Button onClick={onEdit} type="button">
+              Chỉnh sửa
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <ProfileSection title="Thông tin định danh">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <ProfileInfo label="Họ và tên">{staff.fullName}</ProfileInfo>
+            <ProfileInfo label="Mã hồ sơ nội bộ">{staff.staffCode}</ProfileInfo>
+            <ProfileInfo label="Mã máy chấm công hiện tại">
+              {staff.currentAssignments
+                .map(
+                  (assignment) =>
+                    `${assignment.branchCode}: ${assignment.attendanceMachineCode ?? "chưa có mã"}`,
+                )
+                .join(", ") || "Chưa phân công"}
+            </ProfileInfo>
+            <ProfileInfo label="Ngày sinh">{displayBusinessDate(staff.dateOfBirth)}</ProfileInfo>
+            <ProfileInfo label="Số CCCD/CMND">{optionalText(staff.citizenIdNumber)}</ProfileInfo>
+          </dl>
+        </ProfileSection>
+
+        <ProfileSection title="TikTok">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <ProfileInfo label="Tên kênh TikTok / ACC">
+              {optionalText(staff.streamingAlias)}
+            </ProfileInfo>
+            <ProfileInfo label="ID kênh TikTok">{optionalText(staff.tiktokChannelId)}</ProfileInfo>
+          </dl>
+        </ProfileSection>
+
+        <ProfileSection title="Liên hệ">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <ProfileInfo label="Số điện thoại">{optionalText(staff.phone)}</ProfileInfo>
+            <ProfileInfo label="Email">{optionalText(staff.email)}</ProfileInfo>
+            <ProfileInfo label="Facebook">
+              {staff.facebookUrl &&
+                (() => {
+                  try {
+                    const url = new URL(staff.facebookUrl);
+                    return url.protocol === "https:" || url.protocol === "http:" ? (
+                      <a
+                        className="text-sky-700 underline"
+                        href={url.toString()}
+                        rel="noopener noreferrer"
+                        target="_blank"
+                      >
+                        {staff.facebookUrl}
+                      </a>
+                    ) : (
+                      staff.facebookUrl
+                    );
+                  } catch {
+                    return staff.facebookUrl;
+                  }
+                })()}
+              {!staff.facebookUrl ? "Chưa cập nhật" : null}
+            </ProfileInfo>
+            <ProfileInfo label="Trường Đại học">{optionalText(staff.university)}</ProfileInfo>
+            <ProfileInfo label="Địa chỉ thường trú">
+              {optionalText(staff.permanentAddress)}
+            </ProfileInfo>
+            <ProfileInfo label="Địa chỉ tạm trú">
+              {optionalText(staff.temporaryAddress)}
+            </ProfileInfo>
+          </dl>
+        </ProfileSection>
+
+        <ProfileSection title="Ngân hàng">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <ProfileInfo label="Tên ngân hàng">{optionalText(staff.bankName)}</ProfileInfo>
+            <ProfileInfo label="Số tài khoản">{optionalText(staff.bankAccountNumber)}</ProfileInfo>
+          </dl>
+        </ProfileSection>
+
+        <ProfileSection title="Việc làm">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <ProfileInfo label="Chức danh">{optionalText(staff.jobTitle)}</ProfileInfo>
+            <ProfileInfo label="Loại nhân sự">
+              {employmentCategoryLabels[staff.employmentCategory]}
+            </ProfileInfo>
+            <ProfileInfo label="Trạng thái">
+              {employmentStatusLabels[staff.employmentStatus]}
+            </ProfileInfo>
+            <ProfileInfo label="Ngày gia nhập">{displayBusinessDate(staff.joinedDate)}</ProfileInfo>
+            <ProfileInfo label="Ngày chính thức">
+              {displayBusinessDate(staff.officialDate)}
+            </ProfileInfo>
+            <ProfileInfo label="Ngày nghỉ việc">
+              {displayBusinessDate(staff.terminationDate)}
+            </ProfileInfo>
+            <ProfileInfo label="Lương cơ bản">{money(staff.baseSalaryAmount)} ₫</ProfileInfo>
+            <ProfileInfo label="Level hiện tại">
+              {staff.level ? `${staff.level.code} · ${staff.level.name}` : "Chưa cập nhật"}
+            </ProfileInfo>
+            <ProfileInfo label="Tài khoản hệ thống">
+              {staff.user
+                ? `${staff.user.username ?? "Chưa có username"} · ${
+                    staff.user.active ? "đang hoạt động" : "đã vô hiệu hóa"
+                  }`
+                : "Chưa liên kết"}
+            </ProfileInfo>
+          </dl>
+        </ProfileSection>
+
+        <ProfileSection title="Phân công hiện tại">
+          {mayEdit ? (
+            <button
+              className="mb-3 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
+              onClick={onManageAssignments}
+              type="button"
+            >
+              Chuyển hoặc kết thúc phân công
+            </button>
+          ) : null}
+          {staff.currentAssignments.length ? (
+            <ul className="space-y-2 text-sm">
+              {staff.currentAssignments.map((assignment) => (
+                <li className="rounded-lg bg-slate-50 p-3" key={assignment.id}>
+                  <strong>
+                    {assignment.branchCode} — {assignment.branchName}
+                  </strong>
+                  <p className="mt-1 text-slate-600">
+                    {assignmentTypeLabels[assignment.assignmentType]} · Mã máy:{" "}
+                    {assignment.attendanceMachineCode ?? "chưa có"}
+                  </p>
+                  {assignment.assignmentType === "MEMBER" && mayEdit ? (
+                    <AssignmentMachineCodeEditor
+                      assignment={assignment}
+                      key={`${assignment.id}:${assignment.version}:${assignment.attendanceMachineCode ?? ""}`}
+                      onChanged={onChanged}
+                      staffId={staff.id}
+                      staffVersion={staff.version}
+                    />
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-slate-500">Không có phân công hiện hành.</p>
+          )}
+        </ProfileSection>
+      </div>
+
+      <ProfileSection title="Lịch sử chuyển cơ sở">
+        {staff.assignmentHistory.length ? (
+          <div className="overflow-x-auto">
+            <table className="min-w-[780px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Cơ sở</th>
+                  <th className="px-3 py-2">Loại phân công</th>
+                  <th className="px-3 py-2">Mã máy chấm công</th>
+                  <th className="px-3 py-2">Từ ngày</th>
+                  <th className="px-3 py-2">Đến ngày</th>
+                  <th className="px-3 py-2">Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                {staff.assignmentHistory.map((assignment) => (
+                  <tr className="border-t border-slate-100" key={assignment.id}>
+                    <td className="px-3 py-3">
+                      {assignment.branchCode} — {assignment.branchName}
+                    </td>
+                    <td className="px-3 py-3">{assignmentTypeLabels[assignment.assignmentType]}</td>
+                    <td className="px-3 py-3">{assignment.attendanceMachineCode ?? "Chưa có"}</td>
+                    <td className="px-3 py-3">{displayBusinessDate(assignment.effectiveFrom)}</td>
+                    <td className="px-3 py-3">
+                      {assignment.effectiveTo
+                        ? displayBusinessDate(assignment.effectiveTo)
+                        : "Hiện tại"}
+                    </td>
+                    <td className="px-3 py-3">
+                      <Badge tone={assignment.status === "CURRENT" ? "green" : "slate"}>
+                        {assignmentStatusLabels[assignment.status]}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">Chưa có lịch sử phân công.</p>
+        )}
+      </ProfileSection>
+
+      <ProfileSection title="Ca làm">
+        {mayEdit ? (
+          <AdministrationScheduleEditor
+            currentSchedule={staff.currentSchedule}
+            key={`${staff.currentSchedule?.id ?? "new"}:${staff.currentSchedule?.version ?? 0}`}
+            onChanged={onChanged}
+            staffId={staff.id}
+          />
+        ) : null}
+        {staff.scheduleHistory.length ? (
+          <div className="overflow-x-auto">
+            <table className="min-w-[740px] text-left text-sm">
+              <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2">Tên ca</th>
+                  <th className="px-3 py-2">Check-in chuẩn</th>
+                  <th className="px-3 py-2">Check-out chuẩn</th>
+                  <th className="px-3 py-2">Live cơ bản</th>
+                  <th className="px-3 py-2">Hiệu lực</th>
+                </tr>
+              </thead>
+              <tbody>
+                {staff.scheduleHistory.map((schedule) => (
+                  <tr className="border-t border-slate-100" key={schedule.id}>
+                    <td className="px-3 py-3">
+                      {schedule.name}
+                      {schedule.spansNextDay ? (
+                        <span className="ml-1 text-xs text-slate-500">(qua ngày)</span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-3">{minutesAsTime(schedule.scheduledStartMinutes)}</td>
+                    <td className="px-3 py-3">{minutesAsTime(schedule.scheduledEndMinutes)}</td>
+                    <td className="px-3 py-3">{minutesAsTime(schedule.requiredLiveMinutes)}</td>
+                    <td className="px-3 py-3">
+                      {displayBusinessDate(schedule.effectiveFrom)} —{" "}
+                      {schedule.effectiveTo
+                        ? displayBusinessDate(schedule.effectiveTo)
+                        : "hiện tại"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">Chưa có lịch sử ca làm.</p>
+        )}
+      </ProfileSection>
+
+      <ProfileSection title="Tài liệu riêng tư">
+        <p className="mb-4 text-sm text-slate-600">
+          Ảnh chỉ được tải sau khi bấm “Xem ảnh”. Liên kết xem có thời hạn ngắn và không được lưu
+          trong trình duyệt.
+        </p>
+        <div className="grid gap-3 md:grid-cols-3">
+          <PrivateDocumentMetadataCard
+            document={front}
+            onView={(source) => void loadPreview(source)}
+            title="CCCD mặt trước"
+          />
+          <PrivateDocumentMetadataCard
+            document={back}
+            onView={(source) => void loadPreview(source)}
+            title="CCCD mặt sau"
+          />
+          <PrivateDocumentMetadataCard
+            document={staff.bankQrDocument}
+            onView={(source) => void loadPreview(source)}
+            title="QR ngân hàng"
+          />
+        </div>
+        {mayEdit ? (
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <AdminPrivateDocumentUpload
+              kind="CITIZEN_ID_FRONT"
+              onChanged={onChanged}
+              staffId={staff.id}
+            />
+            <AdminPrivateDocumentUpload
+              kind="CITIZEN_ID_BACK"
+              onChanged={onChanged}
+              staffId={staff.id}
+            />
+            <AdminPrivateDocumentUpload kind="BANK_QR" onChanged={onChanged} staffId={staff.id} />
+          </div>
+        ) : null}
+      </ProfileSection>
+
+      {preview ? (
+        <div
+          aria-label={`Xem ${preview.source.title}`}
+          aria-modal="true"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-3 sm:p-6"
+          role="dialog"
+        >
+          <button
+            aria-label="Đóng ảnh"
+            className="absolute inset-0"
+            onClick={closePreview}
+            type="button"
+          />
+          <div className="relative z-10 flex max-h-[90dvh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <div className="flex shrink-0 flex-wrap items-start justify-between gap-3 border-b border-slate-200 p-4">
+              <div className="min-w-0">
+                <h3 className="break-words font-semibold">{preview.source.title}</h3>
+                <p
+                  className="break-words text-sm text-slate-500 [overflow-wrap:anywhere]"
+                  title={preview.source.document.originalFileName}
+                >
+                  {preview.source.document.originalFileName}
+                </p>
+              </div>
+              <button
+                className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold"
+                onClick={closePreview}
+                type="button"
+              >
+                Đóng
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto bg-slate-100 p-4">
+              {preview.phase === "LOADING" ? (
+                <div className="grid min-h-64 place-items-center text-sm text-slate-600">
+                  Đang tải ảnh…
+                </div>
+              ) : preview.phase === "FAILED" ? (
+                <div className="grid min-h-64 place-items-center text-center">
+                  <div>
+                    <p className="text-sm text-rose-700">{preview.error}</p>
+                    <button
+                      className="mt-3 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold"
+                      onClick={() => void loadPreview(preview.source)}
+                      type="button"
+                    >
+                      Thử lại
+                    </button>
+                  </div>
+                </div>
+              ) : preview.url ? (
+                <div className="grid min-h-64 place-items-center">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    alt={preview.source.title}
+                    className="max-h-[68dvh] max-w-full object-contain"
+                    onError={() =>
+                      setPreview((current) =>
+                        current
+                          ? {
+                              ...current,
+                              phase: "FAILED",
+                              url: null,
+                              error: "Ảnh không tải được hoặc liên kết đã hết hạn. Hãy thử lại.",
+                            }
+                          : null,
+                      )
+                    }
+                    referrerPolicy="no-referrer"
+                    src={preview.url}
+                  />
+                </div>
+              ) : null}
+            </div>
+            {preview.phase === "READY" && preview.url ? (
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-slate-200 p-4">
+                <p className="text-xs text-slate-500">
+                  {preview.expiresInSeconds
+                    ? `Liên kết hết hạn sau khoảng ${preview.expiresInSeconds} giây.`
+                    : "Liên kết xem có thời hạn ngắn."}
+                </p>
+                <a
+                  className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-semibold text-sky-800"
+                  href={preview.url}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                >
+                  Mở ảnh gốc
+                </a>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function StaffRows({
   items,
   onAction,
+  onView,
 }: Readonly<{
   items: readonly AdminStaffDto[];
   onAction: (editor: EditorState) => void;
+  onView: (staff: AdminStaffDto) => void;
 }>) {
   return (
     <>
@@ -1121,8 +2119,32 @@ function StaffRows({
                 </td>
                 <td className="px-4 py-4">
                   {item.currentAssignments.length
-                    ? item.currentAssignments.map(({ branchCode }) => branchCode).join(", ")
+                    ? item.currentAssignments
+                        .map(
+                          ({ branchCode, attendanceMachineCode }) =>
+                            `${branchCode}${attendanceMachineCode ? ` · Máy ${attendanceMachineCode}` : ""}`,
+                        )
+                        .join(", ")
                     : "Chưa phân công"}
+                  <p className="mt-1 text-xs text-slate-500">
+                    Ca:{" "}
+                    {item.currentSchedule
+                      ? `${item.currentSchedule.name} · ${String(
+                          Math.floor(item.currentSchedule.scheduledStartMinutes / 60),
+                        ).padStart(2, "0")}:${String(
+                          item.currentSchedule.scheduledStartMinutes % 60,
+                        ).padStart(2, "0")}–${String(
+                          Math.floor(item.currentSchedule.scheduledEndMinutes / 60),
+                        ).padStart(2, "0")}:${String(
+                          item.currentSchedule.scheduledEndMinutes % 60,
+                        ).padStart(2, "0")}`
+                      : "Chưa có"}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    CCCD trước: {privateDocumentStatus(item.identityDocumentStatus.front)} · sau:{" "}
+                    {privateDocumentStatus(item.identityDocumentStatus.back)} · QR:{" "}
+                    {privateDocumentStatus(item.bankQrStatus)}
+                  </p>
                 </td>
                 <td className="px-4 py-4">
                   <p>{employmentCategoryLabels[item.employmentCategory]}</p>
@@ -1143,6 +2165,16 @@ function StaffRows({
                   <p className="text-xs text-slate-500">
                     Chính thức: {displayBusinessDate(item.officialDate)}
                   </p>
+                  {item.terminationDate ? (
+                    <p className="text-xs text-slate-500">
+                      Nghỉ việc: {displayBusinessDate(item.terminationDate)}
+                    </p>
+                  ) : null}
+                  {item.archivedAt ? (
+                    <p className="mt-2">
+                      <Badge tone="slate">Đã lưu trữ</Badge>
+                    </p>
+                  ) : null}
                 </td>
                 <td className="px-4 py-4">
                   {item.user ? (
@@ -1155,18 +2187,43 @@ function StaffRows({
                 </td>
                 <td className="px-4 py-4">{item.level?.code ?? "—"}</td>
                 <td className="px-4 py-4">
-                  <div className="flex min-w-max gap-2">
-                    <ActionButton onClick={() => onAction({ kind: "staff-edit", item })}>
-                      Sửa
-                    </ActionButton>
-                    {item.employmentStatus === "TERMINATED" ? (
-                      <ActionButton
-                        onClick={() => onAction({ kind: "staff-archive", item })}
-                        tone="warning"
-                      >
-                        Lưu trữ
-                      </ActionButton>
-                    ) : null}
+                  <div className="flex min-w-max flex-wrap gap-2">
+                    <ActionButton onClick={() => onView(item)}>Xem hồ sơ</ActionButton>
+                    {item.archivedAt ? (
+                      <span className="self-center text-sm text-slate-500">Chỉ xem</span>
+                    ) : (
+                      <>
+                        {item.employmentStatus !== "TERMINATED" ? (
+                          <>
+                            <ActionButton onClick={() => onAction({ kind: "staff-edit", item })}>
+                              Sửa
+                            </ActionButton>
+                            <ActionButton
+                              onClick={() => onAction({ kind: "staff-terminate", item })}
+                              tone="warning"
+                            >
+                              Cho nghỉ việc
+                            </ActionButton>
+                          </>
+                        ) : null}
+                        {item.employmentStatus === "TERMINATED" && !item.terminationDate ? (
+                          <ActionButton
+                            onClick={() => onAction({ kind: "staff-terminate", item })}
+                            tone="warning"
+                          >
+                            Bổ sung ngày nghỉ
+                          </ActionButton>
+                        ) : null}
+                        {item.employmentStatus === "TERMINATED" ? (
+                          <ActionButton
+                            onClick={() => onAction({ kind: "staff-archive", item })}
+                            tone="warning"
+                          >
+                            Lưu trữ
+                          </ActionButton>
+                        ) : null}
+                      </>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -1192,27 +2249,64 @@ function StaffRows({
                 <p className="text-sm text-slate-500">
                   Chính thức: {displayBusinessDate(item.officialDate)}
                 </p>
+                {item.terminationDate ? (
+                  <p className="text-sm text-slate-500">
+                    Nghỉ việc: {displayBusinessDate(item.terminationDate)}
+                  </p>
+                ) : null}
               </div>
               <Badge tone={item.employmentStatus === "ACTIVE" ? "green" : "slate"}>
                 {employmentStatusLabels[item.employmentStatus]}
               </Badge>
             </div>
             <p className="mt-3 text-sm">
-              {item.currentAssignments.map(({ branchCode }) => branchCode).join(", ") ||
-                "Chưa phân công"}
+              {item.currentAssignments
+                .map(
+                  ({ branchCode, attendanceMachineCode }) =>
+                    `${branchCode}${attendanceMachineCode ? ` · Máy ${attendanceMachineCode}` : ""}`,
+                )
+                .join(", ") || "Chưa phân công"}
             </p>
-            <div className="mt-4 flex gap-2">
-              <ActionButton onClick={() => onAction({ kind: "staff-edit", item })}>
-                Sửa
-              </ActionButton>
-              {item.employmentStatus === "TERMINATED" ? (
-                <ActionButton
-                  onClick={() => onAction({ kind: "staff-archive", item })}
-                  tone="warning"
-                >
-                  Lưu trữ
-                </ActionButton>
-              ) : null}
+            <p className="mt-1 text-xs text-slate-500">
+              Ca: {item.currentSchedule?.name ?? "Chưa có"} · CCCD trước:{" "}
+              {privateDocumentStatus(item.identityDocumentStatus.front)} · CCCD sau:{" "}
+              {privateDocumentStatus(item.identityDocumentStatus.back)} · QR:{" "}
+              {privateDocumentStatus(item.bankQrStatus)}
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <ActionButton onClick={() => onView(item)}>Xem hồ sơ</ActionButton>
+              {item.archivedAt ? (
+                <Badge tone="slate">Đã lưu trữ · chỉ xem</Badge>
+              ) : item.employmentStatus !== "TERMINATED" ? (
+                <>
+                  <ActionButton onClick={() => onAction({ kind: "staff-edit", item })}>
+                    Sửa
+                  </ActionButton>
+                  <ActionButton
+                    onClick={() => onAction({ kind: "staff-terminate", item })}
+                    tone="warning"
+                  >
+                    Cho nghỉ việc
+                  </ActionButton>
+                </>
+              ) : (
+                <>
+                  {!item.terminationDate ? (
+                    <ActionButton
+                      onClick={() => onAction({ kind: "staff-terminate", item })}
+                      tone="warning"
+                    >
+                      Bổ sung ngày nghỉ
+                    </ActionButton>
+                  ) : null}
+                  <ActionButton
+                    onClick={() => onAction({ kind: "staff-archive", item })}
+                    tone="warning"
+                  >
+                    Lưu trữ
+                  </ActionButton>
+                </>
+              )}
             </div>
           </article>
         ))}
@@ -1251,7 +2345,12 @@ function AssignmentRows({
               <td className="px-4 py-4">
                 {item.branch.code} · {item.branch.name}
               </td>
-              <td className="px-4 py-4">{assignmentTypeLabels[item.assignmentType]}</td>
+              <td className="px-4 py-4">
+                {assignmentTypeLabels[item.assignmentType]}
+                {item.attendanceMachineCode ? (
+                  <p className="text-xs text-slate-500">Máy: {item.attendanceMachineCode}</p>
+                ) : null}
+              </td>
               <td className="px-4 py-4">
                 {item.effectiveFrom} → {item.effectiveTo ?? "Không thời hạn"}
               </td>
@@ -1368,11 +2467,13 @@ export function AdministrationWorkspace({
   activeBranchOptions,
   assignableStaffOptions,
   branchOptions,
+  capabilities,
   staffOptions,
 }: Readonly<{
   activeBranchOptions: readonly Option[];
   assignableStaffOptions: readonly Option[];
   branchOptions: readonly Option[];
+  capabilities: StaffWorkspaceCapabilities;
   staffOptions: readonly Option[];
 }>) {
   const pathname = usePathname();
@@ -1385,9 +2486,11 @@ export function AdministrationWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [profileStaffId, setProfileStaffId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const currentTab = tabs.find(({ id }) => id === tab)!;
+  const showHidden = searchParams.get("showHidden") === "true";
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1434,6 +2537,7 @@ export function AdministrationWorkspace({
     setMessage(null);
     setDrawerOpen(false);
     setEditor(null);
+    setProfileStaffId(null);
     router.push(`${pathname}?tab=${next}`, { scroll: false });
   }
 
@@ -1452,6 +2556,12 @@ export function AdministrationWorkspace({
 
   const title = useMemo(() => `Thêm ${currentTab.label.toLocaleLowerCase("vi-VN")}`, [currentTab]);
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+  const profileStaff =
+    tab === "staff" && profileStaffId
+      ? (((data?.items ?? []) as readonly AdminStaffDto[]).find(
+          (item) => item.id === profileStaffId,
+        ) ?? null)
+      : null;
 
   return (
     <div className="mt-8 space-y-5">
@@ -1490,7 +2600,17 @@ export function AdministrationWorkspace({
               <p className="mt-1 text-sm text-slate-500">{data.total} bản ghi phù hợp</p>
             ) : null}
           </div>
-          <Button onClick={() => setDrawerOpen(true)}>Thêm {currentTab.label.toLowerCase()}</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              onClick={() => updateParams({ showHidden: showHidden ? null : "true", page: null })}
+              variant="secondary"
+            >
+              {showHidden ? "Ẩn dữ liệu ngừng hoạt động" : "Xem dữ liệu đã ẩn"}
+            </Button>
+            <Button onClick={() => setDrawerOpen(true)}>
+              Thêm {currentTab.label.toLowerCase()}
+            </Button>
+          </div>
         </div>
 
         <div className="space-y-4 border-b border-slate-200 p-5">
@@ -1695,6 +2815,11 @@ export function AdministrationWorkspace({
               <StaffRows
                 items={(data?.items ?? []) as readonly AdminStaffDto[]}
                 onAction={setEditor}
+                onView={(item) => {
+                  setDrawerOpen(false);
+                  setEditor(null);
+                  setProfileStaffId(item.id);
+                }}
               />
             ) : tab === "assignments" ? (
               <AssignmentRows
@@ -1741,9 +2866,39 @@ export function AdministrationWorkspace({
         <Drawer onClose={() => setDrawerOpen(false)} title={title}>
           <CreateForm
             branches={tab === "assignments" ? activeBranchOptions : branchOptions}
+            capabilities={capabilities}
             onSaved={saved}
             staff={tab === "assignments" ? assignableStaffOptions : staffOptions}
             tab={tab}
+          />
+        </Drawer>
+      ) : null}
+      {profileStaff ? (
+        <Drawer
+          onClose={() => setProfileStaffId(null)}
+          title={`Hồ sơ nhân viên · ${profileStaff.fullName}`}
+          wide
+        >
+          <AdminStaffProfile
+            key={profileStaff.id}
+            onChanged={(successMessage) => {
+              setMessage(successMessage);
+              setRefreshKey((value) => value + 1);
+              router.refresh();
+            }}
+            onEdit={() => {
+              setProfileStaffId(null);
+              setEditor({ kind: "staff-edit", item: profileStaff });
+            }}
+            onManageAssignments={() => {
+              const params = new URLSearchParams();
+              params.set("tab", "assignments");
+              params.set("staffId", profileStaff.id);
+              setProfileStaffId(null);
+              setData(null);
+              router.push(`${pathname}?${params.toString()}`, { scroll: false });
+            }}
+            staff={profileStaff}
           />
         </Drawer>
       ) : null}
@@ -1751,6 +2906,7 @@ export function AdministrationWorkspace({
         <Drawer onClose={() => setEditor(null)} title={editorTitle(editor)}>
           <MutationForm
             branches={activeBranchOptions}
+            capabilities={capabilities}
             editor={editor}
             key={`${editor.kind}-${editor.item.id}-${editor.item.version}`}
             onReload={() => {

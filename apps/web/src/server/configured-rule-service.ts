@@ -36,6 +36,7 @@ import {
   type ActorContext,
 } from "@ald/domain";
 
+import { systemAuditReason } from "./audit-service";
 import { parseBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
@@ -450,7 +451,7 @@ export async function createConfiguredRuleSet(
       action: "configured_rule_set.create",
       entityType: "RuleSet",
       entityId: ruleSet.id,
-      reason: input.reason,
+      reason: systemAuditReason("CONFIGURED_RULE_SET_CREATED"),
       after: { name: ruleSet.name, type: ruleSet.type, initialVersionId: version.id },
       metadata,
     });
@@ -527,7 +528,7 @@ export async function createConfiguredRuleDraft(
       action: "configured_rule_version.clone_draft",
       entityType: "RuleVersion",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason("CONFIGURED_RULE_VERSION_CLONED_TO_DRAFT"),
       after: versionAuditShape(ruleSet.type, created),
       metadata,
     });
@@ -596,7 +597,7 @@ export async function updateConfiguredRuleDraft(
       action: "configured_rule_version.update_draft",
       entityType: "RuleVersion",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason("CONFIGURED_RULE_DRAFT_UPDATED"),
       before: versionAuditShape(before.ruleSet.type, before),
       after: versionAuditShape(before.ruleSet.type, after),
       metadata,
@@ -709,7 +710,13 @@ export async function publishConfiguredRuleVersion(
         throw new DomainError("CONFLICT", "Draft đã được cập nhật bởi người khác.");
       }
       if (configuration.kind === "MONTHLY_LEVEL_RULES") {
-        await syncPerformanceLevels(tx, actor, configuration, input.reason, metadata);
+        await syncPerformanceLevels(
+          tx,
+          actor,
+          configuration,
+          systemAuditReason("PERFORMANCE_LEVELS_SYNCED_FROM_PUBLISHED_RULE"),
+          metadata,
+        );
       }
       const after = await tx.ruleVersion.findUniqueOrThrow({
         where: { id },
@@ -720,7 +727,7 @@ export async function publishConfiguredRuleVersion(
         action: "configured_rule_version.publish",
         entityType: "RuleVersion",
         entityId: id,
-        reason: input.reason,
+        reason: systemAuditReason("CONFIGURED_RULE_VERSION_PUBLISHED"),
         before: versionAuditShape(before.ruleSet.type, before),
         after: versionAuditShape(before.ruleSet.type, after),
         metadata,
@@ -789,7 +796,7 @@ export async function retireConfiguredRuleVersion(
       action: "configured_rule_version.retire",
       entityType: "RuleVersion",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason("CONFIGURED_RULE_VERSION_RETIRED"),
       before: versionAuditShape(before.ruleSet.type, before),
       after: versionAuditShape(before.ruleSet.type, after),
       metadata,
@@ -1246,7 +1253,7 @@ export async function generateLevelProposals(
         action: "level_proposal.generate",
         entityType: "LevelProposal",
         entityId: created.id,
-        reason: input.reason,
+        reason: systemAuditReason("LEVEL_PROPOSAL_GENERATED"),
         after: {
           sourceMonth: input.month,
           effectiveFrom: bounds.after,
@@ -1326,7 +1333,7 @@ export async function confirmLevelProposal(
             action: "level_history.close_for_proposal",
             entityType: "LevelHistory",
             entityId: current.id,
-            reason: input.reason,
+            reason: systemAuditReason("LEVEL_HISTORY_CLOSED_FOR_PROPOSAL"),
             before: {
               levelCode: current.performanceLevel.code,
               effectiveFrom: current.effectiveFrom.toISOString().slice(0, 10),
@@ -1357,7 +1364,7 @@ export async function confirmLevelProposal(
           action: "level_history.create_from_proposal",
           entityType: "LevelHistory",
           entityId: history.id,
-          reason: input.reason,
+          reason: systemAuditReason("LEVEL_HISTORY_CREATED_FROM_PROPOSAL"),
           before: current
             ? {
                 levelCode: current.performanceLevel.code,
@@ -1385,7 +1392,11 @@ export async function confirmLevelProposal(
         data: {
           status,
           confirmedPerformanceLevelId: target.id,
-          decisionReason: input.reason,
+          decisionReason: systemAuditReason(
+            status === "OVERRIDDEN"
+              ? "LEVEL_PROPOSAL_OVERRIDDEN"
+              : "LEVEL_PROPOSAL_CONFIRMED",
+          ),
           decidedByUserId: actor.userId,
           decidedAt: now,
           version: { increment: 1 },
@@ -1399,7 +1410,11 @@ export async function confirmLevelProposal(
         action: status === "OVERRIDDEN" ? "level_proposal.override" : "level_proposal.confirm",
         entityType: "LevelProposal",
         entityId: id,
-        reason: input.reason,
+        reason: systemAuditReason(
+          status === "OVERRIDDEN"
+            ? "LEVEL_PROPOSAL_OVERRIDDEN"
+            : "LEVEL_PROPOSAL_CONFIRMED",
+        ),
         before: {
           status: proposal.status,
           suggestedLevelCode: proposal.suggestedPerformanceLevel.code,

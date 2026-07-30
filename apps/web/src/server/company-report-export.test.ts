@@ -25,6 +25,7 @@ export const sampleCompanyReport: CompanyMonthlyReportDto = {
           staff: {
             id: "staff-a",
             staffCode: "LIVE-A",
+            attendanceMachineCode: null,
             fullName: "Nhân viên A",
             employmentCategory: "OFFICIAL",
             employmentStatus: "ACTIVE",
@@ -69,6 +70,7 @@ export const sampleCompanyReport: CompanyMonthlyReportDto = {
           staff: {
             id: "staff-b",
             staffCode: "LIVE-B",
+            attendanceMachineCode: null,
             fullName: "Nhân viên B đã nghỉ",
             employmentCategory: "PROBATION",
             employmentStatus: "TERMINATED",

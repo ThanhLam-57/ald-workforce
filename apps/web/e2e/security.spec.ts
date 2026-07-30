@@ -19,7 +19,6 @@ test("proxy chặn mutation cross-site trước application service", async ({ r
     data: {
       code: "CSRF",
       name: "Không được tạo",
-      reason: "CSRF negative test",
     },
   });
   expect(response.status()).toBe(403);
@@ -40,7 +39,6 @@ test("tài khoản do GM tạo bị buộc đổi mật khẩu trước khi dùn
       name: "Forced Password E2E",
       role: "LIVE_EMPLOYEE",
       staffId: null,
-      reason: "Security E2E account provisioning",
     },
   });
   expect(createResponse.status()).toBe(201);
@@ -174,7 +172,6 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
     data: {
       version: editable!.version,
       note: "Security E2E manager A scope",
-      reason: "Acceptance: manager nhập hồ sơ tháng branch A",
     },
   });
   expect(editResponse.ok()).toBe(true);
@@ -198,7 +195,6 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
     page.request.patch("/api/branch-overview", {
       data: {
         branchId: branchA!.id,
-        reason: "Security E2E branch overview read-only",
         edits: [
           {
             clientId: "security-read-only",
@@ -216,7 +212,7 @@ test("manager A không đọc record, report, payroll hoặc file của branch B
     page.request.get(`/api/payroll/periods?month=${month}`),
     page.request.get(`/api/payroll/periods/${validUnknownId}`),
     page.request.post(`/api/payroll/periods/${validUnknownId}/calculate`, {
-      data: { version: 1, reason: "Security E2E payroll deny" },
+      data: { version: 1 },
     }),
     page.request.get(`/api/payroll/exports/${validUnknownId}`),
     page.request.get(`/api/payroll/exports/${validUnknownId}/download`),

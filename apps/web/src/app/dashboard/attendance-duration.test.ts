@@ -4,10 +4,24 @@ import {
   durationInputError,
   formatDurationMinutes,
   isDurationInputDraft,
+  isNextDayCheckout,
   parseDurationMinutes,
 } from "./attendance-duration";
 
 describe("attendance duration HH:mm", () => {
+  it.each([
+    ["23:00", "06:00", true],
+    ["09:00", "17:00", false],
+    ["09:00", "09:00", false],
+    ["", "06:00", false],
+    ["23:00", "", false],
+  ])(
+    "detects next-day checkout for %s–%s as %s",
+    (checkInTime, checkOutTime, expected) => {
+      expect(isNextDayCheckout(checkInTime, checkOutTime)).toBe(expected);
+    },
+  );
+
   it.each([
     [0, "00:00"],
     [90, "01:30"],

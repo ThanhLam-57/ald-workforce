@@ -9,6 +9,7 @@ import {
   createPayrollPeriod,
   ensurePayrollPeriod,
   getPayrollPeriod,
+  getPayrollPrintData,
   listPayrollBranches,
   listPayrollPeriods,
   lockPayrollPeriod,
@@ -124,6 +125,7 @@ beforeAll(async () => {
       branchId,
       staffId: liveStaff.id,
       assignmentType: "MEMBER",
+      attendanceMachineCode: "00033",
       effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
     },
   });
@@ -412,11 +414,7 @@ beforeAll(async () => {
     },
   });
 
-  const period = await createPayrollPeriod(
-    gm,
-    { branchId, month: "2026-07", reason: "Tạo kỳ test" },
-    metadata,
-  );
+  const period = await createPayrollPeriod(gm, { branchId, month: "2026-07" }, metadata);
   periodId = period.id;
 });
 
@@ -482,17 +480,22 @@ afterAll(async () => {
 
 describe("payroll lifecycle, snapshot và authorization", () => {
   it("calculates golden totals and recalculates idempotently", async () => {
-    const calculated = await calculatePayrollPeriod(
-      gm,
-      periodId,
-      { version: 1, reason: "Tính lương lần đầu" },
-      metadata,
-    );
+    const calculated = await calculatePayrollPeriod(gm, periodId, { version: 1 }, metadata);
     expect(calculated.status).toBe("CALCULATED");
     expect(calculated.entries).toHaveLength(1);
     expect(calculated.entries[0]!.totalIncome).toBe("1537500");
     expect(calculated.entries[0]!.workUnits).toBe("0.5");
     expect(calculated.entries[0]!.penalties).toBe("150000");
+    expect(calculated.entries[0]!.staff).toMatchObject({
+      staffCode: "LIVE",
+      attendanceMachineCode: "00033",
+      attendanceMachineCodeIntervals: [
+        expect.objectContaining({
+          attendanceMachineCode: "00033",
+          effectiveFrom: "2026-01-01",
+        }),
+      ],
+    });
     expect(calculated.entries[0]!.monthlyLevel).toMatchObject({
       workedDayCount: 1,
       attendanceRequiredDays: 1,
@@ -516,6 +519,17 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     expect((snapshot.inputs as unknown as { baseSalaryAmount: string }).baseSalaryAmount).toBe(
       "26000000",
     );
+      expect(snapshot.inputs).toMatchObject({
+        period: {
+          branchId,
+        },
+        staffIdentity: {
+          staffCode: "LIVE",
+        attendanceMachineCodeIntervals: [
+          expect.objectContaining({ attendanceMachineCode: "00033" }),
+        ],
+      },
+    });
     expect(
       (snapshot.outputs as unknown as { components: { baseSalary: string } }).components.baseSalary,
     ).toBe("26000000");
@@ -523,12 +537,24 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     const unchanged = await calculatePayrollPeriod(
       gm,
       periodId,
-      { version: calculated.version, reason: "Tính lại không đổi input" },
+      { version: calculated.version },
       metadata,
     );
     expect(unchanged.version).toBe(calculated.version);
     expect(unchanged.latestCalculationNo).toBe(calculated.latestCalculationNo);
     expect(unchanged.entries[0]!.calculationHash).toBe(calculated.entries[0]!.calculationHash);
+
+    await prisma.branchAssignment.updateMany({
+      where: { companyId, branchId, staffId: liveId, assignmentType: "MEMBER" },
+      data: { attendanceMachineCode: "99999" },
+    });
+    expect((await getPayrollPeriod(gm, periodId)).entries[0]!.staff.attendanceMachineCode).toBe(
+      "00033",
+    );
+    await prisma.branchAssignment.updateMany({
+      where: { companyId, branchId, staffId: liveId, assignmentType: "MEMBER" },
+      data: { attendanceMachineCode: "00033" },
+    });
   });
 
   it("snapshots and recalculates the 85/100 employment salary split", async () => {
@@ -586,16 +612,10 @@ describe("payroll lifecycle, snapshot và authorization", () => {
       {
         branchId: branch.id,
         month: "2026-07",
-        reason: "Tạo kỳ kiểm thử ngày chính thức",
       },
       metadata,
     );
-    period = await calculatePayrollPeriod(
-      gm,
-      period.id,
-      { version: period.version, reason: "Tính lương tách 85 và 100" },
-      metadata,
-    );
+    period = await calculatePayrollPeriod(gm, period.id, { version: period.version }, metadata);
     expect(period.entries[0]).toMatchObject({
       proratedSalary: "1425000",
       employmentSalary: {
@@ -629,7 +649,7 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     const recalculated = await calculatePayrollPeriod(
       gm,
       period.id,
-      { version: period.version, reason: "Tính lại sau khi sửa ngày chính thức" },
+      { version: period.version },
       metadata,
     );
     expect(recalculated.entries[0]).toMatchObject({
@@ -651,13 +671,13 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     const reviewed = await reviewPayrollPeriod(
       gm,
       recalculated.id,
-      { version: recalculated.version, reason: "Review snapshot ngày chính thức" },
+      { version: recalculated.version },
       metadata,
     );
     const locked = await lockPayrollPeriod(
       gm,
       reviewed.id,
-      { version: reviewed.version, reason: "Khóa snapshot ngày chính thức" },
+      { version: reviewed.version },
       metadata,
     );
     await prisma.staffMember.update({
@@ -665,12 +685,7 @@ describe("payroll lifecycle, snapshot và authorization", () => {
       data: { officialDate: new Date("2026-07-03T00:00:00.000Z") },
     });
     await expect(
-      calculatePayrollPeriod(
-        gm,
-        locked.id,
-        { version: locked.version, reason: "Không được tính lại kỳ đã khóa" },
-        metadata,
-      ),
+      calculatePayrollPeriod(gm, locked.id, { version: locked.version }, metadata),
     ).rejects.toMatchObject({ code: "CONFLICT" });
     const stillLocked = await getPayrollPeriod(gm, locked.id);
     expect(stillLocked).toMatchObject({
@@ -734,13 +749,13 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     });
     let baselinePeriod = await ensurePayrollPeriod(
       gm,
-      { branchId: branch.id, month: "2026-07", reason: "Tạo kỳ baseline xu" },
+      { branchId: branch.id, month: "2026-07" },
       metadata,
     );
     baselinePeriod = await calculatePayrollPeriod(
       gm,
       baselinePeriod.id,
-      { version: baselinePeriod.version, reason: "Tính kỳ chưa có tháng trước" },
+      { version: baselinePeriod.version },
       metadata,
     );
     expect(baselinePeriod.entries[0]!.monthlyLevel.previousMonthCoinsSource).toBe("NONE");
@@ -758,7 +773,6 @@ describe("payroll lifecycle, snapshot và authorization", () => {
           days: [],
           components: {},
         },
-        reason: "Nhập xu tháng trước lần đầu dùng app",
       },
       metadata,
     );
@@ -797,7 +811,6 @@ describe("payroll lifecycle, snapshot và authorization", () => {
       baselinePeriod.id,
       {
         version: baselinePeriod.version,
-        reason: "Đồng bộ dữ liệu xu thật của tháng trước",
       },
       metadata,
     );
@@ -813,7 +826,7 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     const sent = await sendPayrollPeriod(
       gm,
       synchronized.id,
-      { version: synchronized.version, reason: "Gửi phiếu để làm nguồn tháng sau" },
+      { version: synchronized.version },
       metadata,
     );
     await prisma.attendanceDay.create({
@@ -838,17 +851,8 @@ describe("payroll lifecycle, snapshot và authorization", () => {
         },
       },
     });
-    let august = await ensurePayrollPeriod(
-      gm,
-      { branchId: branch.id, month: "2026-08", reason: "Tạo kỳ tháng sau" },
-      metadata,
-    );
-    august = await calculatePayrollPeriod(
-      gm,
-      august.id,
-      { version: august.version, reason: "Kiểm tra nguồn phiếu tháng trước" },
-      metadata,
-    );
+    let august = await ensurePayrollPeriod(gm, { branchId: branch.id, month: "2026-08" }, metadata);
+    august = await calculatePayrollPeriod(gm, august.id, { version: august.version }, metadata);
     expect(sent.status).toBe("PUBLISHED");
     expect(august.entries[0]!.monthlyLevel).toMatchObject({
       previousMonthCoins: "1000000",
@@ -867,6 +871,72 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     await expect(listPayrollPeriods(manager, { branchId, month: "2026-07" })).rejects.toMatchObject(
       { code: "FORBIDDEN" } satisfies Partial<DomainError>,
     );
+  });
+
+  it("in trực tiếp chỉ đọc dữ liệu đã lưu, có audit và giữ payroll scope", async () => {
+    const printable = await getPayrollPrintData(gm, periodId, liveId, metadata);
+    expect(printable.entry?.staff.id).toBe(liveId);
+    expect(printable.period.entries.length).toBeGreaterThan(0);
+    await expect(getPayrollPrintData(manager, periodId, liveId, metadata)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    } satisfies Partial<DomainError>);
+    await expect(getPayrollPrintData(outsider, periodId, liveId, metadata)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    } satisfies Partial<DomainError>);
+    await expect(
+      prisma.auditLog.findFirst({
+        where: {
+          companyId,
+          entityId: periodId,
+          action: "PAYROLL_PAYSLIP_PRINT",
+        },
+      }),
+    ).resolves.toMatchObject({ reason: "SYSTEM:PAYROLL_PAYSLIP_PRINT" });
+  });
+
+  it("tính kỳ nghỉ việc cuối cùng nhưng loại nhân viên khỏi kỳ tháng kế tiếp", async () => {
+    const branch = await prisma.branch.create({
+      data: {
+        companyId,
+        code: `TERM-${runId}`,
+        name: "Cơ sở kiểm tra nghỉ việc",
+      },
+    });
+    const staff = await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: `TERM-${runId}`,
+        fullName: "Nhân viên nghỉ tháng 7",
+        jobTitle: "Live",
+        joinedDate: new Date("2026-06-01T00:00:00.000Z"),
+        terminationDate: new Date("2026-07-15T00:00:00.000Z"),
+        employmentCategory: "OFFICIAL",
+        employmentStatus: "TERMINATED",
+        baseSalaryAmount: 7_000_000n,
+      },
+    });
+    await prisma.branchAssignment.create({
+      data: {
+        companyId,
+        branchId: branch.id,
+        staffId: staff.id,
+        assignmentType: "MEMBER",
+        effectiveFrom: new Date("2026-06-01T00:00:00.000Z"),
+      },
+    });
+
+    let july = await createPayrollPeriod(gm, { branchId: branch.id, month: "2026-07" }, metadata);
+    july = await calculatePayrollPeriod(gm, july.id, { version: july.version }, metadata);
+    const august = await createPayrollPeriod(
+      gm,
+      { branchId: branch.id, month: "2026-08" },
+      metadata,
+    );
+
+    expect(july.entries.map((item) => item.staff.id)).toContain(staff.id);
+    await expect(
+      calculatePayrollPeriod(gm, august.id, { version: august.version }, metadata),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
   it("ignores legacy manager payroll flags; GM saves overrides without mutating source data", async () => {
@@ -915,7 +985,6 @@ describe("payroll lifecycle, snapshot và authorization", () => {
           ],
           components: { otherBonus: "-50000" },
         },
-        reason: "Kiểm thử phiếu lương có quyền",
       },
       metadata,
     );
@@ -961,7 +1030,6 @@ describe("payroll lifecycle, snapshot và authorization", () => {
           overrideVersion: null,
           standardDaysOffOverride: 5,
           values: { days: [], components: {} },
-          reason: "Kiểm thử conflict",
         },
         metadata,
       ),
@@ -976,7 +1044,6 @@ describe("payroll lifecycle, snapshot và authorization", () => {
         overrideVersion: saved.entries[0]!.worksheetOverride!.version,
         standardDaysOffOverride: null,
         values: { days: [], components: {} },
-        reason: "Dùng lại toàn bộ giá trị tự tính",
       },
       metadata,
     );
@@ -1002,16 +1069,8 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     });
     expect((await getPayrollExport(gm, permittedExportJob.id)).staffId).toBe(liveId);
 
-    const firstEnsure = await ensurePayrollPeriod(
-      gm,
-      { branchId, month: "2026-08", reason: "Tự mở kỳ tháng 8" },
-      metadata,
-    );
-    const secondEnsure = await ensurePayrollPeriod(
-      gm,
-      { branchId, month: "2026-08", reason: "Mở lại kỳ tháng 8" },
-      metadata,
-    );
+    const firstEnsure = await ensurePayrollPeriod(gm, { branchId, month: "2026-08" }, metadata);
+    const secondEnsure = await ensurePayrollPeriod(gm, { branchId, month: "2026-08" }, metadata);
     expect(secondEnsure.id).toBe(firstEnsure.id);
     expect(
       await prisma.payrollPeriod.count({
@@ -1025,22 +1084,12 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     await expect(getPayrollPeriod(employee, periodId)).rejects.toMatchObject({
       code: "NOT_FOUND",
     } satisfies Partial<DomainError>);
-    period = await sendPayrollPeriod(
-      gm,
-      periodId,
-      { version: period.version, reason: "Gửi phiếu lương lần đầu" },
-      metadata,
-    );
+    period = await sendPayrollPeriod(gm, periodId, { version: period.version }, metadata);
     expect(period.status).toBe("PUBLISHED");
     const publishedHash = period.entries[0]!.calculationHash;
     const firstPublishedIncome = period.entries[0]!.totalIncome;
     await expect(
-      calculatePayrollPeriod(
-        gm,
-        periodId,
-        { version: period.version, reason: "Không được tính kỳ đã gửi" },
-        metadata,
-      ),
+      calculatePayrollPeriod(gm, periodId, { version: period.version }, metadata),
     ).rejects.toMatchObject({ code: "CONFLICT" } satisfies Partial<DomainError>);
     await expect(
       prisma.payrollEntry.update({
@@ -1064,7 +1113,6 @@ describe("payroll lifecycle, snapshot và authorization", () => {
             achievementBonus: "123456",
           },
         },
-        reason: "Sửa sau khi đã gửi",
       },
       metadata,
     );
@@ -1078,7 +1126,7 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     const resent = await sendPayrollPeriod(
       gm,
       revision.id,
-      { version: revision.version, reason: "Gửi lại phiếu lương" },
+      { version: revision.version },
       metadata,
     );
     expect(resent.status).toBe("PUBLISHED");

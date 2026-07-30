@@ -1,0 +1,54 @@
+import { describe, expect, it } from "vitest";
+
+import { attendanceMachineImportCommitSchema, attendanceMachineImportPresignSchema } from "./index";
+
+const validPresign = {
+  staffId: "11111111-1111-4111-8111-111111111111",
+  branchId: "22222222-2222-4222-8222-222222222222",
+  month: "2026-07",
+  idempotencyKey: "attendance-machine-import-idempotency",
+  originalFileName: "Nem-Chanh.xlsx",
+  mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  sizeBytes: 1_024,
+  checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+} as const;
+
+describe("attendance machine import contracts", () => {
+  it("accepts a scoped XLSX upload request", () => {
+    expect(attendanceMachineImportPresignSchema.parse(validPresign)).toEqual(validPresign);
+  });
+
+  it("rejects non-XLSX files, invalid months and oversized uploads", () => {
+    expect(
+      attendanceMachineImportPresignSchema.safeParse({
+        ...validPresign,
+        originalFileName: "attendance.csv",
+      }).success,
+    ).toBe(false);
+    expect(
+      attendanceMachineImportPresignSchema.safeParse({
+        ...validPresign,
+        month: "2026-13",
+      }).success,
+    ).toBe(false);
+    expect(
+      attendanceMachineImportPresignSchema.safeParse({
+        ...validPresign,
+        sizeBytes: 20 * 1_024 * 1_024 + 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires explicit confirmation without a client-entered audit reason", () => {
+    expect(
+      attendanceMachineImportCommitSchema.safeParse({
+        confirm: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      attendanceMachineImportCommitSchema.safeParse({
+        confirm: false,
+      }).success,
+    ).toBe(false);
+  });
+});

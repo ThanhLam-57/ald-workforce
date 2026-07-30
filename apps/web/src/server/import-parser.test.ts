@@ -43,7 +43,6 @@ describe("legacy import validation", () => {
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       sizeBytes: 20 * 1_024 * 1_024 + 1,
       checksumSha256: `${"A".repeat(43)}=`,
-      reason: "Kiểm thử giới hạn file.",
     });
     expect(result.success).toBe(false);
   });
@@ -106,7 +105,6 @@ describe("legacy import validation", () => {
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       sizeBytes: 1_024,
       checksumSha256: `${"A".repeat(43)}=`,
-      reason: "Kiểm thử loại file không khớp.",
     });
     expect(result.success).toBe(false);
   });

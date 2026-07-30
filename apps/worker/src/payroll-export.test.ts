@@ -15,6 +15,19 @@ import {
 function fixture(): PayslipExportData {
   const input: PayrollCalculationInput = {
     staffId: "staff-demo",
+    staffIdentity: {
+      staffCode: "LIVE001",
+      fullName: "Nguyễn Thị Ánh",
+      streamingAlias: "anh-live",
+      attendanceMachineCodeIntervals: [
+        {
+          assignmentId: "assignment-demo",
+          attendanceMachineCode: "00033",
+          effectiveFrom: "2026-01-01",
+          effectiveTo: null,
+        },
+      ],
+    },
     baseSalaryAmount: "26000000",
     period: {
       month: "2026-07",
@@ -91,6 +104,8 @@ function fixture(): PayslipExportData {
       code: "LIVE001",
       fullName: "Nguyễn Thị Ánh",
       streamingAlias: "anh-live",
+      attendanceMachineCode: "00033",
+      attendanceMachineCodeIntervals: input.staffIdentity!.attendanceMachineCodeIntervals,
     },
     input,
     output: calculatePayroll(input),
@@ -130,6 +145,8 @@ describe("payroll export artifacts", () => {
     expect(headers).not.toContain("Mốc xu");
     expect(summary.getCell("C6").value).toBeNull();
     expect(summary.getCell("D6").value).toBeNull();
+    expect(summary.getCell("C5").value).toBe("Mã máy chấm công");
+    expect(summary.getCell("D5").value).toBe("00033");
     expect(buffer.length).toBeGreaterThan(8_000);
     if (process.env.PAYROLL_QA_DIR) {
       await mkdir(process.env.PAYROLL_QA_DIR, { recursive: true });

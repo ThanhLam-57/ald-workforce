@@ -12,11 +12,55 @@ const moneyAmountSchema = z
   .regex(/^\d+$/, "Số tiền phải là số nguyên không âm.")
   .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n, "Số tiền vượt giới hạn lưu trữ.");
 
+const nullableText = (max: number) => z.string().trim().max(max).nullable().optional();
+const attendanceMachineCodeSchema = z
+  .string()
+  .trim()
+  .min(1, "Mã máy chấm công là bắt buộc.")
+  .max(30)
+  .regex(/^[A-Za-z0-9_-]+$/, "Mã máy chấm công chỉ gồm chữ, số, _ và -.")
+  .transform((value) => value.toUpperCase());
+const tiktokChannelIdSchema = z
+  .string()
+  .trim()
+  .max(100)
+  .regex(/^@?[^\s@]+$/, "ID kênh TikTok không được chứa khoảng trắng.")
+  .transform((value) => value.replace(/^@/, "").toLowerCase())
+  .nullable()
+  .optional();
+const dateOfBirthSchema = z.iso
+  .date()
+  .refine(
+    (value) =>
+      value <=
+      new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()),
+    "Ngày sinh không được nằm trong tương lai.",
+  )
+  .nullable()
+  .optional();
+const citizenIdNumberSchema = z
+  .string()
+  .trim()
+  .regex(/^(?:\d{9}|\d{12})$/, "Số CCCD/CMND phải gồm 9 hoặc 12 chữ số.")
+  .nullable()
+  .optional();
+const bankAccountNumberSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z0-9-]{4,30}$/, "Số tài khoản chỉ gồm chữ, số và dấu gạch ngang.")
+  .nullable()
+  .optional();
+const httpUrlSchema = z
+  .url()
+  .max(500)
+  .refine((value) => /^https?:\/\//i.test(value), "Liên kết phải dùng http hoặc https.")
+  .nullable()
+  .optional();
+
 export const branchCreateSchema = z.object({
   code: trimmedText("Mã cơ sở", 30).regex(/^[A-Za-z0-9_-]+$/),
   name: trimmedText("Tên cơ sở", 120),
   address: z.string().trim().max(500).optional(),
-  reason: reasonSchema,
 });
 
 export const branchUpdateSchema = branchCreateSchema
@@ -25,22 +69,65 @@ export const branchUpdateSchema = branchCreateSchema
   .extend({
     isActive: z.boolean().optional(),
     version: z.number().int().positive(),
-    reason: reasonSchema,
   });
 
 const staffFieldsSchema = z.object({
-  staffCode: trimmedText("Mã nhân viên", 30).regex(/^[A-Za-z0-9_-]+$/),
+  staffCode: trimmedText("Mã hồ sơ", 30).regex(/^[A-Za-z0-9_-]+$/),
   fullName: trimmedText("Họ tên", 120),
   streamingAlias: z.string().trim().max(120).nullable().optional(),
-  email: z.email().optional(),
-  phone: z.string().trim().max(30).optional(),
+  tiktokChannelId: tiktokChannelIdSchema,
+  email: z.email().nullable().optional(),
+  phone: nullableText(30),
+  dateOfBirth: dateOfBirthSchema,
+  citizenIdNumber: citizenIdNumberSchema,
+  bankAccountNumber: bankAccountNumberSchema,
+  bankName: nullableText(120),
+  permanentAddress: nullableText(500),
+  temporaryAddress: nullableText(500),
+  facebookUrl: httpUrlSchema,
+  university: nullableText(200),
   jobTitle: trimmedText("Vị trí công việc", 120),
   joinedDate: z.iso.date(),
   officialDate: z.iso.date().nullable().optional(),
   employmentCategory: z.enum(["OFFICIAL", "PROBATION", "CONTRACTOR", "INTERN"]),
   baseSalaryAmount: moneyAmountSchema.optional(),
-  reason: reasonSchema,
 });
+
+const staffWorkScheduleFieldsSchema = z
+  .object({
+    name: trimmedText("Tên ca", 120),
+    scheduledStartMinutes: z.number().int().min(0).max(1_439),
+    scheduledEndMinutes: z.number().int().min(0).max(1_439),
+    spansNextDay: z.boolean(),
+    requiredLiveMinutes: z.number().int().min(1).max(1_440),
+  })
+  .superRefine((value, context) => {
+    const mustSpanNextDay = value.scheduledEndMinutes <= value.scheduledStartMinutes;
+    if (mustSpanNextDay !== value.spansNextDay) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "Ca có giờ kết thúc bằng hoặc trước giờ bắt đầu phải đánh dấu qua ngày; ca trong ngày không được đánh dấu qua ngày.",
+        path: ["spansNextDay"],
+      });
+    }
+    const duration =
+      value.scheduledEndMinutes - value.scheduledStartMinutes + (value.spansNextDay ? 1_440 : 0);
+    if (duration <= 0 || duration > 1_440) {
+      context.addIssue({
+        code: "custom",
+        message: "Tổng thời lượng ca phải lớn hơn 0 và không quá 24 giờ.",
+        path: ["scheduledEndMinutes"],
+      });
+    }
+    if (value.requiredLiveMinutes > duration) {
+      context.addIssue({
+        code: "custom",
+        message: "Thời lượng Live chuẩn không được lớn hơn tổng thời lượng ca.",
+        path: ["requiredLiveMinutes"],
+      });
+    }
+  });
 
 export const staffCreateSchema = staffFieldsSchema.superRefine((value, context) => {
   if (value.employmentCategory === "OFFICIAL" && !value.officialDate) {
@@ -59,8 +146,104 @@ export const staffCreateSchema = staffFieldsSchema.superRefine((value, context) 
   }
 });
 
+export const staffOnboardSchema = staffFieldsSchema
+  .extend({
+    branchId: idSchema,
+    attendanceMachineCode: attendanceMachineCodeSchema,
+    initialSchedule: staffWorkScheduleFieldsSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.employmentCategory === "OFFICIAL" && !value.officialDate) {
+      context.addIssue({
+        code: "custom",
+        message: "Ngày lên chính thức là bắt buộc với nhân viên chính thức.",
+        path: ["officialDate"],
+      });
+    }
+    if (value.officialDate && value.officialDate < value.joinedDate) {
+      context.addIssue({
+        code: "custom",
+        message: "Ngày lên chính thức phải bằng hoặc sau ngày gia nhập công ty.",
+        path: ["officialDate"],
+      });
+    }
+  });
+
+export const staffWorkScheduleCreateSchema = staffWorkScheduleFieldsSchema
+  .and(
+    z.object({
+      effectiveFrom: z.iso.date(),
+      effectiveTo: z.iso.date().nullable().optional(),
+    }),
+  )
+  .refine(
+    ({ effectiveFrom, effectiveTo }) => !effectiveTo || effectiveFrom < effectiveTo,
+    "Ngày kết thúc ca phải sau ngày bắt đầu.",
+  );
+
+export const staffWorkScheduleUpdateSchema = staffWorkScheduleFieldsSchema
+  .and(
+    z.object({
+      effectiveFrom: z.iso.date(),
+      effectiveTo: z.iso.date().nullable().optional(),
+      version: z.number().int().positive(),
+    }),
+  )
+  .refine(
+    ({ effectiveFrom, effectiveTo }) => !effectiveTo || effectiveFrom < effectiveTo,
+    "Ngày kết thúc ca phải sau ngày bắt đầu.",
+  );
+
+export const staffIdentityDocumentPresignSchema = z.object({
+  side: z.enum(["CITIZEN_ID_FRONT", "CITIZEN_ID_BACK"]),
+  originalFileName: trimmedText("Tên file", 255),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  sizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(8 * 1024 * 1024),
+  checksumSha256: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
+});
+
+export const staffIdentityDocumentCompleteSchema = z.object({
+  version: z.number().int().positive(),
+});
+
+export const staffBankQrDocumentPresignSchema = staffIdentityDocumentPresignSchema.omit({
+  side: true,
+});
+
+export const staffBankQrDocumentCompleteSchema = staffIdentityDocumentCompleteSchema;
+
+export const staffProfileUpdateSchema = staffFieldsSchema
+  .partial()
+  .extend({
+    attendanceMachineCode: attendanceMachineCodeSchema.optional(),
+    assignmentId: idSchema,
+    assignmentVersion: z.number().int().positive(),
+    joinedDate: z.iso.date().nullable().optional(),
+    version: z.number().int().positive(),
+  })
+  .superRefine((value, context) => {
+    if (
+      value.joinedDate !== undefined &&
+      value.joinedDate !== null &&
+      value.officialDate !== undefined &&
+      value.officialDate !== null &&
+      value.officialDate < value.joinedDate
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Ngày chính thức phải bằng hoặc sau ngày gia nhập.",
+        path: ["officialDate"],
+      });
+    }
+  });
+
 export const staffUpdateSchema = staffFieldsSchema
-  .omit({ staffCode: true })
   .partial()
   .extend({
     joinedDate: z.iso.date().nullable().optional(),
@@ -68,7 +251,6 @@ export const staffUpdateSchema = staffFieldsSchema
     employmentStatus: z.enum(["ACTIVE", "ON_LEAVE", "TERMINATED"]).optional(),
     effectiveFrom: z.iso.date().optional(),
     version: z.number().int().positive(),
-    reason: reasonSchema,
   })
   .superRefine((value, context) => {
     if (
@@ -98,7 +280,11 @@ export const staffUpdateSchema = staffFieldsSchema
 
 export const staffArchiveSchema = z.object({
   version: z.number().int().positive(),
-  reason: reasonSchema,
+});
+
+export const staffTerminateSchema = z.object({
+  terminationDate: z.iso.date(),
+  version: z.number().int().positive(),
 });
 
 export const assignmentCreateSchema = z
@@ -106,33 +292,47 @@ export const assignmentCreateSchema = z
     staffId: idSchema,
     branchId: idSchema,
     assignmentType: z.enum(["MEMBER", "PRIMARY_MANAGER", "SECONDARY_MANAGER"]),
+    attendanceMachineCode: attendanceMachineCodeSchema.nullable().optional(),
     effectiveFrom: z.iso.date(),
     effectiveTo: z.iso.date().nullable().optional(),
-    reason: reasonSchema,
   })
   .refine(
     ({ effectiveFrom, effectiveTo }) => !effectiveTo || effectiveFrom < effectiveTo,
     "Ngày kết thúc phải sau ngày bắt đầu.",
-  );
+  )
+  .superRefine((value, context) => {
+    if (value.assignmentType === "MEMBER" && !value.attendanceMachineCode) {
+      context.addIssue({
+        code: "custom",
+        message: "Mã máy chấm công là bắt buộc với phân công nhân viên.",
+        path: ["attendanceMachineCode"],
+      });
+    }
+    if (value.assignmentType !== "MEMBER" && value.attendanceMachineCode) {
+      context.addIssue({
+        code: "custom",
+        message: "Mã máy chấm công chỉ dùng cho phân công nhân viên.",
+        path: ["attendanceMachineCode"],
+      });
+    }
+  });
 
 export const assignmentUpdateSchema = z
   .object({
     effectiveTo: z.iso.date().nullable(),
     version: z.number().int().positive(),
-    reason: reasonSchema,
   })
   .refine(() => true);
 
 export const assignmentTransferSchema = z.object({
   targetBranchId: idSchema,
+  attendanceMachineCode: attendanceMachineCodeSchema.nullable().optional(),
   effectiveFrom: z.iso.date(),
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const assignmentCancelSchema = z.object({
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 const strongPasswordSchema = z
@@ -153,7 +353,6 @@ export const userCreateSchema = z.object({
   role: z.enum(AUTH_ROLES),
   canManagePayroll: z.boolean().optional(),
   staffId: idSchema.nullable().optional(),
-  reason: reasonSchema,
 });
 
 export const userUpdateSchema = z.object({
@@ -162,7 +361,6 @@ export const userUpdateSchema = z.object({
   canManagePayroll: z.boolean().optional(),
   staffId: idSchema.nullable().optional(),
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 const adminPageSchema = z.object({
@@ -170,6 +368,10 @@ const adminPageSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().trim().max(120).default(""),
   direction: z.enum(["asc", "desc"]).default("asc"),
+  showHidden: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
 export const adminBranchListQuerySchema = adminPageSchema.extend({
@@ -227,25 +429,135 @@ export type AdminStaffDto = Readonly<{
   staffCode: string;
   fullName: string;
   streamingAlias: string | null;
+  tiktokChannelId: string | null;
   email: string | null;
   phone: string | null;
+  dateOfBirth: string | null;
+  citizenIdNumber: string | null;
+  bankAccountNumber: string | null;
+  bankName: string | null;
+  permanentAddress: string | null;
+  temporaryAddress: string | null;
+  facebookUrl: string | null;
+  university: string | null;
   jobTitle: string;
   baseSalaryAmount: string;
   joinedDate: string | null;
   officialDate: string | null;
+  terminationDate: string | null;
   employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
   employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+  archivedAt: string | null;
   currentAssignments: readonly Readonly<{
     id: string;
     branchId: string;
     branchCode: string;
     branchName: string;
     assignmentType: "MEMBER" | "PRIMARY_MANAGER" | "SECONDARY_MANAGER";
+    attendanceMachineCode: string | null;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+    version: number;
   }>[];
+  assignmentHistory: readonly Readonly<{
+    id: string;
+    branchId: string;
+    branchCode: string;
+    branchName: string;
+    assignmentType: "MEMBER" | "PRIMARY_MANAGER" | "SECONDARY_MANAGER";
+    attendanceMachineCode: string | null;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+    status: "CURRENT" | "UPCOMING" | "ENDED" | "CANCELLED";
+    version: number;
+  }>[];
+  currentSchedule: StaffWorkScheduleDto | null;
+  scheduleHistory: readonly StaffWorkScheduleDto[];
+  identityDocumentStatus: Readonly<{
+    front: StaffIdentityDocumentDto["status"] | null;
+    back: StaffIdentityDocumentDto["status"] | null;
+  }>;
+  bankQrStatus: StaffBankQrDocumentDto["status"] | null;
+  identityDocuments: readonly StaffIdentityDocumentDto[];
+  bankQrDocument: StaffBankQrDocumentDto | null;
   user: Readonly<{ id: string; username: string | null; active: boolean }> | null;
   level: Readonly<{ code: string; name: string }> | null;
   version: number;
   updatedAt: string;
+}>;
+
+export type StaffWorkScheduleDto = Readonly<{
+  id: string;
+  branchId: string;
+  staffId: string;
+  name: string;
+  scheduledStartMinutes: number;
+  scheduledEndMinutes: number;
+  spansNextDay: boolean;
+  requiredLiveMinutes: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  version: number;
+}>;
+
+export type StaffIdentityDocumentDto = Readonly<{
+  id: string;
+  side: "CITIZEN_ID_FRONT" | "CITIZEN_ID_BACK";
+  originalFileName: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  sizeBytes: string;
+  status: "PENDING_UPLOAD" | "READY" | "REJECTED" | "SUPERSEDED";
+  version: number;
+  uploadedAt: string | null;
+  verifiedAt: string | null;
+}>;
+
+export type StaffBankQrDocumentDto = Readonly<{
+  id: string;
+  originalFileName: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  sizeBytes: string;
+  status: "PENDING_UPLOAD" | "READY" | "REJECTED" | "SUPERSEDED";
+  version: number;
+  uploadedAt: string | null;
+  verifiedAt: string | null;
+}>;
+
+export type BranchStaffDto = Readonly<{
+  id: string;
+  branch: Readonly<{ id: string; code: string; name: string }>;
+  staffCode: string;
+  assignmentId: string;
+  attendanceMachineCode: string | null;
+  assignmentVersion: number;
+  fullName: string;
+  streamingAlias: string | null;
+  tiktokChannelId: string | null;
+  email: string | null;
+  phone: string | null;
+  dateOfBirth: string | null;
+  citizenIdNumber: string | null;
+  bankAccountNumber: string | null;
+  bankName: string | null;
+  permanentAddress: string | null;
+  temporaryAddress: string | null;
+  facebookUrl: string | null;
+  university: string | null;
+  jobTitle: string;
+  joinedDate: string | null;
+  officialDate: string | null;
+  terminationDate: string | null;
+  employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+  employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
+  /**
+   * Chỉ được serialize cho GENERAL_MANAGER. DTO của Training Manager không có
+   * thuộc tính này, thay vì gửi giá trị rồi ẩn bằng UI.
+   */
+  baseSalaryAmount?: string;
+  currentSchedule: StaffWorkScheduleDto | null;
+  identityDocuments: readonly StaffIdentityDocumentDto[];
+  bankQrDocument: StaffBankQrDocumentDto | null;
+  version: number;
 }>;
 
 export type AdminAssignmentDto = Readonly<{
@@ -258,6 +570,7 @@ export type AdminAssignmentDto = Readonly<{
     employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
   }>;
   assignmentType: "MEMBER" | "PRIMARY_MANAGER" | "SECONDARY_MANAGER";
+  attendanceMachineCode: string | null;
   effectiveFrom: string;
   effectiveTo: string | null;
   status: "CURRENT" | "UPCOMING" | "ENDED" | "CANCELLED";
@@ -339,17 +652,16 @@ const attendanceValuesSchema = z.object({
 export const attendanceCreateSchema = attendanceValuesSchema.extend({
   staffId: idSchema,
   businessDate: z.iso.date(),
-  reason: reasonSchema,
 });
 
 export const attendanceUpdateSchema = attendanceValuesSchema.extend({
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const attendanceMonthQuerySchema = z.object({
   staffId: idSchema,
   month: businessMonthSchema,
+  branchId: idSchema.optional(),
 });
 
 export const attendanceFilterOptionsQuerySchema = z.object({
@@ -357,11 +669,37 @@ export const attendanceFilterOptionsQuerySchema = z.object({
   branchId: idSchema.optional(),
 });
 
+const attendanceMachineImportMimeType =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" as const;
+
+export const attendanceMachineImportPresignSchema = z.object({
+  staffId: idSchema,
+  branchId: idSchema,
+  month: businessMonthSchema,
+  idempotencyKey: z.string().trim().min(8).max(180),
+  originalFileName: trimmedText("Tên file", 255).refine(
+    (value) => /\.xlsx$/i.test(value),
+    "Chỉ hỗ trợ file XLSX.",
+  ),
+  mimeType: z.literal(attendanceMachineImportMimeType),
+  sizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(20 * 1_024 * 1_024),
+  checksumSha256: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
+});
+
+export const attendanceMachineImportCommitSchema = z.object({
+  confirm: z.literal(true),
+});
+
 export const automaticViolationReconcileSchema = z.object({
   staffId: idSchema,
   month: businessMonthSchema,
   dryRun: z.boolean(),
-  reason: reasonSchema,
 });
 
 export const branchOverviewQuerySchema = z.object({
@@ -404,7 +742,6 @@ export const managerKpiCreateSchema = z.object({
   managerStaffId: idSchema,
   month: businessMonthSchema,
   notes: z.string().trim().max(2_000).nullable().optional(),
-  reason: reasonSchema,
 });
 
 export const managerKpiUpdateSchema = z.object({
@@ -421,18 +758,15 @@ export const managerKpiUpdateSchema = z.object({
     )
     .min(1)
     .max(200),
-  reason: reasonSchema,
 });
 
 export const managerKpiPublishSchema = z.object({
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const managerKpiSettingUpdateSchema = z.object({
   enabled: z.boolean(),
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const branchOverviewCellEditSchema = z
@@ -457,13 +791,11 @@ export const branchOverviewCellEditSchema = z
 
 export const branchOverviewBatchUpdateSchema = z.object({
   branchId: idSchema,
-  reason: reasonSchema,
   edits: z.array(branchOverviewCellEditSchema).min(1).max(200),
 });
 
 export const penaltyRuleSetCreateSchema = z.object({
   name: trimmedText("Tên bộ rule", 120),
-  reason: reasonSchema,
 });
 
 export const automaticPenaltyConditionSchema = z.discriminatedUnion("type", [
@@ -475,22 +807,54 @@ export const automaticPenaltyConditionSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("CHECK_IN_LATE"),
-      scheduledStartMinutes: z.number().int().min(0).max(1_439),
-      graceMinutes: z.number().int().min(0).max(720),
-      branchId: idSchema.nullable(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("LIVE_DURATION_SHORT"),
-      requiredLiveMinutes: z.number().int().min(1).max(2_880),
+      thresholdSource: z.enum(["STAFF_SHIFT", "RULE_FIXED"]).optional(),
+      scheduledStartMinutes: z.number().int().min(0).max(1_439).optional(),
       graceMinutes: z.number().int().min(0).max(720),
       branchId: idSchema.nullable(),
     })
     .strict()
-    .refine(({ graceMinutes, requiredLiveMinutes }) => graceMinutes <= requiredLiveMinutes, {
-      message: "Số phút du di không được lớn hơn thời lượng Live yêu cầu.",
-      path: ["graceMinutes"],
+    .superRefine((value, context) => {
+      if (
+        (value.thresholdSource ?? "RULE_FIXED") === "RULE_FIXED" &&
+        value.scheduledStartMinutes === undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Giờ bắt đầu cố định là bắt buộc khi không dùng ca nhân viên.",
+          path: ["scheduledStartMinutes"],
+        });
+      }
+    }),
+  z
+    .object({
+      type: z.literal("LIVE_DURATION_SHORT"),
+      thresholdSource: z.enum(["STAFF_SHIFT", "RULE_FIXED"]).optional(),
+      requiredLiveMinutes: z.number().int().min(1).max(2_880).optional(),
+      graceMinutes: z.number().int().min(0).max(720),
+      branchId: idSchema.nullable(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (
+        (value.thresholdSource ?? "RULE_FIXED") === "RULE_FIXED" &&
+        value.requiredLiveMinutes === undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Thời lượng Live cố định là bắt buộc khi không dùng ca nhân viên.",
+          path: ["requiredLiveMinutes"],
+        });
+      }
+      if (
+        value.requiredLiveMinutes !== undefined &&
+        value.graceMinutes > value.requiredLiveMinutes
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Số phút du di không được lớn hơn thời lượng Live yêu cầu.",
+          path: ["graceMinutes"],
+        });
+      }
     }),
 ]);
 
@@ -498,7 +862,6 @@ export const penaltyRuleDraftCreateSchema = z.object({
   ruleSetId: idSchema,
   cloneFromVersionId: idSchema.nullable().optional(),
   notes: z.string().trim().max(2_000).nullable().optional(),
-  reason: reasonSchema,
 });
 
 export const penaltyItemInputSchema = z.object({
@@ -523,7 +886,6 @@ export const penaltyRuleDraftUpdateSchema = z
     notes: z.string().trim().max(2_000).nullable(),
     items: z.array(penaltyItemInputSchema).max(200),
     rowVersion: z.number().int().positive(),
-    reason: reasonSchema,
   })
   .superRefine(({ items }, context) => {
     const codes = new Set<string>();
@@ -544,7 +906,6 @@ export const penaltyRulePublishSchema = z
     effectiveFrom: z.iso.date(),
     effectiveTo: z.iso.date().nullable(),
     rowVersion: z.number().int().positive(),
-    reason: reasonSchema,
   })
   .refine(
     ({ effectiveFrom, effectiveTo }) => !effectiveTo || effectiveFrom < effectiveTo,
@@ -554,7 +915,6 @@ export const penaltyRulePublishSchema = z
 export const penaltyRuleRetireSchema = z.object({
   effectiveTo: z.iso.date(),
   rowVersion: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const activePenaltyRuleQuerySchema = z.object({
@@ -846,21 +1206,18 @@ export const configuredRuleSchema = z.discriminatedUnion("kind", [
 export const configuredRuleSetCreateSchema = z.object({
   name: trimmedText("Tên bộ rule", 120),
   type: configuredRuleTypeSchema,
-  reason: reasonSchema,
 });
 
 export const configuredRuleDraftCreateSchema = z.object({
   ruleSetId: idSchema,
   cloneFromVersionId: idSchema.nullable().optional(),
   notes: z.string().trim().max(2_000).nullable().optional(),
-  reason: reasonSchema,
 });
 
 export const configuredRuleDraftUpdateSchema = z.object({
   configuration: configuredRuleSchema,
   notes: z.string().trim().max(2_000).nullable(),
   rowVersion: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const activeConfiguredRuleQuerySchema = z.object({
@@ -880,7 +1237,6 @@ export const ruleImpactPreviewSchema = z.object({
 
 export const levelProposalGenerateSchema = z.object({
   month: businessMonthSchema,
-  reason: reasonSchema,
 });
 
 export const levelProposalListQuerySchema = z.object({
@@ -890,7 +1246,6 @@ export const levelProposalListQuerySchema = z.object({
 export const levelProposalConfirmSchema = z.object({
   version: z.number().int().positive(),
   performanceLevelId: idSchema.nullable().optional(),
-  reason: reasonSchema,
 });
 
 const signedMoneyAmountSchema = z
@@ -970,7 +1325,6 @@ export const payrollWorksheetValuesSchema = z
 export const payrollPeriodEnsureSchema = z.object({
   branchId: idSchema,
   month: businessMonthSchema,
-  reason: reasonSchema,
 });
 
 export const payrollWorksheetSaveSchema = z.object({
@@ -979,7 +1333,6 @@ export const payrollWorksheetSaveSchema = z.object({
   overrideVersion: z.number().int().positive().nullable(),
   standardDaysOffOverride: z.number().int().min(0).max(30).nullable(),
   values: payrollWorksheetValuesSchema,
-  reason: reasonSchema,
 });
 
 export const payrollPeriodListQuerySchema = z.object({
@@ -990,17 +1343,13 @@ export const payrollPeriodListQuerySchema = z.object({
 export const payrollPeriodCreateSchema = z.object({
   branchId: idSchema,
   month: businessMonthSchema,
-  reason: reasonSchema,
 });
 
 export const payrollPeriodActionSchema = z.object({
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
-export const payrollRevisionCreateSchema = z.object({
-  reason: reasonSchema,
-});
+export const payrollRevisionCreateSchema = z.object({});
 
 export const payrollAdjustmentCreateSchema = z
   .object({
@@ -1025,7 +1374,6 @@ export const payrollExportCreateSchema = z
   .object({
     kind: z.enum(["PAYSLIP_XLSX", "PAYSLIP_PDF", "BULK_ZIP"]),
     staffId: idSchema.nullable().optional(),
-    reason: reasonSchema,
   })
   .superRefine(({ kind, staffId }, context) => {
     if (kind !== "BULK_ZIP" && !staffId) {
@@ -1153,6 +1501,13 @@ export type PayrollEmploymentSalaryDto = Readonly<{
     | "NON_PROBATION_CATEGORY";
 }>;
 
+export type PayrollMachineCodeIntervalDto = Readonly<{
+  assignmentId: string;
+  attendanceMachineCode: string | null;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+}>;
+
 export type PayrollEntryDto = Readonly<{
   id: string;
   staff: Readonly<{
@@ -1160,6 +1515,8 @@ export type PayrollEntryDto = Readonly<{
     staffCode: string;
     fullName: string;
     streamingAlias: string | null;
+    attendanceMachineCode: string | null;
+    attendanceMachineCodeIntervals: readonly PayrollMachineCodeIntervalDto[];
   }>;
   workUnits: string;
   workedDayCount: number;
@@ -1261,7 +1618,6 @@ export const violationCreateSchema = z
     note: z.string().trim().max(2_000).nullable().optional(),
     amountOverride: penaltyAmountSchema.nullable().optional(),
     overrideReason: reasonSchema.nullable().optional(),
-    reason: reasonSchema,
   })
   .superRefine(({ amountOverride, overrideReason }, context) => {
     if (amountOverride !== undefined && amountOverride !== null && !overrideReason) {
@@ -1289,7 +1645,6 @@ export type ViolationPreviewDto = Readonly<{
 
 export const violationCancelSchema = z.object({
   version: z.number().int().positive(),
-  reason: reasonSchema,
 });
 
 export const evidencePresignSchema = z.object({
@@ -1304,7 +1659,6 @@ export const evidencePresignSchema = z.object({
   checksumSha256: z
     .string()
     .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
-  reason: reasonSchema,
 });
 
 export const evidenceCompleteSchema = z.object({
@@ -1535,6 +1889,74 @@ export type PerformanceLevelOptionDto = Readonly<{
   displayOrder: number;
 }>;
 
+export type AttendanceMachineImportRowStatus =
+  | "CREATE"
+  | "UPDATE"
+  | "UNCHANGED"
+  | "SKIP_CODE_MISMATCH"
+  | "SKIP_OUTSIDE_MONTH"
+  | "SKIP_EMPTY_TIME"
+  | "DUPLICATE"
+  | "ERROR";
+
+export type AttendanceMachineImportPreviewRowDto = Readonly<{
+  sheetName: string;
+  rowNumber: number;
+  machineCode: string;
+  businessDate: string | null;
+  currentCheckInTime: string | null;
+  currentCheckOutTime: string | null;
+  fileCheckInTime: string | null;
+  fileCheckOutTime: string | null;
+  status: AttendanceMachineImportRowStatus;
+  message: string | null;
+}>;
+
+export type AttendanceMachineImportSummaryDto = Readonly<{
+  totalRows: number;
+  matchedRows: number;
+  createRows: number;
+  updateRows: number;
+  unchangedRows: number;
+  skippedRows: number;
+  errorRows: number;
+}>;
+
+export type AttendanceMachineImportPreviewDto = Readonly<{
+  jobId: string;
+  status: "VALIDATED" | "SUCCEEDED";
+  target: Readonly<{
+    branchId: string;
+    staffId: string;
+    staffCode: string;
+    fullName: string;
+    attendanceMachineCode: string;
+    month: string;
+  }>;
+  rows: readonly AttendanceMachineImportPreviewRowDto[];
+  summary: AttendanceMachineImportSummaryDto;
+  canCommit: boolean;
+  truncated: boolean;
+}>;
+
+export type AttendanceMachineImportJobDto = Readonly<{
+  id: string;
+  status:
+    | "PENDING_UPLOAD"
+    | "UPLOADED"
+    | "VALIDATING"
+    | "VALIDATED"
+    | "COMMITTING"
+    | "SUCCEEDED"
+    | "FAILED";
+  originalFileName: string;
+  uploadedAt: string | null;
+  validatedAt: string | null;
+  committedAt: string | null;
+  committedRows: number;
+  errorMessage: string | null;
+}>;
+
 export type AttendanceFilterOptionsDto = Readonly<{
   month: string;
   selectedBranchId: string | null;
@@ -1549,6 +1971,7 @@ export type AttendanceFilterOptionsDto = Readonly<{
     staffCode: string;
     fullName: string;
     jobTitle: string;
+    attendanceMachineCode: string | null;
   }>[];
 }>;
 
@@ -1586,6 +2009,12 @@ export type AutomaticViolationReconcileSummaryDto = Readonly<{
   reactivatedCount: number;
   cancelledCount: number;
   unchangedCount: number;
+  missingScheduleCount: number;
+  warnings: readonly Readonly<{
+    businessDate: string;
+    code: "MISSING_STAFF_SHIFT";
+    message: string;
+  }>[];
   attendanceActivePenaltyTotal: string;
   staffMonthActivePenaltyTotal: string;
 }>;
@@ -1607,6 +2036,7 @@ export type AttendanceMonthDto = Readonly<{
     staffCode: string;
     fullName: string;
     jobTitle: string;
+    attendanceMachineCode: string | null;
   }>;
   revenueConfig: Readonly<{
     unit: "VND" | "THOUSAND_VND" | "COIN";
@@ -1642,6 +2072,7 @@ export type BranchOverviewRowDto = Readonly<{
   staff: Readonly<{
     id: string;
     staffCode: string;
+    attendanceMachineCode: string | null;
     fullName: string;
     streamingAlias: string | null;
     employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
@@ -1734,6 +2165,7 @@ export type CompanyReportStaffRowDto = Readonly<{
   staff: Readonly<{
     id: string;
     staffCode: string;
+    attendanceMachineCode: string | null;
     fullName: string;
     employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
     employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
@@ -1782,6 +2214,7 @@ export type ManagerCompanyReportStaffRowDto = Readonly<{
   staff: Readonly<{
     id: string;
     staffCode: string;
+    attendanceMachineCode: string | null;
     fullName: string;
     employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
     employmentStatus: "ACTIVE" | "ON_LEAVE" | "TERMINATED";
@@ -1899,6 +2332,7 @@ export const importTemplateSchema = z.enum([
   "ASSIGNMENTS",
   "LEVELS",
   "ATTENDANCE_LIVE",
+  "ATTENDANCE_MACHINE",
   "REWARD_RULES",
   "PENALTY_RULES",
   "HISTORICAL_PAYROLL",
@@ -1926,7 +2360,6 @@ export const importPresignSchema = z
       .string()
       .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
     branchId: idSchema.nullable().optional(),
-    reason: reasonSchema,
   })
   .superRefine((value, context) => {
     const isCsvName = /\.csv$/i.test(value.originalFileName);
@@ -1947,7 +2380,6 @@ export const importPreviewSchema = z.object({
 
 export const importCommitSchema = z.object({
   confirm: z.literal(true),
-  reason: reasonSchema,
 });
 
 export const importListQuerySchema = z.object({
@@ -1997,7 +2429,6 @@ export const dataExportCreateSchema = z.object({
       path: ["to"],
     })
     .optional(),
-  reason: reasonSchema,
 });
 
 export const dataExportListQuerySchema = z.object({
@@ -2041,6 +2472,7 @@ export type ImportJobDto = Readonly<{
     | "ASSIGNMENTS"
     | "LEVELS"
     | "ATTENDANCE_LIVE"
+    | "ATTENDANCE_MACHINE"
     | "REWARD_RULES"
     | "PENALTY_RULES"
     | "HISTORICAL_PAYROLL";
@@ -2118,8 +2550,19 @@ export type AuditLogDto = Readonly<{
 export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
 export type BranchUpdateInput = z.infer<typeof branchUpdateSchema>;
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
+export type StaffOnboardInput = z.infer<typeof staffOnboardSchema>;
 export type StaffUpdateInput = z.infer<typeof staffUpdateSchema>;
 export type StaffArchiveInput = z.infer<typeof staffArchiveSchema>;
+export type StaffTerminateInput = z.infer<typeof staffTerminateSchema>;
+export type StaffWorkScheduleCreateInput = z.infer<typeof staffWorkScheduleCreateSchema>;
+export type StaffWorkScheduleUpdateInput = z.infer<typeof staffWorkScheduleUpdateSchema>;
+export type StaffIdentityDocumentPresignInput = z.infer<typeof staffIdentityDocumentPresignSchema>;
+export type StaffIdentityDocumentCompleteInput = z.infer<
+  typeof staffIdentityDocumentCompleteSchema
+>;
+export type StaffBankQrDocumentPresignInput = z.infer<typeof staffBankQrDocumentPresignSchema>;
+export type StaffBankQrDocumentCompleteInput = z.infer<typeof staffBankQrDocumentCompleteSchema>;
+export type StaffProfileUpdateInput = z.infer<typeof staffProfileUpdateSchema>;
 export type AssignmentCreateInput = z.infer<typeof assignmentCreateSchema>;
 export type AssignmentUpdateInput = z.infer<typeof assignmentUpdateSchema>;
 export type AssignmentTransferInput = z.infer<typeof assignmentTransferSchema>;
@@ -2134,6 +2577,12 @@ export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
 export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
 export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;
 export type AttendanceFilterOptionsQuery = z.infer<typeof attendanceFilterOptionsQuerySchema>;
+export type AttendanceMachineImportPresignInput = z.infer<
+  typeof attendanceMachineImportPresignSchema
+>;
+export type AttendanceMachineImportCommitInput = z.infer<
+  typeof attendanceMachineImportCommitSchema
+>;
 export type AutomaticViolationReconcileInput = z.infer<typeof automaticViolationReconcileSchema>;
 export type BranchOverviewQuery = z.infer<typeof branchOverviewQuerySchema>;
 export type BranchOverviewCellEditInput = z.infer<typeof branchOverviewCellEditSchema>;

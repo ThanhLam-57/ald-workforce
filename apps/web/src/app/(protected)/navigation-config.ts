@@ -35,6 +35,14 @@ const navigationItems: readonly NavigationItem[] = [
     roles: ["GENERAL_MANAGER", "TRAINING_MANAGER"],
   },
   {
+    href: "/staff",
+    label: "Nhân viên cơ sở",
+    shortLabel: "NV",
+    description: "Thêm nhân viên, ca làm và hồ sơ CCCD",
+    section: "Vận hành",
+    roles: ["GENERAL_MANAGER", "TRAINING_MANAGER"],
+  },
+  {
     href: "/branch-overview",
     label: "Tổng quan cơ sở",
     shortLabel: "CS",

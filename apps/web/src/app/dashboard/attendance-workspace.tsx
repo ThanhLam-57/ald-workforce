@@ -15,8 +15,11 @@ import {
   durationInputError,
   formatDurationMinutes,
   isDurationInputDraft,
+  isNextDayCheckout,
   parseDurationMinutes,
 } from "./attendance-duration";
+import { AttendanceMachineImportDialog } from "./attendance-machine-import-dialog";
+import { attendanceMachineImportBlockedReason } from "./attendance-machine-import-view";
 import { AttendanceViolations } from "./attendance-violations";
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error" | "conflict";
@@ -28,11 +31,9 @@ type EditableDay = Readonly<{
   record: AttendanceRecordDto | null;
   checkInTime: string;
   checkOutTime: string;
-  spansNextDay: boolean;
   workUnits: string;
   overtimeDuration: string;
   note: string;
-  status: AttendanceRecordDto["status"];
   actualLiveDuration: string;
   revenueAmount: string;
   saveState: SaveState;
@@ -52,13 +53,6 @@ type ApiPayload = Readonly<{
 }>;
 
 const weekdayLabels = ["Chủ nhật", "Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7"] as const;
-
-const statusLabels = {
-  DRAFT: "Nháp",
-  PRESENT: "Có mặt",
-  ABSENT: "Vắng",
-  LEAVE: "Nghỉ phép",
-} as const;
 
 const saveLabels: Record<SaveState, string> = {
   idle: "Chưa nhập",
@@ -114,11 +108,9 @@ function editableDay(day: AttendanceMonthDayDto): EditableDay {
     record,
     checkInTime: displayTime(record?.checkInAt ?? null),
     checkOutTime: displayTime(record?.checkOutAt ?? null),
-    spansNextDay: record?.spansNextDay ?? false,
     workUnits: record?.workUnits ?? "0",
     overtimeDuration: formatDurationMinutes(record?.overtimeMinutes ?? 0),
     note: record?.note ?? "",
-    status: record?.status ?? "DRAFT",
     actualLiveDuration: formatDurationMinutes(record?.actualLiveMinutes ?? 0),
     revenueAmount: record?.revenueAmount ?? "0",
     saveState: record ? "saved" : "idle",
@@ -191,7 +183,6 @@ export function AttendanceWorkspace({
   const [branchId, setBranchId] = useState(initialOptions.selectedBranchId ?? "");
   const [staffId, setStaffId] = useState(initialOptions.staff[0]?.id ?? "");
   const [month, setMonth] = useState(initialOptions.month || currentMonth);
-  const [reason, setReason] = useState("");
   const [dataset, setDataset] = useState<AttendanceMonthDto | null>(null);
   const [days, setDays] = useState<readonly EditableDay[]>([]);
   const [loading, setLoading] = useState(initialOptions.staff.length > 0);
@@ -207,9 +198,12 @@ export function AttendanceWorkspace({
     useState<AutomaticViolationReconcileSummaryDto | null>(null);
   const [reconcilePending, setReconcilePending] = useState(false);
   const [reconcileError, setReconcileError] = useState<string | null>(null);
+  const [automaticWarnings, setAutomaticWarnings] = useState<
+    AutomaticViolationReconcileSummaryDto["warnings"]
+  >([]);
+  const [machineImportOpen, setMachineImportOpen] = useState(false);
   const revenueLabel = "Doanh số (xu)";
   const daysRef = useRef(days);
-  const reasonRef = useRef(reason);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const inFlight = useRef(new Set<string>());
   const batchSaving = useRef(false);
@@ -230,14 +224,33 @@ export function AttendanceWorkspace({
     () => days.reduce((total, day) => total + BigInt(day.record?.dailyReward.amount ?? "0"), 0n),
     [days],
   );
+  const selectedBranch = useMemo(
+    () => branches.find((branch) => branch.id === branchId) ?? null,
+    [branchId, branches],
+  );
+  const selectedStaff = useMemo(
+    () => staff.find((person) => person.id === staffId) ?? null,
+    [staff, staffId],
+  );
+  const attendanceMachineCode = dataset?.staff.attendanceMachineCode ?? null;
+  const machineImportBlockedReason = attendanceMachineImportBlockedReason({
+    branchId,
+    staffId,
+    month,
+    attendanceMachineCode,
+    datasetReady: Boolean(dataset),
+    optionsLoading,
+    attendanceLoading: loading,
+    pendingCount,
+    conflictCount,
+    saving: isAnySaving,
+    reconciling: reconcilePending,
+    hasReconcilePreview: reconcilePreview !== null,
+  });
 
   useEffect(() => {
     daysRef.current = days;
   }, [days]);
-
-  useEffect(() => {
-    reasonRef.current = reason;
-  }, [reason]);
 
   const replaceDay = useCallback(
     (businessDate: string, update: (day: EditableDay) => EditableDay) => {
@@ -263,16 +276,6 @@ export function AttendanceWorkspace({
       if (!day) return true;
       if (inFlight.current.has(businessDate)) return false;
 
-      const auditReason = reasonRef.current.trim();
-      if (!auditReason) {
-        replaceDay(businessDate, (current) => ({
-          ...current,
-          saveState: "error",
-          message: "Nhập lý do thay đổi trước khi autosave.",
-        }));
-        return false;
-      }
-
       const actualLiveMinutes = parseDurationMinutes(day.actualLiveDuration);
       const overtimeMinutes = parseDurationMinutes(day.overtimeDuration);
       if (actualLiveMinutes === null || overtimeMinutes === null) {
@@ -295,17 +298,24 @@ export function AttendanceWorkspace({
         message: null,
       }));
 
+      const spansNextDay = isNextDayCheckout(day.checkInTime, day.checkOutTime);
+      const hasWorkedValues =
+        day.checkInTime !== "" ||
+        day.checkOutTime !== "" ||
+        Number(day.workUnits || "0") > 0 ||
+        actualLiveMinutes > 0 ||
+        overtimeMinutes > 0 ||
+        Number(day.revenueAmount || "0") > 0;
       const values = {
         checkInAt: timestampFor(businessDate, day.checkInTime),
-        checkOutAt: timestampFor(businessDate, day.checkOutTime, day.spansNextDay),
-        spansNextDay: day.spansNextDay,
+        checkOutAt: timestampFor(businessDate, day.checkOutTime, spansNextDay),
+        spansNextDay,
         workUnits: day.workUnits || "0",
         overtimeMinutes,
         note: day.note || null,
-        status: day.status,
+        status: hasWorkedValues ? ("PRESENT" as const) : ("DRAFT" as const),
         actualLiveMinutes,
         revenueAmount: day.revenueAmount || "0",
-        reason: auditReason,
       };
 
       try {
@@ -352,6 +362,10 @@ export function AttendanceWorkspace({
           activePenaltyTotal: record.activePenaltyTotal ?? latest.activePenaltyTotal,
         }));
         if (summary) {
+          setAutomaticWarnings((current) => [
+            ...current.filter((warning) => warning.businessDate !== businessDate),
+            ...summary.warnings,
+          ]);
           setDataset((current) =>
             current
               ? {
@@ -397,11 +411,6 @@ export function AttendanceWorkspace({
     if (batchSaving.current || inFlight.current.size > 0) {
       setBatchSaveState("error");
       setBatchMessage("Đang có dòng được lưu. Vui lòng chờ hoàn tất.");
-      return false;
-    }
-    if (!reasonRef.current.trim()) {
-      setBatchSaveState("error");
-      setBatchMessage("Nhập lý do thay đổi trước khi lưu.");
       return false;
     }
     const targets = daysRef.current.filter(
@@ -468,6 +477,7 @@ export function AttendanceWorkspace({
         setBatchMessage(null);
         setReconcilePreview(null);
         setReconcileError(null);
+        setAutomaticWarnings([]);
         setLoading(next.staff.length > 0);
         setRefreshToken((current) => current + 1);
         return true;
@@ -492,13 +502,12 @@ export function AttendanceWorkspace({
     }
 
     const controller = new AbortController();
-    void fetch(
-      `/api/attendance?staffId=${encodeURIComponent(staffId)}&month=${encodeURIComponent(month)}`,
-      {
-        cache: "no-store",
-        signal: controller.signal,
-      },
-    )
+    const parameters = new URLSearchParams({ staffId, month });
+    if (branchId) parameters.set("branchId", branchId);
+    void fetch(`/api/attendance?${parameters.toString()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
       .then(async (response) => {
         const payload = (await response.json()) as ApiPayload;
         if (!response.ok) {
@@ -522,7 +531,7 @@ export function AttendanceWorkspace({
       });
 
     return () => controller.abort();
-  }, [month, refreshToken, staffId]);
+  }, [branchId, month, refreshToken, staffId]);
 
   useEffect(
     () => () => {
@@ -629,6 +638,7 @@ export function AttendanceWorkspace({
     setBatchMessage(null);
     setReconcilePreview(null);
     setReconcileError(null);
+    setAutomaticWarnings([]);
     setStaffId(nextStaffId);
   }
 
@@ -637,13 +647,24 @@ export function AttendanceWorkspace({
     setRefreshToken((current) => current + 1);
   }
 
-  async function reconcileAutomaticViolations(dryRun: boolean) {
-    if (!staffId) return;
-    const auditReason = reason.trim();
-    if (!auditReason) {
-      setReconcileError("Nhập lý do thay đổi trước khi tính lại lỗi tự động.");
+  function openMachineImport() {
+    if (machineImportBlockedReason) {
+      setBatchSaveState("error");
+      setBatchMessage(machineImportBlockedReason);
       return;
     }
+    setBatchMessage(null);
+    setMachineImportOpen(true);
+  }
+
+  function handleMachineImportComplete() {
+    setBatchSaveState("saved");
+    setBatchMessage("Đã import Giờ vào/Giờ ra và cập nhật bảng chấm công.");
+    refreshAttendance();
+  }
+
+  async function reconcileAutomaticViolations(dryRun: boolean) {
+    if (!staffId) return;
     setReconcilePending(true);
     setReconcileError(null);
     try {
@@ -655,7 +676,6 @@ export function AttendanceWorkspace({
           staffId,
           month,
           dryRun,
-          reason: auditReason,
         }),
       });
       const payload = (await response.json()) as ApiPayload;
@@ -663,6 +683,7 @@ export function AttendanceWorkspace({
         throw new Error(errorMessage(payload, "Không thể tính lại lỗi tự động."));
       }
       const summary = payload.data as AutomaticViolationReconcileSummaryDto;
+      setAutomaticWarnings(summary.warnings);
       if (dryRun) {
         setReconcilePreview(summary);
       } else {
@@ -706,7 +727,8 @@ export function AttendanceWorkspace({
         <div>
           <h2 className="text-xl font-semibold">Attendance & Live theo tháng</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Thời lượng HH:mm · autosave sau 700ms · ngày nghiệp vụ Asia/Ho_Chi_Minh
+            Thời lượng HH:mm · check-out sớm hơn check-in tự tính là ca qua ngày · autosave sau
+            700ms · ngày nghiệp vụ Asia/Ho_Chi_Minh
           </p>
         </div>
         <div className="flex gap-2">
@@ -756,7 +778,8 @@ export function AttendanceWorkspace({
             {staff.length === 0 ? <option value="">Chưa có nhân viên Live</option> : null}
             {staff.map((person) => (
               <option key={person.id} value={person.id}>
-                {person.staffCode} — {person.fullName} ({person.jobTitle})
+                {person.staffCode} — {person.fullName} ({person.jobTitle}) · Mã máy:{" "}
+                {person.attendanceMachineCode ?? "Chưa có"}
               </option>
             ))}
           </select>
@@ -771,16 +794,17 @@ export function AttendanceWorkspace({
             value={month}
           />
         </label>
-        <label className="grid gap-1 text-sm">
-          Lý do thay đổi
-          <input
-            aria-label="Lý do thay đổi attendance"
-            onChange={(event) => setReason(event.target.value)}
-            placeholder="Bắt buộc để ghi audit"
-            value={reason}
-          />
-        </label>
-        <div className="flex items-end">
+        <div className="flex flex-wrap items-end gap-2">
+          <Button
+            className="w-full whitespace-nowrap xl:w-auto"
+            disabled={machineImportBlockedReason !== null}
+            onClick={openMachineImport}
+            title={machineImportBlockedReason ?? "Import Giờ vào/Giờ ra từ file XLSX"}
+            type="button"
+            variant="secondary"
+          >
+            Import máy chấm công
+          </Button>
           <Button
             className="w-full whitespace-nowrap xl:w-auto"
             disabled={pendingCount === 0 || isAnySaving || optionsLoading || conflictCount > 0}
@@ -800,6 +824,21 @@ export function AttendanceWorkspace({
               : staffId
                 ? "Đang chuẩn bị dữ liệu…"
                 : "Cơ sở này chưa có nhân viên Live trong tháng đã chọn."}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Mã máy chấm công:{" "}
+            <strong className="font-mono text-slate-700">
+              {dataset ? (attendanceMachineCode ?? "Chưa cấu hình") : "—"}
+            </strong>
+            {dataset && !attendanceMachineCode ? (
+              <>
+                {" "}
+                ·{" "}
+                <a className="font-medium text-sky-700 underline" href="/staff">
+                  Cập nhật trong hồ sơ nhân viên
+                </a>
+              </>
+            ) : null}
           </p>
           <p
             aria-live="polite"
@@ -840,6 +879,20 @@ export function AttendanceWorkspace({
       {reconcileError ? (
         <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">
           {reconcileError}
+        </div>
+      ) : null}
+      {automaticWarnings.length > 0 ? (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <strong className="block">
+            Chưa thể tính đủ lỗi tự động cho {automaticWarnings.length} ngày
+          </strong>
+          <span>
+            Hãy mở menu Nhân viên, thiết lập ca có hiệu lực cho các ngày:{" "}
+            {[...new Set(automaticWarnings.map((warning) => warning.businessDate))]
+              .map((date) => date.split("-").reverse().join("/"))
+              .join(", ")}
+            .
+          </span>
         </div>
       ) : null}
 
@@ -894,12 +947,9 @@ export function AttendanceWorkspace({
                   <td
                     className="text-center"
                     key={day.businessDate}
-                    title={day.message ?? statusLabels[day.status]}
+                    title={day.message ?? undefined}
                   >
                     <span className="block font-medium">{day.workUnits}</span>
-                    <span className="text-xs text-slate-500">
-                      {day.record ? statusLabels[day.status] : "—"}
-                    </span>
                     {day.activePenaltyTotal !== "0" ? (
                       <span className="block text-xs font-medium text-rose-700">
                         Phạt {new Intl.NumberFormat("vi-VN").format(BigInt(day.activePenaltyTotal))}
@@ -924,7 +974,7 @@ export function AttendanceWorkspace({
           className="attendance-grid-scroll mt-4 min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain rounded-xl border border-slate-200"
           data-testid="attendance-grid-scroll"
         >
-          <table className="attendance-table min-w-[1540px] text-sm">
+          <table className="attendance-table min-w-[1280px] text-sm">
             <thead>
               <tr>
                 <th className="sticky left-0 top-0 z-50 w-28 min-w-28 max-w-28 bg-slate-100">
@@ -933,18 +983,16 @@ export function AttendanceWorkspace({
                 <th className="sticky left-28 top-0 z-50 w-24 min-w-24 max-w-24 bg-slate-100 shadow-[4px_0_6px_-4px_rgba(15,23,42,0.35)]">
                   Thứ
                 </th>
-                <th className="min-w-28">Trạng thái</th>
                 <th className="min-w-28">Check-in</th>
                 <th className="min-w-28">Check-out</th>
-                <th className="min-w-20">Qua ngày</th>
                 <th className="min-w-28">Thời lượng Live</th>
                 <th className="min-w-28">Thời lượng tăng ca</th>
                 <th className="min-w-24">Số công</th>
                 <th className="min-w-32">{revenueLabel}</th>
                 <th className="min-w-32">Thưởng ngày</th>
-                <th className="min-w-64">Ghi chú</th>
-                <th className="min-w-20">Lỗi & evidence</th>
+                <th className="w-48 min-w-40 max-w-56">Lỗi & evidence</th>
                 <th>Lưu</th>
+                <th className="min-w-64">Ghi chú</th>
               </tr>
             </thead>
             <tbody>
@@ -972,29 +1020,8 @@ export function AttendanceWorkspace({
                       {weekdayLabels[day.dayOfWeek]}
                     </th>
                     <td>
-                      <select
-                        {...grid(0)}
-                        aria-label={`Trạng thái ${day.businessDate}`}
-                        disabled={disabled}
-                        onChange={(event) =>
-                          updateField(
-                            day.businessDate,
-                            "status",
-                            event.target.value as EditableDay["status"],
-                          )
-                        }
-                        value={day.status}
-                      >
-                        {Object.entries(statusLabels).map(([value, label]) => (
-                          <option key={value} value={value}>
-                            {label}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td>
                       <input
-                        {...grid(1)}
+                        {...grid(0)}
                         aria-label={`Check-in ${day.businessDate}`}
                         disabled={disabled}
                         onChange={(event) =>
@@ -1006,7 +1033,7 @@ export function AttendanceWorkspace({
                     </td>
                     <td>
                       <input
-                        {...grid(2)}
+                        {...grid(1)}
                         aria-label={`Check-out ${day.businessDate}`}
                         disabled={disabled}
                         onChange={(event) =>
@@ -1016,21 +1043,9 @@ export function AttendanceWorkspace({
                         value={day.checkOutTime}
                       />
                     </td>
-                    <td className="text-center">
-                      <input
-                        {...grid(3)}
-                        aria-label={`Ca qua ngày ${day.businessDate}`}
-                        checked={day.spansNextDay}
-                        disabled={disabled}
-                        onChange={(event) =>
-                          updateField(day.businessDate, "spansNextDay", event.target.checked)
-                        }
-                        type="checkbox"
-                      />
-                    </td>
                     <td>
                       <input
-                        {...grid(4)}
+                        {...grid(2)}
                         aria-label={`Live thực tế ${day.businessDate}`}
                         aria-invalid={
                           durationInputError(day.actualLiveDuration) ? "true" : undefined
@@ -1063,7 +1078,7 @@ export function AttendanceWorkspace({
                     </td>
                     <td>
                       <input
-                        {...grid(5)}
+                        {...grid(3)}
                         aria-label={`Tăng ca ${day.businessDate}`}
                         aria-invalid={durationInputError(day.overtimeDuration) ? "true" : undefined}
                         className="min-w-24 font-mono"
@@ -1092,7 +1107,7 @@ export function AttendanceWorkspace({
                     </td>
                     <td>
                       <input
-                        {...grid(6)}
+                        {...grid(4)}
                         aria-label={`Số công ${day.businessDate}`}
                         disabled={disabled}
                         min="0"
@@ -1106,7 +1121,7 @@ export function AttendanceWorkspace({
                     </td>
                     <td>
                       <input
-                        {...grid(7)}
+                        {...grid(5)}
                         aria-label={`${revenueLabel} ${day.businessDate}`}
                         disabled={disabled}
                         inputMode="numeric"
@@ -1142,25 +1157,13 @@ export function AttendanceWorkspace({
                         </span>
                       )}
                     </td>
-                    <td>
-                      <input
-                        {...grid(8)}
-                        aria-label={`Ghi chú ${day.businessDate}`}
-                        disabled={disabled}
-                        onChange={(event) =>
-                          updateField(day.businessDate, "note", event.target.value)
-                        }
-                        value={day.note}
-                      />
-                    </td>
-                    <td className="min-w-20 text-center">
+                    <td className="w-48 min-w-40 max-w-56 align-top">
                       <AttendanceViolations
                         activePenaltyTotal={day.activePenaltyTotal}
                         attendanceId={day.record?.id ?? null}
                         businessDate={day.businessDate}
                         canOverrideAmount={canOverridePenalty}
                         onChanged={refreshAttendance}
-                        reason={reason}
                         violations={day.violations}
                       />
                     </td>
@@ -1199,6 +1202,17 @@ export function AttendanceWorkspace({
                         </span>
                       ) : null}
                     </td>
+                    <td>
+                      <input
+                        {...grid(6)}
+                        aria-label={`Ghi chú ${day.businessDate}`}
+                        disabled={disabled}
+                        onChange={(event) =>
+                          updateField(day.businessDate, "note", event.target.value)
+                        }
+                        value={day.note}
+                      />
+                    </td>
                   </tr>
                 );
               })}
@@ -1206,6 +1220,24 @@ export function AttendanceWorkspace({
           </table>
         </div>
       )}
+
+      <AttendanceMachineImportDialog
+        attendanceMachineCode={attendanceMachineCode}
+        branchId={branchId}
+        branchName={
+          selectedBranch ? `${selectedBranch.code} — ${selectedBranch.name}` : "Chưa chọn cơ sở"
+        }
+        month={month}
+        onClose={() => setMachineImportOpen(false)}
+        onImported={handleMachineImportComplete}
+        open={machineImportOpen}
+        staffId={staffId}
+        staffName={
+          selectedStaff
+            ? `${selectedStaff.staffCode} — ${selectedStaff.fullName}`
+            : "Chưa chọn nhân viên"
+        }
+      />
 
       {reconcilePreview ? (
         <div
@@ -1243,6 +1275,17 @@ export function AttendanceWorkspace({
                   {reconcilePreview.unchangedCount}
                 </strong>
               </div>
+              {reconcilePreview.missingScheduleCount > 0 ? (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 sm:col-span-2">
+                  <strong className="block text-amber-900">
+                    Thiếu ca làm: {reconcilePreview.missingScheduleCount} ngày
+                  </strong>
+                  <span className="mt-1 block text-sm text-amber-800">
+                    Thiết lập ca hiệu lực trong menu Nhân viên trước khi áp dụng để tránh bỏ sót lỗi
+                    đi muộn hoặc thiếu Live.
+                  </span>
+                </div>
+              ) : null}
             </div>
             <div className="flex flex-wrap justify-end gap-3 border-t border-slate-200 p-4">
               <Button

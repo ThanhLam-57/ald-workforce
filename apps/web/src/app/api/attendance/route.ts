@@ -14,9 +14,10 @@ export async function GET(request: Request) {
     const query = attendanceMonthQuerySchema.parse({
       staffId: url.searchParams.get("staffId"),
       month: url.searchParams.get("month"),
+      branchId: url.searchParams.get("branchId") ?? undefined,
     });
     return json({
-      data: await getAttendanceMonth(actor, query.staffId, query.month),
+      data: await getAttendanceMonth(actor, query.staffId, query.month, query.branchId),
     });
   } catch (error) {
     return toErrorResponse(error);

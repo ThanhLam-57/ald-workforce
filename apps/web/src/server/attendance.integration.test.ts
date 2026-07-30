@@ -210,6 +210,42 @@ describe("attendance branch scope và quyền vai trò", () => {
     expect(gmBranchB.staff.map((person) => person.id)).toEqual([liveBId]);
   });
 
+  it("giữ nhân viên trong tháng nghỉ việc và ẩn từ tháng kế tiếp", async () => {
+    const terminatedStaff = await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: `LT${runId}`,
+        fullName: "Live nghỉ giữa tháng",
+        jobTitle: "Live",
+        joinedDate: new Date("2026-06-10T00:00:00.000Z"),
+        terminationDate: new Date("2026-07-15T00:00:00.000Z"),
+        employmentCategory: "OFFICIAL",
+        employmentStatus: "TERMINATED",
+      },
+    });
+    await prisma.branchAssignment.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: terminatedStaff.id,
+        assignmentType: "MEMBER",
+        effectiveFrom: new Date("2026-06-10T00:00:00.000Z"),
+        effectiveTo: new Date("2026-08-01T00:00:00.000Z"),
+      },
+    });
+
+    const july = await getAttendanceFilterOptions(gm, "2026-07", branchAId);
+    const august = await getAttendanceFilterOptions(gm, "2026-08", branchAId);
+    expect(july.staff.map(({ id }) => id)).toContain(terminatedStaff.id);
+    expect(august.staff.map(({ id }) => id)).not.toContain(terminatedStaff.id);
+    await expect(getAttendanceMonth(gm, terminatedStaff.id, "2026-07")).resolves.toMatchObject({
+      staff: { id: terminatedStaff.id },
+    });
+    await expect(getAttendanceMonth(gm, terminatedStaff.id, "2026-08")).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
+
   it("không để manager đoán branchId ngoài phạm vi qua API options", async () => {
     await expect(getAttendanceFilterOptions(manager, "2026-07", branchBId)).rejects.toMatchObject({
       code: "NOT_FOUND",
@@ -224,7 +260,6 @@ describe("attendance branch scope và quyền vai trò", () => {
           staffId: liveBId,
           month: "2026-07",
           dryRun: true,
-          reason: "Thử tính lại chéo cơ sở",
         },
         metadata,
       ),
@@ -236,7 +271,6 @@ describe("attendance branch scope và quyền vai trò", () => {
           staffId: managerStaffId,
           month: "2026-07",
           dryRun: true,
-          reason: "Thử tính lại cho chính manager",
         },
         metadata,
       ),
@@ -251,7 +285,6 @@ describe("attendance branch scope và quyền vai trò", () => {
         businessDate: "2026-07-21",
         workUnits: "1",
         revenueAmount: "500000",
-        reason: "Tạo dữ liệu branch B",
       },
       metadata,
     );
@@ -266,7 +299,6 @@ describe("attendance branch scope và quyền vai trò", () => {
         {
           workUnits: "0.5",
           version: branchBRecord.version,
-          reason: "Thử sửa chéo cơ sở",
         },
         metadata,
       ),
@@ -283,7 +315,6 @@ describe("attendance branch scope và quyền vai trò", () => {
         checkOutAt: "2026-07-23T01:00:00+07:00",
         spansNextDay: true,
         workUnits: "1",
-        reason: "GM nhập ca manager",
       },
       metadata,
     );
@@ -293,7 +324,6 @@ describe("attendance branch scope và quyền vai trò", () => {
       {
         workUnits: "1.25",
         version: created.version,
-        reason: "GM hiệu chỉnh công manager",
       },
       metadata,
     );
@@ -309,7 +339,6 @@ describe("attendance branch scope và quyền vai trò", () => {
         {
           workUnits: "2",
           version: updated.version,
-          reason: "Manager thử tự sửa",
         },
         metadata,
       ),
@@ -324,7 +353,6 @@ describe("attendance branch scope và quyền vai trò", () => {
         businessDate: "2026-07-20",
         actualLiveMinutes: 180,
         revenueAmount: "1200000",
-        reason: "Manager nhập Live A",
       },
       metadata,
     );
@@ -341,7 +369,6 @@ describe("unique và optimistic concurrency", () => {
       {
         staffId: liveAId,
         businessDate: "2026-07-23",
-        reason: "Bản ghi duy nhất",
       },
       metadata,
     );
@@ -352,7 +379,6 @@ describe("unique và optimistic concurrency", () => {
         {
           staffId: liveAId,
           businessDate: "2026-07-23",
-          reason: "Thử tạo trùng",
         },
         metadata,
       ),
@@ -366,7 +392,6 @@ describe("unique và optimistic concurrency", () => {
         staffId: liveAId,
         businessDate: "2026-07-24",
         workUnits: "1",
-        reason: "Tạo để kiểm tra version",
       },
       metadata,
     );
@@ -376,7 +401,6 @@ describe("unique và optimistic concurrency", () => {
       {
         workUnits: "1.5",
         version: created.version,
-        reason: "Cập nhật thứ nhất",
       },
       metadata,
     );
@@ -388,7 +412,6 @@ describe("unique và optimistic concurrency", () => {
         {
           workUnits: "2",
           version: created.version,
-          reason: "Cập nhật stale",
         },
         metadata,
       ),
@@ -408,7 +431,6 @@ describe("audit, dữ liệu cũ và export an toàn", () => {
         businessDate: "2026-07-25",
         status: "PRESENT",
         revenueAmount: "900000",
-        reason: "Tạo audit attendance",
       },
       metadata,
     );
@@ -418,7 +440,6 @@ describe("audit, dữ liệu cũ và export an toàn", () => {
       {
         overtimeMinutes: 45,
         version: created.version,
-        reason: "Sửa audit attendance",
       },
       metadata,
     );
@@ -436,7 +457,6 @@ describe("audit, dữ liệu cũ và export an toàn", () => {
       {
         overtimeMinutes: 60,
         version: archived.version,
-        reason: "Cập nhật lại attendance cũ",
       },
       metadata,
     );
@@ -454,6 +474,7 @@ describe("audit, dữ liệu cũ và export an toàn", () => {
       "attendance.update",
       "attendance.restore-and-update",
     ]);
+    expect(audits.every(({ reason }) => reason.startsWith("SYSTEM:"))).toBe(true);
     expect(audits[1]?.before).not.toBeNull();
     expect(audits[1]?.after).not.toBeNull();
     expect(archived.archivedAt).not.toBeNull();

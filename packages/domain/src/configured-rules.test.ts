@@ -176,7 +176,7 @@ describe("configured reward rules", () => {
     });
   });
 
-  it("calculates salary with integer rational arithmetic and explicit rounding", () => {
+  it("calculates salary from work units regardless of attendance status", () => {
     const result = calculateSalaryProjection(
       {
         baseSalary: "26000000",
@@ -197,9 +197,9 @@ describe("configured reward rules", () => {
       ],
     );
 
-    expect(result.baseSalaryAmount).toBe("13000000");
-    expect(result.overtimeAmount).toBe("187500");
-    expect(result.totalAmount).toBe("13187500");
+    expect(result.baseSalaryAmount).toBe("26000000");
+    expect(result.overtimeAmount).toBe("375000");
+    expect(result.totalAmount).toBe("26375000");
   });
 
   it("validates weighted KPI scoring and reports changed configuration paths", () => {

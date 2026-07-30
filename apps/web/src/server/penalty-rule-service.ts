@@ -19,6 +19,7 @@ import {
   type ActorContext,
 } from "@ald/domain";
 
+import { systemAuditReason } from "./audit-service";
 import { parseBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
@@ -294,7 +295,7 @@ export async function createPenaltyRuleSet(
       action: "rule_set.create",
       entityType: "RuleSet",
       entityId: ruleSet.id,
-      reason: input.reason,
+      reason: systemAuditReason("PENALTY_RULE_SET_CREATED"),
       after: {
         name: ruleSet.name,
         type: ruleSet.type,
@@ -395,7 +396,7 @@ export async function createPenaltyRuleDraft(
       action: "rule_version.clone_draft",
       entityType: "RuleVersion",
       entityId: created.id,
-      reason: input.reason,
+      reason: systemAuditReason("PENALTY_RULE_VERSION_CLONED_TO_DRAFT"),
       after: versionAuditShape(created),
       metadata,
     });
@@ -483,7 +484,7 @@ export async function updatePenaltyRuleDraft(
       action: "rule_version.update_draft",
       entityType: "RuleVersion",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason("PENALTY_RULE_DRAFT_UPDATED"),
       before: versionAuditShape(before),
       after: versionAuditShape(after),
       metadata,
@@ -577,7 +578,7 @@ export async function publishPenaltyRuleVersion(
         action: "rule_version.publish",
         entityType: "RuleVersion",
         entityId: id,
-        reason: input.reason,
+        reason: systemAuditReason("PENALTY_RULE_VERSION_PUBLISHED"),
         before: versionAuditShape(before),
         after: versionAuditShape(after),
         metadata,
@@ -655,7 +656,7 @@ export async function retirePenaltyRuleVersion(
       action: "rule_version.retire",
       entityType: "RuleVersion",
       entityId: id,
-      reason: input.reason,
+      reason: systemAuditReason("PENALTY_RULE_VERSION_RETIRED"),
       before: versionAuditShape(before),
       after: versionAuditShape(after),
       metadata,

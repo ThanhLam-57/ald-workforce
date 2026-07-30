@@ -842,7 +842,6 @@ export function ConfiguredRuleCenter({
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [configuration, setConfiguration] = useState<ConfiguredRule | null>(null);
   const [notes, setNotes] = useState("");
-  const [reason, setReason] = useState("");
   const [effectiveFrom, setEffectiveFrom] = useState(today());
   const [effectiveTo, setEffectiveTo] = useState("");
   const [month, setMonth] = useState(currentMonth());
@@ -985,7 +984,6 @@ export function ConfiguredRuleCenter({
                 const created = (await request("/api/rules/configured", "POST", {
                   type: newType,
                   name: newName,
-                  reason,
                 })) as ConfiguredRuleSetDto;
                 setNewName("");
                 setMessage("Đã tạo bộ rule và draft v1.");
@@ -1052,14 +1050,6 @@ export function ConfiguredRuleCenter({
       {isGeneralManager && selected ? (
         <>
           <div className="mt-4 grid gap-3 md:grid-cols-4">
-            <label className="text-sm md:col-span-2">
-              Lý do thay đổi
-              <input
-                className={`${inputClass} mt-1 w-full`}
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-              />
-            </label>
             <label className="text-sm">
               Hiệu lực từ
               <input
@@ -1093,7 +1083,6 @@ export function ConfiguredRuleCenter({
                           configuration,
                           notes: notes || null,
                           rowVersion: selected.rowVersion,
-                          reason,
                         },
                       )) as ConfiguredRuleVersionDto;
                       setMessage("Đã lưu draft.");
@@ -1115,7 +1104,6 @@ export function ConfiguredRuleCenter({
                           effectiveFrom,
                           effectiveTo: effectiveTo || null,
                           rowVersion: selected.rowVersion,
-                          reason,
                         },
                       );
                       setMessage("Đã publish/lên lịch version.");
@@ -1135,7 +1123,6 @@ export function ConfiguredRuleCenter({
                     ruleSetId: selected.ruleSetId,
                     cloneFromVersionId: selected.id,
                     notes: selected.notes,
-                    reason,
                   })) as ConfiguredRuleVersionDto;
                   setMessage("Đã clone thành draft mới.");
                   await load();
@@ -1153,7 +1140,6 @@ export function ConfiguredRuleCenter({
                     await request(`/api/rules/configured/versions/${selected.id}/retire`, "POST", {
                       effectiveTo: effectiveTo,
                       rowVersion: selected.rowVersion,
-                      reason,
                     });
                     setMessage("Đã kết thúc version.");
                     await load();
@@ -1272,10 +1258,7 @@ export function ConfiguredRuleCenter({
               type="button"
               onClick={() =>
                 void run(async () => {
-                  await request("/api/rules/configured/level-proposals/generate", "POST", {
-                    month,
-                    reason,
-                  });
+                  await request("/api/rules/configured/level-proposals/generate", "POST", { month });
                   await reloadProposals();
                   setMessage("Đã tạo đề xuất level.");
                 })
@@ -1342,7 +1325,6 @@ export function ConfiguredRuleCenter({
                                   {
                                     version: proposal.version,
                                     performanceLevelId: overrides[proposal.id] || null,
-                                    reason,
                                   },
                                 );
                                 await reloadProposals();

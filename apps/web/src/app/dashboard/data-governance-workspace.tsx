@@ -84,7 +84,6 @@ export function DataGovernanceWorkspace({
   const [template, setTemplate] = useState<ImportJobDto["template"]>("ATTENDANCE_LIVE");
   const [branchId, setBranchId] = useState(branches[0]?.id ?? "");
   const [file, setFile] = useState<File | null>(null);
-  const [reason, setReason] = useState("Migration dữ liệu cũ đã được đối soát.");
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
@@ -228,7 +227,6 @@ export function DataGovernanceWorkspace({
           sizeBytes: file.size,
           checksumSha256,
           branchId: branchId || null,
-          reason,
         }),
       });
       let job = created.job;
@@ -277,7 +275,7 @@ export function DataGovernanceWorkspace({
       const job = await api<ImportJobDto>(`/api/imports/${currentImport.id}/commit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirm: true, reason }),
+        body: JSON.stringify({ confirm: true }),
       });
       selectImport(job);
       await Promise.all([loadImports(), loadAudits()]);
@@ -319,7 +317,6 @@ export function DataGovernanceWorkspace({
                   to: auditTo ? dayEndExclusive(auditTo) : undefined,
                 }
               : undefined,
-          reason,
         }),
       });
       await loadExports();
@@ -392,14 +389,6 @@ export function DataGovernanceWorkspace({
               className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2"
               type="file"
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-            />
-          </label>
-          <label className="text-sm md:col-span-2 lg:col-span-3">
-            Lý do
-            <input
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2"
-              value={reason}
-              onChange={(event) => setReason(event.target.value)}
             />
           </label>
           <button

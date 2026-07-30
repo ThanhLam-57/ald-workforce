@@ -32,8 +32,9 @@ monthlyLevelAmount =
 `retainLevelBonus` và `jumpLevelBonus` loại trừ nhau. Khi tụt bậc hoặc thiếu dữ liệu bậc,
 cả hai bằng 0.
 
-`workedDayCount` đếm số ngày nghiệp vụ khác nhau có `status=PRESENT` và
-`workUnits > 0`. Một ngày 0,5 công vẫn là một ngày; tăng ca không tạo thêm ngày.
+`workedDayCount` đếm số ngày nghiệp vụ khác nhau có `workUnits > 0`, không phụ
+thuộc trạng thái attendance. Một ngày 0,5 công vẫn là một ngày; tăng ca không tạo
+thêm ngày.
 
 Nguồn xu tháng trước ưu tiên: payroll tháng trước đã publish, Attendance/Live tháng
 trước, rồi mới tới số xu nền nhập tay. Số xu nền chỉ thuộc worksheet kỳ hiện tại và
@@ -49,10 +50,30 @@ overtime =
   / (standardWorkdayHundredths × standardDailyMinutes × 10.000)
 ```
 
-`eligibleWork` lấy theo `WORK_UNITS` hoặc `PRESENT_DAYS`; policy quyết định
-trạng thái attendance hợp lệ, ngưỡng đủ lương và việc cap ở ngày công chuẩn.
+`eligibleWork` lấy theo `WORK_UNITS` hoặc số ngày có `workUnits > 0`; trạng thái
+attendance không tham gia công thức. Policy vẫn quyết định ngưỡng đủ lương và
+việc cap ở ngày công chuẩn.
 Rounding hỗ trợ đơn vị 1/10/100/1.000 VND, half-up, half-even, floor, ceiling,
 áp dụng theo component hoặc tổng.
+
+## Lỗi tự động theo ca nhân viên
+
+Rule `CHECK_IN_LATE` và `LIVE_DURATION_SHORT` chọn một trong hai nguồn ngưỡng:
+
+- `STAFF_SHIFT`: lấy ca của nhân viên có khoảng hiệu lực chứa ngày nghiệp vụ.
+- `RULE_FIXED`: dùng trực tiếp giờ/thời lượng cố định trong rule để tương thích
+  cấu hình cũ.
+
+```text
+lateThreshold = scheduledStartMinutes + graceMinutes
+liveThreshold = max(0, requiredLiveMinutes - graceMinutes)
+```
+
+Check-in sau `lateThreshold` mới bị tính đi muộn. Live thực tế thấp hơn
+`liveThreshold` mới bị tính thiếu Live. Nếu rule dùng `STAFF_SHIFT` nhưng ngày đó
+không có ca hiệu lực, kết quả là `INSUFFICIENT_DATA`: không tự tạo tiền phạt và UI
+phải cảnh báo để người quản lý bổ sung ca. Violation đã tạo vẫn snapshot rule, ca,
+ngưỡng thực tế và mức tiền tại thời điểm đánh giá.
 
 ## KPI template
 

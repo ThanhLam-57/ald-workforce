@@ -2,7 +2,7 @@ import type { DataExportCreateInput, DataExportJobDto, DataExportListQuery } fro
 import { prisma, type Prisma } from "@ald/db";
 import { canAccessBranch, DomainError, requirePermission, type ActorContext } from "@ald/domain";
 
-import { appendSecureAudit } from "./audit-service";
+import { appendSecureAudit, systemAuditReason } from "./audit-service";
 import { enqueueDataExport } from "./job-queue";
 import { createPrivateDownloadUrl } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
@@ -145,7 +145,7 @@ export async function createDataExport(
       format: input.format,
       parameters,
       requestedByUserId: actor.userId,
-      reason: input.reason,
+      reason: systemAuditReason("DATA_EXPORT_REQUESTED"),
       expiresAt,
     },
     select: exportSelect,
@@ -156,7 +156,7 @@ export async function createDataExport(
     entityType: "DataExportJob",
     entityId: job.id,
     branchId: job.branchId,
-    reason: input.reason,
+    reason: systemAuditReason("DATA_EXPORT_REQUESTED"),
     after: { template: input.template, format: input.format, parameters, expiresAt },
     metadata,
   });

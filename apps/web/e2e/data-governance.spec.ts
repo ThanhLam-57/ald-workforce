@@ -31,7 +31,6 @@ test("GM thấy Import, Export Center, Audit và API template được scope", a
       mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       sizeBytes: 20 * 1_024 * 1_024 + 1,
       checksumSha256: `${"A".repeat(43)}=`,
-      reason: "E2E oversize validation.",
     },
   });
   expect(oversized.status()).toBe(400);
