@@ -163,6 +163,8 @@ enum ImportJobStatus {
   COMMITTING
   SUCCEEDED
   FAILED
+  EXPIRED
+  SUPERSEDED
 }
 
 enum ImportErrorSeverity {
@@ -1229,6 +1231,9 @@ model ImportJob {
   uploadedAt        DateTime?       @db.Timestamptz(3)
   validatedAt       DateTime?       @db.Timestamptz(3)
   committedAt       DateTime?       @db.Timestamptz(3)
+  expiresAt         DateTime?       @db.Timestamptz(3)
+  supersededAt      DateTime?       @db.Timestamptz(3)
+  objectDeletedAt   DateTime?       @db.Timestamptz(3)
   company           Company         @relation(fields: [companyId], references: [id], onDelete: Restrict)
   branch            Branch?         @relation(fields: [branchId], references: [id], onDelete: Restrict)
   targetStaff       StaffMember?     @relation("AttendanceMachineImportTarget", fields: [targetStaffId], references: [id], onDelete: Restrict)
@@ -1240,6 +1245,7 @@ model ImportJob {
   @@index([companyId, status, createdAt(sort: Desc)], map: "import_jobs_company_status_created_idx")
   @@index([companyId, branchId, createdAt(sort: Desc)], map: "import_jobs_company_branch_created_idx")
   @@index([companyId, branchId, targetStaffId, targetMonth], map: "import_jobs_attendance_machine_target_idx")
+  @@index([template, status, expiresAt], map: "import_jobs_template_status_expiry_idx")
   @@map("import_jobs")
 }
 

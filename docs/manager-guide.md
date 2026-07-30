@@ -7,7 +7,8 @@ branch khác, dừng thao tác và báo GM; không chia sẻ link/file để th�
 
 1. Chọn tháng và nhân viên trong branch.
 2. Nhập check-in/out, actual live, overtime, work units, revenue và note.
-3. Theo dõi trạng thái autosave.
+3. Sau khi nhập, kiểm tra số dòng chưa lưu rồi bấm `Lưu thay đổi`. Màn hình không tự lưu khi
+   đang nhập.
 4. Nếu có `409 conflict`, tải lại dữ liệu, so sánh và nhập lại thay đổi cần giữ; không ghi đè
    mù.
 5. Shift qua ngày chỉ được đánh dấu khi thực tế có qua ngày.

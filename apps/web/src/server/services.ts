@@ -1250,9 +1250,9 @@ export async function createUserAccount(
       await tx.user.update({
         where: { id: user.id },
         data: {
-          mustChangePassword: true,
+          mustChangePassword: false,
           invitedAt: new Date(),
-          passwordChangedAt: null,
+          passwordChangedAt: new Date(),
         },
       });
       await appendAudit(tx, {
@@ -1269,7 +1269,7 @@ export async function createUserAccount(
           canManagePayroll: Boolean(input.canManagePayroll),
           staffId: input.staffId ?? null,
           active: true,
-          mustChangePassword: true,
+          mustChangePassword: false,
         },
         metadata,
       });
@@ -1300,7 +1300,7 @@ export async function createUserAccount(
     canManagePayroll: Boolean(input.canManagePayroll),
     staffId: input.staffId ?? null,
     active: true,
-    mustChangePassword: true,
+    mustChangePassword: false,
   };
 }
 

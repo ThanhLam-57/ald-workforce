@@ -4,6 +4,7 @@ import { prisma, requiredDatabaseUrl } from "@ald/db";
 import { createServer } from "node:http";
 import path from "node:path";
 
+import { cleanupAttendanceMachineImports } from "./attendance-import-cleanup.js";
 import { cleanupExpiredExports, processDataExportJob } from "./data-export.js";
 import { processPayrollExportJob } from "./payroll-export.js";
 
@@ -100,6 +101,10 @@ await boss.createQueue("export-cleanup");
 await boss.schedule("export-cleanup", "0 3 * * *", null, {
   tz: "Asia/Ho_Chi_Minh",
 });
+await boss.createQueue("attendance-import-cleanup");
+await boss.schedule("attendance-import-cleanup", "*/15 * * * *", null, {
+  tz: "Asia/Ho_Chi_Minh",
+});
 await boss.work<{ exportJobId: string }>("payroll-export", async ([job]) => {
   if (!job?.data.exportJobId) {
     throw new Error("Payroll export job thiếu exportJobId.");
@@ -115,6 +120,19 @@ await boss.work<{ exportJobId: string }>("data-export", async ([job]) => {
 await boss.work("export-cleanup", async () => {
   const deleted = await cleanupExpiredExports();
   console.info(JSON.stringify({ event: "export.cleanup", deleted }));
+});
+await boss.work("attendance-import-cleanup", async () => {
+  try {
+    const result = await cleanupAttendanceMachineImports();
+    console.info(JSON.stringify({ event: "attendance_import.cleanup", ...result }));
+  } catch (cause) {
+    console.error(
+      JSON.stringify({
+        event: "attendance_import.cleanup.failed",
+        message: cause instanceof Error ? cause.message.slice(0, 500) : "Unknown cleanup error",
+      }),
+    );
+  }
 });
 healthServer.listen(port, "0.0.0.0", () => {
   ready = true;

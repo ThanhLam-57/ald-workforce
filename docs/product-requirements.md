@@ -84,7 +84,9 @@ Job position và auth role là hai khái niệm độc lập. Một nhân sự c
 - Query theo cơ sở lấy scope từ session và assignment trong database; bỏ qua `branchId` không thuộc scope dù client gửi.
 - Không dùng cache chung cho dữ liệu có scope; mặc định `no-store`.
 - Mutation nghiệp vụ dùng transaction và audit trong cùng transaction khi phù hợp.
-- Bảng tháng có sticky columns, cuộn ngang, điều hướng bàn phím, autosave state và conflict detection bằng version.
+- Bảng tháng có sticky columns, cuộn ngang, điều hướng bàn phím, trạng thái lưu rõ ràng và
+  conflict detection bằng version. Màn `/attendance` chỉ gửi mutation khi người dùng bấm
+  `Lưu thay đổi`.
 - Có loading, empty, error và permission-denied state.
 - Health liveness không phụ thuộc database; readiness kiểm tra dependency bắt buộc.
 - Web là service public duy nhất; worker, PostgreSQL và storage là private.

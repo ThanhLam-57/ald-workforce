@@ -27,7 +27,8 @@ server bằng actor lấy từ session.
 ## Kiến trúc
 
 - Route group `(protected)` chứa layout server dùng chung và không thay đổi URL public.
-- Layout redirect `/login` khi thiếu session và `/change-password` khi còn mật khẩu tạm.
+- Layout chỉ redirect `/login` khi thiếu session; đổi mật khẩu là thao tác chủ động tại
+  `/settings/security` hoặc `/change-password`.
 - Client shell chỉ nhận identity tối thiểu: tên hiển thị, vai trò và số cơ sở trong scope.
 - Typed navigation config là nguồn duy nhất cho menu, breadcrumb và active state.
 - Mỗi page có server role guard riêng; direct URL trái quyền chuyển sang `/forbidden`.

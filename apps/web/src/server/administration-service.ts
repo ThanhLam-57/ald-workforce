@@ -561,7 +561,6 @@ export async function listAdminUsers(
         role: true,
         canManagePayroll: true,
         active: true,
-        mustChangePassword: true,
         version: true,
         updatedAt: true,
         staff: { select: { id: true, staffCode: true, fullName: true } },

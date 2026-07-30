@@ -80,11 +80,15 @@
 - Quyết định: `DELETE /api/attendance/:id` chỉ đặt `archivedAt`, tăng version và audit before/after.
 - Lý do: ngăn nhập trùng, giữ lịch sử chuyển cơ sở, tránh diễn giải lại doanh số khi config đổi và tuân thủ no-hard-delete.
 
-## ADR-009 — Autosave optimistic concurrency
+## ADR-009 — Lưu thủ công và optimistic concurrency
 
 - Trạng thái: Accepted
-- Quyết định: update/archive phải gửi version; update dùng compare-and-increment trong transaction. Conflict trả HTTP 409 kèm DTO `current` đã authorize để UI tải lại hoặc ghép thay đổi.
-- Lý do: bảng tháng có nhiều người nhập đồng thời; last-write-wins sẽ làm mất dữ liệu mà không cảnh báo.
+- Quyết định: màn `/attendance` giữ thay đổi ở client và chỉ gửi mutation khi người dùng bấm
+  `Lưu thay đổi`. Update/archive phải gửi version; update dùng compare-and-increment trong
+  transaction. Conflict trả HTTP 409 kèm DTO `current` đã authorize để UI tải lại hoặc ghép
+  thay đổi.
+- Lý do: lưu thủ công giúp người nhập kiểm tra nhiều dòng trước khi ghi; optimistic concurrency
+  vẫn ngăn last-write-wins làm mất dữ liệu khi có nhiều người cùng thao tác.
 
 ## ADR-010 — Evidence private S3 và presigned URL ngắn hạn
 

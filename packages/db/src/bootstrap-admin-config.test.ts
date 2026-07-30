@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
   readBootstrapAdminConfig,
+  shouldWriteBootstrapPassword,
 } from "./bootstrap-admin-config.js";
 
 describe("readBootstrapAdminConfig", () => {
@@ -10,51 +10,45 @@ describe("readBootstrapAdminConfig", () => {
     expect(readBootstrapAdminConfig({})).toEqual({ enabled: false });
   });
 
-  it("auto-enables on Railway with a first-login default password", () => {
+  it("does not auto-enable on Railway", () => {
     expect(
       readBootstrapAdminConfig({
         RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
-      }),
-    ).toMatchObject({
-      enabled: true,
-      adminUsername: "admin",
-      adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
-      resetPassword: false,
-    });
-  });
-
-  it("allows explicitly disabling Railway bootstrap after the first deploy", () => {
-    expect(
-      readBootstrapAdminConfig({
-        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
-        BOOTSTRAP_ADMIN_DISABLED: "true",
       }),
     ).toEqual({ enabled: false });
   });
 
-  it("ignores imported placeholder passwords on Railway", () => {
+  it("honors BOOTSTRAP_ADMIN_ENABLED=false on Railway", () => {
     expect(
       readBootstrapAdminConfig({
         RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
         BOOTSTRAP_ADMIN_ENABLED: "false",
-        BOOTSTRAP_ADMIN_PASSWORD: "<strong-temporary-password>",
       }),
-    ).toMatchObject({
-      enabled: true,
-      adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
-      resetPassword: false,
-    });
+    ).toEqual({ enabled: false });
+  });
+
+  it("lets the disabled flag override an explicit enable", () => {
+    expect(
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_ENABLED: "true",
+        BOOTSTRAP_ADMIN_DISABLED: "TRUE",
+        BOOTSTRAP_ADMIN_PASSWORD: "Temporary-Password-123!",
+      }),
+    ).toEqual({ enabled: false });
   });
 
   it("can reset the bootstrap admin password with an explicit recovery flag", () => {
     expect(
       readBootstrapAdminConfig({
         RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_ENABLED: "true",
+        BOOTSTRAP_ADMIN_PASSWORD: "Recovery-Password-123!",
         BOOTSTRAP_ADMIN_RESET_PASSWORD: "true",
       }),
     ).toMatchObject({
       enabled: true,
-      adminPassword: DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
+      adminPassword: "Recovery-Password-123!",
       resetPassword: true,
     });
   });
@@ -63,6 +57,7 @@ describe("readBootstrapAdminConfig", () => {
     expect(
       readBootstrapAdminConfig({
         RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_ENABLED: "true",
         BOOTSTRAP_ADMIN_PASSWORD: "My-New-Admin-Password-123!",
       }),
     ).toMatchObject({
@@ -72,13 +67,22 @@ describe("readBootstrapAdminConfig", () => {
     });
   });
 
-  it("requires a strong temporary password", () => {
+  it("requires a strong bootstrap password", () => {
     expect(() =>
       readBootstrapAdminConfig({
         BOOTSTRAP_ADMIN_ENABLED: "true",
         BOOTSTRAP_ADMIN_PASSWORD: "short",
       }),
     ).toThrow("at least 12 characters");
+  });
+
+  it("requires an explicit password when bootstrap is enabled", () => {
+    expect(() =>
+      readBootstrapAdminConfig({
+        RAILWAY_PUBLIC_DOMAIN: "ald-workforce-production.up.railway.app",
+        BOOTSTRAP_ADMIN_ENABLED: "true",
+      }),
+    ).toThrow("BOOTSTRAP_ADMIN_PASSWORD is required");
   });
 
   it("normalizes identifiers and applies safe defaults", () => {
@@ -101,5 +105,20 @@ describe("readBootstrapAdminConfig", () => {
       adminEmail: "admin@ald.local",
       adminUsername: "admin",
     });
+  });
+});
+
+describe("shouldWriteBootstrapPassword", () => {
+  it("preserves an existing nonempty credential unless reset is explicit", () => {
+    expect(shouldWriteBootstrapPassword("existing-password-hash", false)).toBe(false);
+  });
+
+  it("replaces an existing credential for an explicit recovery reset", () => {
+    expect(shouldWriteBootstrapPassword("existing-password-hash", true)).toBe(true);
+  });
+
+  it("repairs a missing or empty credential without requiring reset", () => {
+    expect(shouldWriteBootstrapPassword(null, false)).toBe(true);
+    expect(shouldWriteBootstrapPassword("", false)).toBe(true);
   });
 });

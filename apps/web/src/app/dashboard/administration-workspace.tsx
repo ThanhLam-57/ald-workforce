@@ -444,7 +444,7 @@ function CreateForm({
       },
       users: {
         path: "/api/users",
-        success: "Đã cấp tài khoản và bật yêu cầu đổi mật khẩu.",
+        success: "Đã cấp tài khoản.",
         body: {
           email: field(form, "email"),
           username: field(form, "username"),
@@ -574,7 +574,7 @@ function CreateForm({
               <input name="username" required />
             </FormField>
           </div>
-          <FormField label="Mật khẩu tạm">
+          <FormField label="Mật khẩu đăng nhập">
             <input
               autoComplete="new-password"
               minLength={12}
@@ -606,9 +606,6 @@ function CreateForm({
             <input name="canManagePayroll" type="checkbox" />
             Được phép quản lý Payroll toàn công ty
           </label>
-          <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">
-            Tài khoản mới phải đổi mật khẩu ngay lần đăng nhập đầu tiên.
-          </p>
         </>
       ) : null}
 
@@ -2415,7 +2412,6 @@ function UserRows({
             <th className="px-4 py-3">Nhân viên liên kết</th>
             <th className="px-4 py-3">Payroll</th>
             <th className="px-4 py-3">Trạng thái</th>
-            <th className="px-4 py-3">Mật khẩu tạm</th>
             <th className="px-4 py-3">Thao tác</th>
           </tr>
         </thead>
@@ -2441,7 +2437,6 @@ function UserRows({
                   {item.active ? "Hoạt động" : "Vô hiệu hóa"}
                 </Badge>
               </td>
-              <td className="px-4 py-4">{item.mustChangePassword ? "Bắt buộc đổi" : "Đã đổi"}</td>
               <td className="px-4 py-4">
                 <div className="flex min-w-max gap-2">
                   <ActionButton onClick={() => onAction({ kind: "user-edit", item })}>

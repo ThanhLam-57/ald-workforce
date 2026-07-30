@@ -32,7 +32,8 @@ Exit:
 Đã hoàn thành trong Prompt 1:
 
 - Attendance day/live metric schema, unique staff/date, check constraints và archive.
-- Hồ sơ ngày + lưới tháng dùng chung endpoint, autosave, 409 reload/merge và keyboard navigation.
+- Hồ sơ ngày + lưới tháng dùng chung endpoint, lưu thủ công theo lô, 409 reload/merge và
+  keyboard navigation.
 - Employee error report skeleton không query/serialize revenue.
 - Integration/E2E branch scope, GM/TM permission, timezone và optimistic concurrency.
 

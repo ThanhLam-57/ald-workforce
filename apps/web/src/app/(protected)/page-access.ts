@@ -6,7 +6,6 @@ import { getOptionalActor } from "@/server/auth-context";
 export async function requirePageActor(allowedRoles: readonly AuthRole[]): Promise<ActorContext> {
   const actor = await getOptionalActor();
   if (!actor) redirect("/login");
-  if (actor.mustChangePassword) redirect("/change-password");
   if (!allowedRoles.includes(actor.role)) redirect("/forbidden");
   return actor;
 }

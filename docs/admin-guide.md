@@ -4,8 +4,8 @@
 
 1. Tạo branch và hồ sơ staff.
 2. Gán manager vào đúng branch với effective date.
-3. Tạo account từ màn hình quản trị; gửi username và mật khẩu tạm qua hai kênh tách biệt.
-4. Yêu cầu người dùng đổi mật khẩu ở lần đăng nhập đầu.
+3. Tạo account từ màn hình quản trị; gửi username và mật khẩu đăng nhập qua hai kênh tách biệt.
+4. Khuyến nghị người dùng chủ động đổi mật khẩu trong mục **Bảo mật tài khoản**.
 5. GM bật TOTP 2FA trong mục **Bảo mật tài khoản** và lưu backup codes ngoại tuyến.
 
 Không dùng chung account, không gửi password qua audit note và không tạo account trực tiếp

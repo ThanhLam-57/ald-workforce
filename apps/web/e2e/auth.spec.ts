@@ -18,7 +18,7 @@ test("không cho tự đăng ký tài khoản", async ({ request }) => {
   expect([403, 404]).toContain(response.status());
 });
 
-test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", async ({ page }) => {
+test("GM nhập attendance Live, chỉ lưu khi bấm nút và dùng bảng Full HD", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await page.goto("/attendance");
   const suffix = Date.now().toString(36);
@@ -62,6 +62,7 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
       staffId: staffPayload.data.id,
       branchId: branchPayload.data.id,
       assignmentType: "MEMBER",
+      attendanceMachineCode: `MC${suffix}`,
       effectiveFrom: businessDate,
       effectiveTo: null,
     },
@@ -80,10 +81,50 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
       attendanceMutationCount += 1;
     }
   });
+  const saveButton = page.getByRole("button", { name: "Lưu thay đổi" });
+  await expect(saveButton).toBeDisabled();
   await page.getByLabel(`Live thực tế ${businessDate}`).fill("02:00");
   await page.getByLabel(`Số công ${businessDate}`).fill("1");
   await page.getByLabel(`Doanh số (xu) ${businessDate}`).fill("500000");
-  await page.getByRole("button", { name: "Lưu thay đổi" }).click();
+  await expect(saveButton).toBeEnabled();
+  await expect(page.getByText("Còn 1 dòng chưa lưu.", { exact: true })).toBeVisible();
+  const violationButton = page.getByRole("button", {
+    name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
+  });
+  await expect(violationButton).toBeDisabled();
+
+  // Chờ lâu hơn debounce autosave cũ để chứng minh nhập liệu không tự gọi mutation.
+  await page.waitForTimeout(900);
+  expect(attendanceMutationCount).toBe(0);
+  let navigationWarning = "";
+  page.once("dialog", async (dialog) => {
+    navigationWarning = dialog.message();
+    await dialog.accept();
+  });
+  await page.getByRole("link", { name: "Nhân viên cơ sở" }).click();
+  expect(navigationWarning).toContain("Còn dữ liệu chấm công chưa lưu");
+  await expect(page).toHaveURL(/\/attendance$/);
+  const beforeManualSaveResponse = await page.request.get(
+    `/api/attendance?staffId=${staffPayload.data.id}&month=${month}`,
+  );
+  expect(beforeManualSaveResponse.ok()).toBe(true);
+  const beforeManualSavePayload = (await beforeManualSaveResponse.json()) as {
+    data: {
+      days: Array<{
+        businessDate: string;
+        attendance: null | {
+          workUnits: string;
+          actualLiveMinutes: number;
+          revenueAmount: string;
+        };
+      }>;
+    };
+  };
+  expect(
+    beforeManualSavePayload.data.days.find((day) => day.businessDate === businessDate)?.attendance,
+  ).toBeNull();
+
+  await saveButton.click();
 
   await expect
     .poll(async () => {
@@ -109,8 +150,35 @@ test("GM nhập attendance Live, lưu một lần và dùng bảng Full HD", asy
       actualLiveMinutes: 120,
       revenueAmount: "500000",
     });
+  await expect(saveButton).toBeDisabled();
+  await expect(violationButton).toBeEnabled();
+  await expect(page.getByText("Đã lưu 1 dòng.", { exact: true })).toBeVisible();
   await page.waitForTimeout(900);
   expect(attendanceMutationCount).toBe(1);
+
+  await page.getByLabel(`Doanh số (xu) ${businessDate}`).fill("600000");
+  await expect(saveButton).toBeEnabled();
+  await page.waitForTimeout(900);
+  expect(attendanceMutationCount).toBe(1);
+  await saveButton.click();
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(
+        `/api/attendance?staffId=${staffPayload.data.id}&month=${month}`,
+      );
+      const payload = (await response.json()) as {
+        data: {
+          days: Array<{
+            businessDate: string;
+            attendance: null | { revenueAmount: string };
+          }>;
+        };
+      };
+      return payload.data.days.find((day) => day.businessDate === businessDate)?.attendance
+        ?.revenueAmount;
+    })
+    .toBe("600000");
+  expect(attendanceMutationCount).toBe(2);
 
   const tableScroller = page.getByTestId("attendance-grid-scroll");
   await expect(tableScroller).toBeVisible();
@@ -187,23 +255,23 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
   };
 
   const branchResponse = await page.request.post("/api/branches", {
-      data: {
-        code: `P${suffix}`,
-        name: `Penalty E2E ${suffix}`,
-      },
-    });
+    data: {
+      code: `P${suffix}`,
+      name: `Penalty E2E ${suffix}`,
+    },
+  });
   expect(branchResponse.ok(), await branchResponse.text()).toBe(true);
   const branch = (await branchResponse.json()) as { data: { id: string } };
   const staffResponse = await page.request.post("/api/staff", {
-      data: {
-        staffCode: `P${suffix}`,
-        fullName: `Live Penalty ${suffix}`,
-        jobTitle: "Nhân viên Live",
-        employmentCategory: "OFFICIAL",
-        joinedDate: `${month}-01`,
-        officialDate: `${month}-01`,
-      },
-    });
+    data: {
+      staffCode: `P${suffix}`,
+      fullName: `Live Penalty ${suffix}`,
+      jobTitle: "Nhân viên Live",
+      employmentCategory: "OFFICIAL",
+      joinedDate: `${month}-01`,
+      officialDate: `${month}-01`,
+    },
+  });
   expect(staffResponse.ok(), await staffResponse.text()).toBe(true);
   const staff = (await staffResponse.json()) as { data: { id: string } };
   await page.request.post("/api/assignments", {

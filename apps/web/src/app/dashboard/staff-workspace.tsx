@@ -11,10 +11,7 @@ import {
   uploadStaffPrivateDocument,
   type StaffPrivateDocumentKind,
 } from "./private-document-upload";
-import {
-  apiErrorMessage,
-  staffProfileFieldErrorsFrom,
-} from "./staff-profile-field-errors";
+import { apiErrorMessage, staffProfileFieldErrorsFrom } from "./staff-profile-field-errors";
 import {
   StaffProfileFields,
   type StaffProfileEditorValues,
@@ -43,6 +40,12 @@ function businessToday(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
   }).format(new Date());
+}
+
+function displayBusinessDate(value: string | null): string | null {
+  if (!value) return null;
+  const [year, month, day] = value.split("-");
+  return year && month && day ? `${day}/${month}/${year}` : value;
 }
 
 function toMinutes(value: string): number | null {
@@ -197,7 +200,9 @@ export function StaffWorkspace({
     effectiveTo: "",
   });
   const [scheduleHistory, setScheduleHistory] = useState<readonly StaffWorkScheduleDto[]>([]);
-  const [terminationDate, setTerminationDate] = useState(businessToday());
+  const [showTerminationDialog, setShowTerminationDialog] = useState(false);
+  const [terminationDate, setTerminationDate] = useState("");
+  const [terminationError, setTerminationError] = useState<string | null>(null);
   const [createFiles, setCreateFiles] = useState<Partial<Record<UploadKind, File>>>({});
   const [uploadStates, setUploadStates] = useState<Readonly<Record<string, UploadState>>>({});
   const [pending, setPending] = useState(false);
@@ -232,10 +237,13 @@ export function StaffWorkspace({
     });
   }
 
-  async function reloadStaff(selectId?: string): Promise<void> {
-    const response = await fetch(`/api/staff/onboard${showInactive ? "?includeInactive=1" : ""}`, {
-      cache: "no-store",
-    });
+  async function reloadStaff(selectId?: string, includeInactive = showInactive): Promise<void> {
+    const response = await fetch(
+      `/api/staff/onboard${includeInactive ? "?includeInactive=1" : ""}`,
+      {
+        cache: "no-store",
+      },
+    );
     const payload = (await response.json()) as ApiEnvelope<readonly BranchStaffDto[]>;
     if (!response.ok || !payload.data) {
       throw new Error(messageFrom(payload, "Không thể tải lại danh sách nhân viên."));
@@ -274,9 +282,27 @@ export function StaffWorkspace({
   }
 
   async function terminateSelected(): Promise<void> {
-    if (!selected || !capabilities.canTerminateStaff) return;
+    if (
+      !selected ||
+      !capabilities.canTerminateStaff ||
+      selected.employmentStatus === "TERMINATED"
+    ) {
+      return;
+    }
+    if (!terminationDate) {
+      setTerminationError("Vui lòng chọn ngày nghỉ việc.");
+      return;
+    }
+    if (terminationDate > businessToday()) {
+      setTerminationError("Ngày nghỉ việc không được sau ngày hiện tại.");
+      return;
+    }
+    if (selected.joinedDate && terminationDate < selected.joinedDate) {
+      setTerminationError("Ngày nghỉ việc không được trước ngày gia nhập.");
+      return;
+    }
     setPending(true);
-    setError(null);
+    setTerminationError(null);
     try {
       const response = await fetch(`/api/staff/${encodeURIComponent(selected.id)}/terminate`, {
         method: "POST",
@@ -291,14 +317,39 @@ export function StaffWorkspace({
         throw new Error(messageFrom(payload, "Không thể cho nhân viên nghỉ việc."));
       }
       setMessage(`Đã ghi nhận ngày nghỉ việc của ${selected.fullName}.`);
-      setTerminationDate(businessToday());
-      closeDetails();
-      await reloadStaff();
+      setShowTerminationDialog(false);
+      setTerminationDate("");
+      setTerminationError(null);
+      setShowInactive(true);
+      setStatusFilter("ALL");
+      await reloadStaff(selected.id, true);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Không thể cho nhân viên nghỉ việc.");
+      setTerminationError(
+        caught instanceof Error ? caught.message : "Không thể cho nhân viên nghỉ việc.",
+      );
     } finally {
       setPending(false);
     }
+  }
+
+  function openTerminationDialog(): void {
+    if (
+      !selected ||
+      !capabilities.canTerminateStaff ||
+      selected.employmentStatus === "TERMINATED"
+    ) {
+      return;
+    }
+    setTerminationDate(businessToday());
+    setTerminationError(null);
+    setShowTerminationDialog(true);
+  }
+
+  function closeTerminationDialog(): void {
+    if (pending) return;
+    setShowTerminationDialog(false);
+    setTerminationDate("");
+    setTerminationError(null);
   }
 
   async function loadScheduleHistory(staffId: string): Promise<void> {
@@ -587,7 +638,9 @@ export function StaffWorkspace({
     setSelectedId(person.id);
     setEditing(false);
     setEditForm(profileForm(person));
-    setTerminationDate(person.terminationDate ?? businessToday());
+    setShowTerminationDialog(false);
+    setTerminationDate("");
+    setTerminationError(null);
     setUploadStates({});
     setError(null);
     setEditFieldErrors({});
@@ -609,6 +662,9 @@ export function StaffWorkspace({
     setSelectedId(null);
     setEditing(false);
     setEditForm(null);
+    setShowTerminationDialog(false);
+    setTerminationDate("");
+    setTerminationError(null);
     setError(null);
     setUploadStates({});
     setEditFieldErrors({});
@@ -902,10 +958,7 @@ export function StaffWorkspace({
                   }}
                 />
               ) : (
-                <ProfileReadOnly
-                  canViewSalary={capabilities.canViewSalary}
-                  person={selected}
-                />
+                <ProfileReadOnly canViewSalary={capabilities.canViewSalary} person={selected} />
               )}
 
               <div className="mt-5 grid gap-5 lg:grid-cols-2">
@@ -1132,33 +1185,117 @@ export function StaffWorkspace({
                 </section>
               </div>
 
-              {capabilities.canTerminateStaff && selected.employmentStatus !== "TERMINATED" ? (
+              {!editing &&
+              capabilities.canTerminateStaff &&
+              selected.employmentStatus !== "TERMINATED" ? (
                 <section className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-4">
                   <h3 className="font-semibold text-rose-900">Cho nhân viên nghỉ việc</h3>
                   <p className="mt-1 text-sm text-rose-800">
                     Dữ liệu lịch sử vẫn được giữ nguyên; thao tác này không xóa chấm công hay bảng
                     lương.
                   </p>
-                  <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
-                    <Field label="Ngày nghỉ việc">
-                      <input
-                        max={businessToday()}
-                        type="date"
-                        value={terminationDate}
-                        onChange={(event) => setTerminationDate(event.target.value)}
-                      />
-                    </Field>
+                  <div className="mt-3 flex justify-end">
                     <button
                       className="rounded-lg bg-rose-700 px-4 py-2 font-medium text-white hover:bg-rose-800 disabled:opacity-50"
                       disabled={pending}
                       type="button"
-                      onClick={() => void terminateSelected()}
+                      onClick={openTerminationDialog}
                     >
-                      Cho nghỉ việc
+                      Cho nhân viên nghỉ việc
                     </button>
                   </div>
                 </section>
               ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showTerminationDialog &&
+      selected &&
+      capabilities.canTerminateStaff &&
+      selected.employmentStatus !== "TERMINATED" ? (
+        <div
+          aria-describedby="terminate-staff-description"
+          aria-labelledby="terminate-staff-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4"
+          role="alertdialog"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2
+                  className="break-words text-xl font-semibold text-rose-900"
+                  id="terminate-staff-title"
+                >
+                  Xác nhận cho nhân viên nghỉ việc
+                </h2>
+                <p className="mt-1 break-words text-sm text-slate-600">
+                  {selected.fullName} · {selected.staffCode}
+                </p>
+              </div>
+              <button
+                aria-label="Đóng xác nhận nghỉ việc"
+                className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                disabled={pending}
+                type="button"
+                onClick={closeTerminationDialog}
+              >
+                Đóng
+              </button>
+            </div>
+
+            <div
+              className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900"
+              id="terminate-staff-description"
+            >
+              <p className="font-medium">Dữ liệu lịch sử vẫn được giữ nguyên.</p>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                <li>Chấm công và bảng lương đã có không bị xóa.</li>
+                <li>Phân công tương lai sẽ được đóng theo ngày nghỉ việc.</li>
+                <li>Tài khoản có thể bị vô hiệu hóa và các phiên đăng nhập bị thu hồi.</li>
+              </ul>
+            </div>
+
+            <div className="mt-4">
+              <Field label="Ngày nghỉ việc">
+                <input
+                  autoFocus
+                  max={businessToday()}
+                  min={selected.joinedDate ?? undefined}
+                  type="date"
+                  value={terminationDate}
+                  onChange={(event) => {
+                    setTerminationDate(event.target.value);
+                    setTerminationError(null);
+                  }}
+                />
+              </Field>
+              {terminationError ? (
+                <p className="mt-2 text-sm text-rose-700" role="alert">
+                  {terminationError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                className="rounded-lg border border-slate-300 px-4 py-2 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                disabled={pending}
+                type="button"
+                onClick={closeTerminationDialog}
+              >
+                Hủy
+              </button>
+              <button
+                className="rounded-lg bg-rose-700 px-4 py-2 font-medium text-white hover:bg-rose-800 disabled:opacity-50"
+                disabled={pending}
+                type="button"
+                onClick={() => void terminateSelected()}
+              >
+                {pending ? "Đang xử lý..." : "Xác nhận cho nghỉ việc"}
+              </button>
             </div>
           </div>
         </div>
@@ -1184,10 +1321,7 @@ function FormSections<T extends StaffProfileEditorValues & { branchId?: string }
   includeBranch?: boolean;
   onFieldChanged: (field: string) => void;
 }>) {
-  function changeProfileField(
-    field: keyof StaffProfileEditorValues,
-    value: string,
-  ): void {
+  function changeProfileField(field: keyof StaffProfileEditorValues, value: string): void {
     onFieldChanged(field);
     setForm((current) => ({ ...current, [field]: value }) as T);
   }
@@ -1242,9 +1376,11 @@ function ProfileReadOnly({
       <Info label="Ngày sinh" value={person.dateOfBirth} />
       <Info label="Vị trí công việc" value={person.jobTitle} />
       <Info label="Loại nhân sự" value={person.employmentCategory} />
-      <Info label="Ngày gia nhập" value={person.joinedDate} />
-      <Info label="Ngày chính thức" value={person.officialDate} />
-      <Info label="Ngày nghỉ việc" value={person.terminationDate} />
+      <Info label="Ngày gia nhập" value={displayBusinessDate(person.joinedDate)} />
+      <Info label="Ngày chính thức" value={displayBusinessDate(person.officialDate)} />
+      {person.employmentStatus === "TERMINATED" ? (
+        <Info label="Ngày nghỉ việc" value={displayBusinessDate(person.terminationDate)} />
+      ) : null}
       <Info label="Trạng thái" value={person.employmentStatus} />
       {canViewSalary && person.baseSalaryAmount !== undefined ? (
         <Info label="Lương cơ bản" value={formatMoney(person.baseSalaryAmount)} />

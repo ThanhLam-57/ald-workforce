@@ -13,17 +13,6 @@ export type BootstrapAdminConfig =
       resetPassword: boolean;
     };
 
-export const DEFAULT_BOOTSTRAP_ADMIN_PASSWORD = "ALD-Admin-123456!";
-
-function isRailwayRuntime(environment: NodeJS.ProcessEnv): boolean {
-  return Boolean(
-    environment.RAILWAY_PROJECT_ID ||
-      environment.RAILWAY_ENVIRONMENT_ID ||
-      environment.RAILWAY_SERVICE_ID ||
-      environment.RAILWAY_PUBLIC_DOMAIN,
-  );
-}
-
 function requiredValue(environment: NodeJS.ProcessEnv, key: string, fallback?: string): string {
   const candidate = environment[key]?.trim();
   const value =
@@ -34,37 +23,26 @@ function requiredValue(environment: NodeJS.ProcessEnv, key: string, fallback?: s
   return value;
 }
 
-function optionalValue(environment: NodeJS.ProcessEnv, key: string): string | undefined {
-  const candidate = environment[key]?.trim();
-  if (!candidate || candidate.includes("<") || candidate.includes(">")) {
-    return undefined;
-  }
-  return candidate;
-}
-
 function booleanValue(environment: NodeJS.ProcessEnv, key: string): boolean {
   const value = environment[key]?.trim().toLowerCase();
   return value === "true" || value === "1" || value === "yes" || value === "on";
 }
 
+export function shouldWriteBootstrapPassword(
+  existingPassword: string | null | undefined,
+  resetPassword: boolean,
+): boolean {
+  return resetPassword || !existingPassword;
+}
+
 export function readBootstrapAdminConfig(environment: NodeJS.ProcessEnv): BootstrapAdminConfig {
-  const enabled = environment.BOOTSTRAP_ADMIN_ENABLED?.trim().toLowerCase();
-  if (
-    environment.BOOTSTRAP_ADMIN_DISABLED === "true" ||
-    (enabled === "false" && !isRailwayRuntime(environment)) ||
-    (enabled !== "true" && !isRailwayRuntime(environment))
-  ) {
+  const enabled = booleanValue(environment, "BOOTSTRAP_ADMIN_ENABLED");
+  const disabled = booleanValue(environment, "BOOTSTRAP_ADMIN_DISABLED");
+  if (!enabled || disabled) {
     return { enabled: false };
   }
 
-  const explicitAdminPassword = optionalValue(environment, "BOOTSTRAP_ADMIN_PASSWORD");
-  const adminPassword =
-    explicitAdminPassword ??
-    requiredValue(
-      environment,
-      "BOOTSTRAP_ADMIN_PASSWORD",
-      isRailwayRuntime(environment) ? DEFAULT_BOOTSTRAP_ADMIN_PASSWORD : undefined,
-    );
+  const adminPassword = requiredValue(environment, "BOOTSTRAP_ADMIN_PASSWORD");
   if (adminPassword.length < 12) {
     throw new Error("BOOTSTRAP_ADMIN_PASSWORD must contain at least 12 characters.");
   }

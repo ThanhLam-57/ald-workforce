@@ -137,7 +137,6 @@ export class DomainError extends Error {
     public readonly code:
       | "AUTHENTICATION_REQUIRED"
       | "ACCOUNT_DISABLED"
-      | "PASSWORD_CHANGE_REQUIRED"
       | "RATE_LIMITED"
       | "FORBIDDEN"
       | "NOT_FOUND"

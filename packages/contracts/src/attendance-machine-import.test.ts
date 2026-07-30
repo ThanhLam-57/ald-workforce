@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { attendanceMachineImportCommitSchema, attendanceMachineImportPresignSchema } from "./index";
+import {
+  attendanceMachineImportCommitSchema,
+  attendanceMachineImportHistoryQuerySchema,
+  attendanceMachineImportPresignSchema,
+} from "./index";
 
 const validPresign = {
   staffId: "11111111-1111-4111-8111-111111111111",
   branchId: "22222222-2222-4222-8222-222222222222",
   month: "2026-07",
-  idempotencyKey: "attendance-machine-import-idempotency",
+  attemptId: "33333333-3333-4333-8333-333333333333",
+  idempotencyKey: "attendance-machine:33333333-3333-4333-8333-333333333333",
   originalFileName: "Nem-Chanh.xlsx",
   mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   sizeBytes: 1_024,
@@ -39,6 +44,15 @@ describe("attendance machine import contracts", () => {
     ).toBe(false);
   });
 
+  it("rejects an idempotency key that belongs to another attempt", () => {
+    expect(
+      attendanceMachineImportPresignSchema.safeParse({
+        ...validPresign,
+        idempotencyKey: "attendance-machine:44444444-4444-4444-8444-444444444444",
+      }).success,
+    ).toBe(false);
+  });
+
   it("requires explicit confirmation without a client-entered audit reason", () => {
     expect(
       attendanceMachineImportCommitSchema.safeParse({
@@ -48,6 +62,27 @@ describe("attendance machine import contracts", () => {
     expect(
       attendanceMachineImportCommitSchema.safeParse({
         confirm: false,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates the exact branch, staff and month history scope", () => {
+    expect(
+      attendanceMachineImportHistoryQuerySchema.parse({
+        branchId: validPresign.branchId,
+        staffId: validPresign.staffId,
+        month: validPresign.month,
+      }),
+    ).toEqual({
+      branchId: validPresign.branchId,
+      staffId: validPresign.staffId,
+      month: validPresign.month,
+    });
+    expect(
+      attendanceMachineImportHistoryQuerySchema.safeParse({
+        branchId: validPresign.branchId,
+        staffId: validPresign.staffId,
+        month: "2026-13",
       }).success,
     ).toBe(false);
   });

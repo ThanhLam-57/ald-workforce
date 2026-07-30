@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 export default async function LoginPage() {
   const actor = await getOptionalActor();
   if (actor) {
-    redirect(actor.mustChangePassword ? "/change-password" : "/dashboard");
+    redirect("/dashboard");
   }
 
   return (

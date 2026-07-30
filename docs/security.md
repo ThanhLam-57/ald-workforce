@@ -31,8 +31,9 @@ Response có session scope dùng `private, no-store`.
 - CSRF/origin check từ Better Auth và proxy same-origin cho mọi mutation `/api`.
 - Signup công khai bị tắt; chỉ GM có permission tạo account.
 - Password 12–128 ký tự, bắt buộc hoa/thường/số/ký tự đặc biệt, không khoảng trắng.
-- Account mới có `mustChangePassword`; mọi API nghiệp vụ trả
-  `PASSWORD_CHANGE_REQUIRED` cho đến khi đổi. Đổi password thu hồi session khác.
+- Account mới dùng ngay mật khẩu do GM cấp và không bị ép đổi ở lần đăng nhập đầu tiên.
+  Người dùng vẫn có thể chủ động đổi mật khẩu; thao tác này thu hồi các session khác.
+- GM phải chuyển mật khẩu khởi tạo qua kênh riêng và không lưu mật khẩu trong audit hoặc log.
 - Login, 2FA và mutation nhạy cảm dùng PostgreSQL-backed rate limit.
 - GM có thể bật TOTP 2FA; verification có account lockout và backup code.
 

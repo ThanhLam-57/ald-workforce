@@ -10,23 +10,21 @@ const privateObjectStorage = vi.hoisted(() => ({
 }));
 
 vi.mock("./object-storage", () => ({
-  createPrivateUploadUrl: vi.fn(async () => ({
-    url: "https://private-storage.test/upload",
-    expiresInSeconds: 300,
-    headers: {
-      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    },
-  })),
+  putPrivateObject: vi.fn(async (input: { body: Uint8Array }) => {
+    privateObjectStorage.bytes = Uint8Array.from(input.body);
+  }),
   verifyPrivateObject: vi.fn(async () => undefined),
   readPrivateObject: vi.fn(async () => privateObjectStorage.bytes),
 }));
 
 import {
   commitAttendanceMachineImport,
-  completeAttendanceMachineImportUpload,
+  listAttendanceMachineImportHistory,
   presignAttendanceMachineImportUpload,
   previewAttendanceMachineImport,
+  uploadAttendanceMachineImport,
 } from "./attendance-machine-import-service";
+import { putPrivateObject } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -36,6 +34,18 @@ const metadata: RequestMetadata = {
   ipAddress: "127.0.0.1",
   userAgent: "vitest-integration",
 };
+
+function attemptFields(): { attemptId: string; idempotencyKey: string } {
+  const attemptId = randomUUID();
+  return {
+    attemptId,
+    idempotencyKey: `attendance-machine:${attemptId}`,
+  };
+}
+
+function requestBody(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
 
 let companyId: string;
 let branchAId: string;
@@ -93,10 +103,10 @@ async function stageWorkbook(
   const presigned = await presignAttendanceMachineImportUpload(
     actor,
     {
+      ...attemptFields(),
       staffId: input.staffId,
       branchId: input.branchId,
       month: input.month,
-      idempotencyKey: `${input.label}-${runId}-${randomUUID()}`,
       originalFileName: `${input.label}.xlsx`,
       mimeType: XLSX_MIME,
       sizeBytes: input.bytes.byteLength,
@@ -104,7 +114,16 @@ async function stageWorkbook(
     },
     metadata,
   );
-  await completeAttendanceMachineImportUpload(actor, presigned.job.id, metadata);
+  await uploadAttendanceMachineImport(
+    actor,
+    presigned.job.id,
+    new Request("http://localhost/api/attendance/machine-imports/upload", {
+      method: "PUT",
+      headers: { "Content-Type": XLSX_MIME },
+      body: requestBody(input.bytes),
+    }),
+    metadata,
+  );
   const preview = await previewAttendanceMachineImport(actor, presigned.job.id, metadata);
   return { presigned, preview, checksumSha256 };
 }
@@ -926,10 +945,10 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       presignAttendanceMachineImportUpload(
         manager,
         {
+          ...attemptFields(),
           ...common,
           staffId: liveBId,
           branchId: branchBId,
-          idempotencyKey: `manager-cross-branch-${runId}`,
         },
         metadata,
       ),
@@ -942,10 +961,10 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
           staffId: liveAId,
         },
         {
+          ...attemptFields(),
           ...common,
           staffId: liveAId,
           branchId: branchAId,
-          idempotencyKey: `employee-denied-${runId}`,
         },
         metadata,
       ),
@@ -954,10 +973,10 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       presignAttendanceMachineImportUpload(
         manager,
         {
+          ...attemptFields(),
           ...common,
           staffId: managerStaffId,
           branchId: branchAId,
-          idempotencyKey: `manager-self-${runId}`,
         },
         metadata,
       ),
@@ -966,20 +985,20 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     const forA = await presignAttendanceMachineImportUpload(
       gm,
       {
+        ...attemptFields(),
         ...common,
         staffId: liveAId,
         branchId: branchAId,
-        idempotencyKey: `scope-a-${runId}`,
       },
       metadata,
     );
     const forB = await presignAttendanceMachineImportUpload(
       gm,
       {
+        ...attemptFields(),
         ...common,
         staffId: liveBId,
         branchId: branchBId,
-        idempotencyKey: `scope-b-${runId}`,
       },
       metadata,
     );
@@ -995,6 +1014,356 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
         },
       }),
     ).toBe(2);
+  });
+
+  it("chặn checksum sai và XLSX không parse được trước khi ghi object", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "29/07/2026",
+        checkInTime: "09:00",
+        checkOutTime: "17:00",
+      },
+    ]);
+    const checksumSha256 = createHash("sha256").update(bytes).digest("base64");
+    const request = {
+      ...attemptFields(),
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      originalFileName: "checksum.xlsx",
+      mimeType: XLSX_MIME,
+      sizeBytes: bytes.byteLength,
+      checksumSha256,
+    } as const;
+    const job = await presignAttendanceMachineImportUpload(manager, request, metadata);
+    const changed = Uint8Array.from(bytes);
+    changed[changed.length - 1] = (changed.at(-1)! + 1) % 256;
+    vi.mocked(putPrivateObject).mockClear();
+
+    await expect(
+      uploadAttendanceMachineImport(
+        manager,
+        job.job.id,
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: { "Content-Type": XLSX_MIME },
+          body: requestBody(changed),
+        }),
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      details: { code: "IMPORT_CHECKSUM_MISMATCH" },
+    });
+    expect(putPrivateObject).not.toHaveBeenCalled();
+
+    const invalidBytes = Uint8Array.from([1, 2, 3, 4, 5, 6]);
+    const invalidJob = await presignAttendanceMachineImportUpload(
+      manager,
+      {
+        ...attemptFields(),
+        staffId: liveAId,
+        branchId: branchAId,
+        month: "2026-07",
+        originalFileName: "invalid.xlsx",
+        mimeType: XLSX_MIME,
+        sizeBytes: invalidBytes.byteLength,
+        checksumSha256: createHash("sha256").update(invalidBytes).digest("base64"),
+      },
+      metadata,
+    );
+    await expect(
+      uploadAttendanceMachineImport(
+        manager,
+        invalidJob.job.id,
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: { "Content-Type": XLSX_MIME },
+          body: requestBody(invalidBytes),
+        }),
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(putPrivateObject).not.toHaveBeenCalled();
+  });
+
+  it("keeps a storage upload failure pending and retries the same attempt successfully", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "17/07/2026",
+        checkInTime: "09:00",
+        checkOutTime: "17:00",
+      },
+    ]);
+    const input = {
+      ...attemptFields(),
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      originalFileName: "storage-retry.xlsx",
+      mimeType: XLSX_MIME,
+      sizeBytes: bytes.byteLength,
+      checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+    } as const;
+    const first = await presignAttendanceMachineImportUpload(manager, input, metadata);
+    vi.mocked(putPrivateObject).mockRejectedValueOnce(new Error("temporary storage outage"));
+
+    await expect(
+      uploadAttendanceMachineImport(
+        manager,
+        first.job.id,
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: { "Content-Type": XLSX_MIME },
+          body: requestBody(bytes),
+        }),
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      details: { code: "IMPORT_UPLOAD_FAILED" },
+    });
+    await expect(
+      prisma.importJob.findUniqueOrThrow({
+        where: { id: first.job.id },
+        select: { status: true },
+      }),
+    ).resolves.toEqual({ status: "PENDING_UPLOAD" });
+
+    const sameAttempt = await presignAttendanceMachineImportUpload(manager, input, metadata);
+    expect(sameAttempt).toMatchObject({
+      duplicate: true,
+      job: { id: first.job.id, status: "PENDING_UPLOAD" },
+    });
+
+    const uploaded = await uploadAttendanceMachineImport(
+      manager,
+      first.job.id,
+      new Request("http://localhost/upload", {
+        method: "PUT",
+        headers: { "Content-Type": XLSX_MIME },
+        body: requestBody(bytes),
+      }),
+      metadata,
+    );
+    expect(uploaded).toMatchObject({ id: first.job.id, status: "UPLOADED" });
+    expect(
+      await prisma.importJob.count({
+        where: {
+          companyId,
+          idempotencyKey: input.idempotencyKey,
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it("cho phép người có quyền tạo attempt mới cùng file và supersede preview cũ sau commit", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "29/07/2026",
+        checkInTime: "09:05",
+        checkOutTime: "17:05",
+      },
+    ]);
+    const attemptA = await stageWorkbook(manager, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes,
+      label: "same-file-attempt-a",
+    });
+    const attemptB = await stageWorkbook(gm, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes,
+      label: "same-file-attempt-b",
+    });
+
+    expect(attemptA.presigned.job.id).not.toBe(attemptB.presigned.job.id);
+    expect(attemptA.preview.summary.createRows).toBe(1);
+    expect(attemptB.preview.summary.createRows).toBe(1);
+
+    const jobsBeforeCommit = await prisma.importJob.findMany({
+      where: { id: { in: [attemptA.presigned.job.id, attemptB.presigned.job.id] } },
+      select: {
+        requestedByUserId: true,
+        objectKey: true,
+      },
+    });
+    expect(new Set(jobsBeforeCommit.map((item) => item.requestedByUserId))).toEqual(
+      new Set([manager.userId, gm.userId]),
+    );
+    expect(new Set(jobsBeforeCommit.map((item) => item.objectKey)).size).toBe(2);
+
+    await commitAttendanceMachineImport(gm, attemptB.presigned.job.id, { confirm: true }, metadata);
+
+    await expect(
+      commitAttendanceMachineImport(
+        manager,
+        attemptA.presigned.job.id,
+        { confirm: true },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      details: { code: "IMPORT_PREVIEW_STALE" },
+    });
+    expect(
+      await prisma.importJob.findUniqueOrThrow({ where: { id: attemptA.presigned.job.id } }),
+    ).toMatchObject({
+      status: "SUPERSEDED",
+      requestedByUserId: manager.userId,
+      committedAt: null,
+    });
+    expect(
+      await prisma.importJob.findUniqueOrThrow({ where: { id: attemptB.presigned.job.id } }),
+    ).toMatchObject({
+      status: "SUCCEEDED",
+      requestedByUserId: gm.userId,
+    });
+  });
+
+  it("job PENDING hoặc UPLOADED bị bỏ dở không chặn người có quyền khác", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "30/07/2026",
+        checkInTime: "09:10",
+        checkOutTime: "17:10",
+      },
+    ]);
+    const checksumSha256 = createHash("sha256").update(bytes).digest("base64");
+    const base = {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      originalFileName: "abandoned.xlsx",
+      mimeType: XLSX_MIME,
+      sizeBytes: bytes.byteLength,
+      checksumSha256,
+    } as const;
+    const pendingInput = { ...attemptFields(), ...base };
+    const pending = await presignAttendanceMachineImportUpload(manager, pendingInput, metadata);
+    const sameAttemptRetry = await presignAttendanceMachineImportUpload(
+      manager,
+      pendingInput,
+      metadata,
+    );
+    expect(sameAttemptRetry.job.id).toBe(pending.job.id);
+    expect(sameAttemptRetry.duplicate).toBe(true);
+
+    await expect(
+      uploadAttendanceMachineImport(
+        gm,
+        pending.job.id,
+        new Request("http://localhost/upload", {
+          method: "PUT",
+          headers: { "Content-Type": XLSX_MIME },
+          body: requestBody(bytes),
+        }),
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const uploadedInput = { ...attemptFields(), ...base };
+    const uploaded = await presignAttendanceMachineImportUpload(manager, uploadedInput, metadata);
+    const uploadedDto = await uploadAttendanceMachineImport(
+      manager,
+      uploaded.job.id,
+      new Request("http://localhost/upload", {
+        method: "PUT",
+        headers: { "Content-Type": XLSX_MIME },
+        body: requestBody(bytes),
+      }),
+      metadata,
+    );
+    expect(uploadedDto.status).toBe("UPLOADED");
+    expect(uploadedDto).not.toHaveProperty("objectKey");
+    expect(uploadedDto).not.toHaveProperty("checksumSha256");
+    expect(uploadedDto).not.toHaveProperty("upload");
+
+    const replacement = await stageWorkbook(gm, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes,
+      label: "replacement-after-abandoned",
+    });
+    await commitAttendanceMachineImport(
+      gm,
+      replacement.presigned.job.id,
+      { confirm: true },
+      metadata,
+    );
+
+    expect(
+      await prisma.importJob.findUniqueOrThrow({ where: { id: pending.job.id } }),
+    ).toMatchObject({ status: "PENDING_UPLOAD", requestedByUserId: manager.userId });
+    expect(
+      await prisma.importJob.findUniqueOrThrow({ where: { id: uploaded.job.id } }),
+    ).toMatchObject({ status: "UPLOADED", requestedByUserId: manager.userId });
+  });
+
+  it("hai commit đồng thời chỉ có một lượt thắng và lượt còn lại nhận preview stale", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "31/07/2026",
+        checkInTime: "09:15",
+        checkOutTime: "17:15",
+      },
+    ]);
+    const [attemptA, attemptB] = await Promise.all([
+      stageWorkbook(manager, {
+        staffId: liveAId,
+        branchId: branchAId,
+        month: "2026-07",
+        bytes,
+        label: "concurrent-a",
+      }),
+      stageWorkbook(gm, {
+        staffId: liveAId,
+        branchId: branchAId,
+        month: "2026-07",
+        bytes,
+        label: "concurrent-b",
+      }),
+    ]);
+    const jobIds = [attemptA.presigned.job.id, attemptB.presigned.job.id];
+    const results = await Promise.allSettled([
+      commitAttendanceMachineImport(manager, jobIds[0]!, { confirm: true }, metadata),
+      commitAttendanceMachineImport(gm, jobIds[1]!, { confirm: true }, metadata),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(rejected?.reason).toMatchObject({
+      code: "CONFLICT",
+      details: { code: "IMPORT_PREVIEW_STALE" },
+    });
+    expect(
+      await prisma.attendanceDay.count({
+        where: {
+          companyId,
+          staffId: liveAId,
+          businessDate: new Date("2026-07-31T00:00:00.000Z"),
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          companyId,
+          entityId: { in: jobIds },
+          action: "ATTENDANCE_MACHINE_IMPORT_COMMIT",
+        },
+      }),
+    ).toBe(1);
   });
 
   it("không cho commit khi không có dòng khớp hoặc khi mã và ngày bị trùng", async () => {
@@ -1075,5 +1444,230 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
         },
       }),
     ).toBe(0);
+  });
+
+  it("keeps FAILED attempts terminal so cleanup cannot race with object reuse", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "30/07/2026",
+        checkInTime: "09:00",
+        checkOutTime: "17:00",
+      },
+    ]);
+    const baseInput = {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      originalFileName: "failed-terminal.xlsx",
+      mimeType: XLSX_MIME,
+      sizeBytes: bytes.byteLength,
+      checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+    } as const;
+    const firstInput = { ...attemptFields(), ...baseInput };
+    const first = await presignAttendanceMachineImportUpload(manager, firstInput, metadata);
+    await prisma.importJob.update({
+      where: { id: first.job.id },
+      data: { status: "FAILED", expiresAt: new Date() },
+    });
+
+    await expect(
+      presignAttendanceMachineImportUpload(manager, firstInput, metadata),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      details: { code: "IMPORT_ATTEMPT_FAILED" },
+    });
+
+    const replacement = await presignAttendanceMachineImportUpload(
+      manager,
+      { ...attemptFields(), ...baseInput },
+      metadata,
+    );
+    expect(replacement.job.id).not.toBe(first.job.id);
+    await expect(
+      prisma.importJob.findUniqueOrThrow({
+        where: { id: first.job.id },
+        select: { status: true, requestedByUserId: true },
+      }),
+    ).resolves.toEqual({ status: "FAILED", requestedByUserId: manager.userId });
+  });
+
+  it("serializes the whole staff/month scope when previews change different days", async () => {
+    const [bytesA, bytesB] = await Promise.all([
+      workbookBytes([
+        {
+          machineCode: "00123",
+          businessDate: "18/07/2026",
+          checkInTime: "09:05",
+          checkOutTime: "17:05",
+        },
+      ]),
+      workbookBytes([
+        {
+          machineCode: "00123",
+          businessDate: "19/07/2026",
+          checkInTime: "09:10",
+          checkOutTime: "17:10",
+        },
+      ]),
+    ]);
+    const attemptA = await stageWorkbook(manager, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes: bytesA,
+      label: "scope-lock-a",
+    });
+    const attemptB = await stageWorkbook(gm, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes: bytesB,
+      label: "scope-lock-b",
+    });
+    expect(attemptA.preview.rows.map((row) => row.businessDate)).toEqual(["2026-07-18"]);
+    expect(attemptB.preview.rows.map((row) => row.businessDate)).toEqual(["2026-07-19"]);
+    const jobIds = [attemptA.presigned.job.id, attemptB.presigned.job.id];
+
+    const results = await Promise.allSettled([
+      commitAttendanceMachineImport(manager, jobIds[0]!, { confirm: true }, metadata),
+      commitAttendanceMachineImport(gm, jobIds[1]!, { confirm: true }, metadata),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(rejected?.reason).toMatchObject({
+      code: "CONFLICT",
+      details: { code: "IMPORT_PREVIEW_STALE" },
+    });
+    expect(
+      await prisma.attendanceDay.count({
+        where: {
+          companyId,
+          staffId: liveAId,
+          businessDate: {
+            in: [new Date("2026-07-18T00:00:00.000Z"), new Date("2026-07-19T00:00:00.000Z")],
+          },
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          companyId,
+          entityId: { in: jobIds },
+          action: "ATTENDANCE_MACHINE_IMPORT_COMMIT",
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it("lists safe scoped history without transferring job ownership", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "15/06/2026",
+        checkInTime: "09:00",
+        checkOutTime: "17:00",
+      },
+    ]);
+    const checksumSha256 = createHash("sha256").update(bytes).digest("base64");
+    const common = {
+      month: "2026-06",
+      originalFileName: "history.xlsx",
+      mimeType: XLSX_MIME,
+      sizeBytes: bytes.byteLength,
+      checksumSha256,
+    } as const;
+    const managerJob = await presignAttendanceMachineImportUpload(
+      manager,
+      {
+        ...attemptFields(),
+        ...common,
+        staffId: liveAId,
+        branchId: branchAId,
+      },
+      metadata,
+    );
+    const gmJob = await presignAttendanceMachineImportUpload(
+      gm,
+      {
+        ...attemptFields(),
+        ...common,
+        staffId: liveAId,
+        branchId: branchAId,
+      },
+      metadata,
+    );
+    await presignAttendanceMachineImportUpload(
+      gm,
+      {
+        ...attemptFields(),
+        ...common,
+        staffId: liveBId,
+        branchId: branchBId,
+      },
+      metadata,
+    );
+
+    const archivedAssignment = await prisma.branchAssignment.updateMany({
+      where: {
+        companyId,
+        branchId: branchAId,
+        staffId: liveAId,
+        assignmentType: "MEMBER",
+      },
+      data: {
+        attendanceMachineCode: null,
+        archivedAt: new Date(),
+      },
+    });
+    expect(archivedAssignment.count).toBe(1);
+
+    const managerHistory = await listAttendanceMachineImportHistory(manager, {
+      branchId: branchAId,
+      staffId: liveAId,
+      month: "2026-06",
+    });
+    expect(managerHistory).toHaveLength(2);
+    expect(managerHistory.find((item) => item.id === managerJob.job.id)).toMatchObject({
+      ownedByCurrentUser: true,
+    });
+    expect(managerHistory.find((item) => item.id === gmJob.job.id)).toMatchObject({
+      ownedByCurrentUser: false,
+    });
+    expect(managerHistory[0]).not.toHaveProperty("objectKey");
+    expect(managerHistory[0]).not.toHaveProperty("checksumSha256");
+    expect(managerHistory[0]).not.toHaveProperty("requestedByUserId");
+
+    await expect(
+      listAttendanceMachineImportHistory(manager, {
+        branchId: branchBId,
+        staffId: liveBId,
+        month: "2026-06",
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      listAttendanceMachineImportHistory(manager, {
+        branchId: branchAId,
+        staffId: managerStaffId,
+        month: "2026-06",
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      listAttendanceMachineImportHistory(gm, {
+        branchId: branchBId,
+        staffId: liveBId,
+        month: "2026-06",
+      }),
+    ).resolves.toHaveLength(1);
+
+    await expect(
+      prisma.importJob.findUniqueOrThrow({
+        where: { id: managerJob.job.id },
+        select: { requestedByUserId: true },
+      }),
+    ).resolves.toEqual({ requestedByUserId: manager.userId });
   });
 });

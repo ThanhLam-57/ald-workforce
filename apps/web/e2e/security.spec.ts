@@ -27,7 +27,9 @@ test("proxy chặn mutation cross-site trước application service", async ({ r
   });
 });
 
-test("tài khoản do GM tạo bị buộc đổi mật khẩu trước khi dùng API", async ({ page }) => {
+test("tài khoản do GM tạo dùng được hệ thống và vẫn có thể đổi mật khẩu thủ công", async ({
+  page,
+}) => {
   const suffix = Date.now().toString(36);
   const username = `forced_${suffix}`;
   const password = "Temporary-Password-123!";
@@ -49,12 +51,11 @@ test("tài khoản do GM tạo bị buộc đổi mật khẩu trước khi dùn
   });
   expect(login.ok()).toBe(true);
   const apiResponse = await page.request.get("/api/me");
-  expect(apiResponse.status()).toBe(403);
-  await expect(apiResponse.json()).resolves.toMatchObject({
-    error: { code: "PASSWORD_CHANGE_REQUIRED" },
-  });
+  expect(apiResponse.ok()).toBe(true);
   await page.goto("/dashboard");
-  await expect(page).toHaveURL(/\/change-password$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await page.goto("/change-password");
+  await expect(page).toHaveURL(/\/settings\/security$/);
   await page.getByLabel("Mật khẩu hiện tại").fill(password);
   await page.getByLabel("Mật khẩu mới", { exact: true }).fill("Changed-Password-456!");
   await page.getByLabel("Nhập lại mật khẩu mới").fill("Changed-Password-456!");

@@ -72,6 +72,7 @@ service `web`:
 
 ```text
 BOOTSTRAP_ADMIN_ENABLED=true
+BOOTSTRAP_ADMIN_DISABLED=false
 BOOTSTRAP_COMPANY_NAME=ALD
 BOOTSTRAP_COMPANY_SLUG=ald
 BOOTSTRAP_REVENUE_UNIT=COIN
@@ -79,17 +80,22 @@ BOOTSTRAP_ADMIN_STAFF_CODE=GM001
 BOOTSTRAP_ADMIN_NAME=Tổng quản lý
 BOOTSTRAP_ADMIN_EMAIL=admin@ald.local
 BOOTSTRAP_ADMIN_USERNAME=admin
-BOOTSTRAP_ADMIN_PASSWORD=<strong-temporary-password>
+BOOTSTRAP_ADMIN_PASSWORD=<strong-bootstrap-password>
 ```
 
 Pre-deploy command chạy migration rồi tạo duy nhất công ty, hồ sơ GM và tài khoản admin.
 Lệnh này không tạo cơ sở, nhân viên, rule, attendance hoặc payroll demo. Sau khi deployment
 đầu tiên thành công:
 
-1. Đặt `BOOTSTRAP_ADMIN_ENABLED=false`.
-2. Redeploy service `web`.
-3. Đăng nhập bằng mật khẩu tạm, đổi mật khẩu ngay và bật 2FA.
-4. Xóa `BOOTSTRAP_ADMIN_PASSWORD` khỏi Railway Variables sau khi xác nhận đăng nhập được.
+1. Đăng nhập bằng mật khẩu khởi tạo, chủ động đổi sang mật khẩu riêng và bật 2FA.
+2. Đặt `BOOTSTRAP_ADMIN_ENABLED=false`, `BOOTSTRAP_ADMIN_DISABLED=true` và
+   `BOOTSTRAP_ADMIN_RESET_PASSWORD=false`.
+3. Xóa `BOOTSTRAP_ADMIN_PASSWORD` khỏi Railway Variables.
+4. Redeploy service `web` và xác nhận log có `Admin bootstrap skipped.`.
+
+Hệ thống không ép đổi mật khẩu ở lần đăng nhập đầu tiên. Khi cần khôi phục admin, chỉ bật
+`BOOTSTRAP_ADMIN_ENABLED=true` và `BOOTSTRAP_ADMIN_RESET_PASSWORD=true` trong đúng một lần
+deploy, sau đó tắt lại theo các bước trên.
 
 ## Trình tự release
 

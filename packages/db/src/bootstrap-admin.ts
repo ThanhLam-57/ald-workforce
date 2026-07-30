@@ -1,7 +1,10 @@
 import { hashPassword } from "better-auth/crypto";
 import { pathToFileURL } from "node:url";
 
-import { readBootstrapAdminConfig } from "./bootstrap-admin-config.js";
+import {
+  readBootstrapAdminConfig,
+  shouldWriteBootstrapPassword,
+} from "./bootstrap-admin-config.js";
 import { prisma } from "./client.js";
 
 export async function bootstrapAdmin(): Promise<void> {
@@ -52,7 +55,7 @@ export async function bootstrapAdmin(): Promise<void> {
       where: {
         OR: [{ email: config.adminEmail }, { username: config.adminUsername }],
       },
-      select: { id: true, companyId: true, mustChangePassword: true, passwordChangedAt: true },
+      select: { id: true, companyId: true },
     });
     const uniqueUserIds = new Set(users.map((user) => user.id));
     if (uniqueUserIds.size > 1) {
@@ -63,9 +66,18 @@ export async function bootstrapAdmin(): Promise<void> {
     if (existingUser && existingUser.companyId !== company.id) {
       throw new Error("Bootstrap administrator belongs to another company.");
     }
-    const shouldResetPassword =
-      config.resetPassword ||
-      Boolean(existingUser?.mustChangePassword && !existingUser.passwordChangedAt);
+
+    const existingCredential = existingUser
+      ? await transaction.account.findFirst({
+          where: { userId: existingUser.id, providerId: "credential" },
+          select: { id: true, password: true },
+        })
+      : null;
+    const shouldWritePassword = shouldWriteBootstrapPassword(
+      existingCredential?.password,
+      config.resetPassword,
+    );
+    const passwordProvisionedAt = shouldWritePassword ? new Date() : undefined;
 
     const user = existingUser
       ? await transaction.user.update({
@@ -83,7 +95,8 @@ export async function bootstrapAdmin(): Promise<void> {
             active: true,
             banned: false,
             banReason: null,
-            ...(shouldResetPassword ? { mustChangePassword: true, passwordChangedAt: null } : {}),
+            mustChangePassword: false,
+            ...(passwordProvisionedAt ? { passwordChangedAt: passwordProvisionedAt } : {}),
           },
         })
       : await transaction.user.create({
@@ -98,16 +111,13 @@ export async function bootstrapAdmin(): Promise<void> {
             role: "GENERAL_MANAGER",
             canManagePayroll: true,
             active: true,
-            mustChangePassword: true,
+            mustChangePassword: false,
             invitedAt: new Date(),
+            passwordChangedAt: passwordProvisionedAt ?? new Date(),
           },
         });
 
-    const credential = await transaction.account.findFirst({
-      where: { userId: user.id, providerId: "credential" },
-      select: { id: true, password: true },
-    });
-    if (!credential) {
+    if (!existingCredential) {
       await transaction.account.create({
         data: {
           accountId: user.id,
@@ -116,13 +126,13 @@ export async function bootstrapAdmin(): Promise<void> {
           password: passwordHash,
         },
       });
-    } else if (shouldResetPassword || !credential.password) {
+    } else if (shouldWritePassword) {
       await transaction.account.update({
-        where: { id: credential.id },
+        where: { id: existingCredential.id },
         data: { password: passwordHash },
       });
     }
-    if (shouldResetPassword) {
+    if (config.resetPassword) {
       await transaction.rateLimit.deleteMany();
     }
   });

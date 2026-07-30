@@ -46,9 +46,7 @@ export async function POST(request: Request) {
           action: "account.password_change",
           entityType: "User",
           entityId: actor.userId,
-          reason: actor.mustChangePassword
-            ? "Hoàn tất đổi mật khẩu tạm thời"
-            : "Người dùng chủ động đổi mật khẩu",
+          reason: "Người dùng chủ động đổi mật khẩu",
           before: { mustChangePassword: Boolean(actor.mustChangePassword) },
           after: { mustChangePassword: false, sessionsRevoked: true },
           requestId: metadata.requestId,

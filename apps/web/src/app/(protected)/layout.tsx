@@ -15,7 +15,6 @@ const roleLabels = {
 export default async function ProtectedLayout({ children }: Readonly<{ children: ReactNode }>) {
   const actor = await getOptionalActor();
   if (!actor) redirect("/login");
-  if (actor.mustChangePassword) redirect("/change-password");
 
   const scopeLabel =
     actor.role === "GENERAL_MANAGER"

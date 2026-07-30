@@ -173,6 +173,7 @@ export async function putPrivateObject(input: {
       Body: input.body,
       ...(input.checksumSha256
         ? {
+            ChecksumSHA256: input.checksumSha256,
             Metadata: { sha256: input.checksumSha256 },
           }
         : {}),

@@ -204,7 +204,6 @@ export function AttendanceWorkspace({
   const [machineImportOpen, setMachineImportOpen] = useState(false);
   const revenueLabel = "Doanh số (xu)";
   const daysRef = useRef(days);
-  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const inFlight = useRef(new Set<string>());
   const batchSaving = useRef(false);
   const optionsController = useRef<AbortController | null>(null);
@@ -247,10 +246,61 @@ export function AttendanceWorkspace({
     reconciling: reconcilePending,
     hasReconcilePreview: reconcilePreview !== null,
   });
+  const violationInteractionBlockedReason =
+    pendingCount > 0 || conflictCount > 0 || isAnySaving
+      ? "Hãy lưu hoặc xử lý toàn bộ thay đổi chấm công trước khi mở lỗi và evidence."
+      : null;
+  const shouldGuardUnsavedChanges = pendingCount > 0 || conflictCount > 0 || isAnySaving;
 
   useEffect(() => {
     daysRef.current = days;
   }, [days]);
+
+  useEffect(() => {
+    if (!shouldGuardUnsavedChanges) return;
+
+    const warnAboutUnsavedChanges = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const blockInternalNavigation = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey ||
+        !(event.target instanceof Element)
+      ) {
+        return;
+      }
+
+      const link = event.target.closest<HTMLAnchorElement>("a[href]");
+      if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+      const destination = new URL(link.href, window.location.href);
+      if (
+        destination.origin !== window.location.origin ||
+        destination.href === window.location.href
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      window.alert(
+        isAnySaving
+          ? "Dữ liệu đang được lưu. Vui lòng chờ hoàn tất trước khi rời màn hình."
+          : "Còn dữ liệu chấm công chưa lưu. Hãy bấm “Lưu thay đổi” trước khi rời màn hình.",
+      );
+    };
+    window.addEventListener("beforeunload", warnAboutUnsavedChanges);
+    document.addEventListener("click", blockInternalNavigation, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnAboutUnsavedChanges);
+      document.removeEventListener("click", blockInternalNavigation, true);
+    };
+  }, [isAnySaving, shouldGuardUnsavedChanges]);
 
   const replaceDay = useCallback(
     (businessDate: string, update: (day: EditableDay) => EditableDay) => {
@@ -262,12 +312,6 @@ export function AttendanceWorkspace({
     },
     [],
   );
-
-  const clearScheduledSave = useCallback((businessDate: string) => {
-    const timer = timers.current.get(businessDate);
-    if (timer) clearTimeout(timer);
-    timers.current.delete(businessDate);
-  }, []);
 
   const saveDay = useCallback(
     async (businessDate: string, override?: EditableDay): Promise<boolean> => {
@@ -290,7 +334,6 @@ export function AttendanceWorkspace({
         return false;
       }
 
-      clearScheduledSave(businessDate);
       inFlight.current.add(businessDate);
       replaceDay(businessDate, (current) => ({
         ...current,
@@ -390,21 +433,7 @@ export function AttendanceWorkspace({
         inFlight.current.delete(businessDate);
       }
     },
-    [clearScheduledSave, replaceDay, staffId],
-  );
-
-  const scheduleSave = useCallback(
-    (businessDate: string) => {
-      clearScheduledSave(businessDate);
-      timers.current.set(
-        businessDate,
-        setTimeout(() => {
-          timers.current.delete(businessDate);
-          void saveDay(businessDate);
-        }, 700),
-      );
-    },
-    [clearScheduledSave, saveDay],
+    [replaceDay, staffId],
   );
 
   const saveAll = useCallback(async (): Promise<boolean> => {
@@ -425,7 +454,6 @@ export function AttendanceWorkspace({
     batchSaving.current = true;
     setBatchSaveState("saving");
     setBatchMessage(`Đang lưu ${targets.length} dòng…`);
-    for (const day of targets) clearScheduledSave(day.businessDate);
     try {
       const results = await Promise.all(targets.map((day) => saveDay(day.businessDate, day)));
       const succeeded = results.filter(Boolean).length;
@@ -440,7 +468,7 @@ export function AttendanceWorkspace({
     } finally {
       batchSaving.current = false;
     }
-  }, [clearScheduledSave, saveDay]);
+  }, [saveDay]);
 
   const loadOptions = useCallback(
     async (nextMonth: string, requestedBranchId?: string): Promise<boolean> => {
@@ -535,7 +563,6 @@ export function AttendanceWorkspace({
 
   useEffect(
     () => () => {
-      for (const timer of timers.current.values()) clearTimeout(timer);
       optionsController.current?.abort();
     },
     [],
@@ -553,7 +580,8 @@ export function AttendanceWorkspace({
       message: null,
       conflictRecord: null,
     }));
-    scheduleSave(businessDate);
+    setBatchSaveState("idle");
+    setBatchMessage(null);
   }
 
   function updateDurationField(
@@ -571,11 +599,8 @@ export function AttendanceWorkspace({
       message: error,
       conflictRecord: null,
     }));
-    if (error) {
-      clearScheduledSave(businessDate);
-    } else {
-      scheduleSave(businessDate);
-    }
+    setBatchSaveState("idle");
+    setBatchMessage(null);
   }
 
   function normalizeDurationField(
@@ -593,7 +618,7 @@ export function AttendanceWorkspace({
     }));
   }
 
-  async function allowContextChange(): Promise<boolean> {
+  function allowContextChange(): boolean {
     if (inFlight.current.size > 0 || batchSaving.current) {
       window.alert("Dữ liệu đang được lưu. Vui lòng chờ hoàn tất rồi chuyển bộ lọc.");
       return false;
@@ -606,28 +631,24 @@ export function AttendanceWorkspace({
       window.alert("Hãy xử lý các dòng xung đột trước khi chuyển cơ sở, nhân viên hoặc tháng.");
       return false;
     }
-    if (
-      !window.confirm(
-        `Còn ${unsettled.length} dòng chưa lưu. Nhấn OK để lưu trước khi chuyển bộ lọc.`,
-      )
-    ) {
-      return false;
-    }
-    return saveAll();
+    window.alert(
+      `Còn ${unsettled.length} dòng chưa lưu. Hãy bấm “Lưu thay đổi” trước khi chuyển cơ sở, nhân viên hoặc tháng.`,
+    );
+    return false;
   }
 
   async function changeBranch(nextBranchId: string) {
-    if (nextBranchId === branchId || !(await allowContextChange())) return;
+    if (nextBranchId === branchId || !allowContextChange()) return;
     await loadOptions(month, nextBranchId);
   }
 
   async function changeMonth(nextMonth: string) {
-    if (nextMonth === month || !(await allowContextChange())) return;
+    if (nextMonth === month || !allowContextChange()) return;
     await loadOptions(nextMonth, branchId || undefined);
   }
 
   async function changeStaff(nextStaffId: string) {
-    if (nextStaffId === staffId || !(await allowContextChange())) return;
+    if (nextStaffId === staffId || !allowContextChange()) return;
     setLoading(true);
     setLoadError(null);
     setPermissionDenied(false);
@@ -718,7 +739,8 @@ export function AttendanceWorkspace({
       conflictRecord: null,
     };
     replaceDay(businessDate, () => merged);
-    void saveDay(businessDate, merged);
+    setBatchSaveState("idle");
+    setBatchMessage(null);
   }
 
   return (
@@ -727,8 +749,8 @@ export function AttendanceWorkspace({
         <div>
           <h2 className="text-xl font-semibold">Attendance & Live theo tháng</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Thời lượng HH:mm · check-out sớm hơn check-in tự tính là ca qua ngày · autosave sau
-            700ms · ngày nghiệp vụ Asia/Ho_Chi_Minh
+            Thời lượng HH:mm · check-out sớm hơn check-in tự tính là ca qua ngày · chỉ lưu khi bấm
+            “Lưu thay đổi” · ngày nghiệp vụ Asia/Ho_Chi_Minh
           </p>
         </div>
         <div className="flex gap-2">
@@ -1163,6 +1185,7 @@ export function AttendanceWorkspace({
                         attendanceId={day.record?.id ?? null}
                         businessDate={day.businessDate}
                         canOverrideAmount={canOverridePenalty}
+                        disabledReason={violationInteractionBlockedReason}
                         onChanged={refreshAttendance}
                         violations={day.violations}
                       />
@@ -1197,7 +1220,7 @@ export function AttendanceWorkspace({
                             onClick={() => mergeConflict(day.businessDate)}
                             type="button"
                           >
-                            Ghép & lưu
+                            Ghép thay đổi
                           </button>
                         </span>
                       ) : null}

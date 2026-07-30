@@ -57,7 +57,7 @@ Xây dựng hệ thống nội bộ quản lý nhiều cơ sở, nhân viên Liv
 ## UX
 
 - Giao diện tiếng Việt, định dạng ngày `dd/MM/yyyy`, tiền theo `vi-VN`.
-- Bảng tháng phải có sticky columns, horizontal scroll, keyboard navigation, autosave có trạng thái và cảnh báo conflict.
+- Bảng tháng phải có sticky columns, horizontal scroll, keyboard navigation, trạng thái lưu rõ ràng và cảnh báo conflict. Riêng `/attendance` chỉ lưu khi người dùng bấm nút `Lưu thay đổi`.
 - Luôn có loading, empty, error và permission-denied states.
 
 ## Quy tắc Git

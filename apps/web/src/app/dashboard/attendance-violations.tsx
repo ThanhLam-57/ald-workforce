@@ -89,6 +89,7 @@ export function AttendanceViolations({
   violations,
   activePenaltyTotal,
   canOverrideAmount,
+  disabledReason = null,
   onChanged,
 }: Readonly<{
   attendanceId: string | null;
@@ -96,6 +97,7 @@ export function AttendanceViolations({
   violations: readonly ViolationDto[];
   activePenaltyTotal: string;
   canOverrideAmount: boolean;
+  disabledReason?: string | null;
   onChanged: () => void;
 }>) {
   const [editing, setEditing] = useState(false);
@@ -302,12 +304,14 @@ export function AttendanceViolations({
           activeViolationCount > 0
             ? "border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100"
             : "border-slate-300 bg-white text-slate-500 hover:bg-slate-100"
-        }`}
+        } disabled:cursor-not-allowed disabled:opacity-50`}
+        disabled={disabledReason !== null}
         onClick={openPanel}
         title={
-          activeViolationCount > 0
+          disabledReason ??
+          (activeViolationCount > 0
             ? activeViolations.map((violation) => violation.itemName).join(", ")
-            : `Thêm lỗi ngày ${businessDate}`
+            : `Thêm lỗi ngày ${businessDate}`)
         }
         type="button"
       >

@@ -20,7 +20,7 @@ export default async function SecuritySettingsPage() {
           <p className="mt-1 text-sm text-slate-600">
             Mật khẩu mới cần đủ độ mạnh và khác mật khẩu đang sử dụng.
           </p>
-          <ChangePasswordForm required={false} />
+          <ChangePasswordForm />
         </section>
         {actor.role === "GENERAL_MANAGER" ? (
           <TwoFactorSettings enabled={Boolean(actor.twoFactorEnabled)} />

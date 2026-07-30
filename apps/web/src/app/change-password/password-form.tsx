@@ -4,7 +4,7 @@ import { Button } from "@ald/ui";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 
-export function ChangePasswordForm({ required }: { required: boolean }) {
+export function ChangePasswordForm() {
   const router = useRouter();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -37,11 +37,6 @@ export function ChangePasswordForm({ required }: { required: boolean }) {
 
   return (
     <form className="mt-6 space-y-5" onSubmit={submit}>
-      {required ? (
-        <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-          Đây là mật khẩu tạm thời. Bạn cần đổi mật khẩu trước khi tiếp tục.
-        </p>
-      ) : null}
       <label className="block space-y-2">
         <span className="text-sm font-medium">Mật khẩu hiện tại</span>
         <input

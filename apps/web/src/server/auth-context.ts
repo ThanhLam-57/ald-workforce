@@ -70,12 +70,6 @@ export async function requireActor(requestHeaders?: Headers): Promise<ActorConte
   if (!actor) {
     throw new DomainError("AUTHENTICATION_REQUIRED", "Vui lòng đăng nhập.");
   }
-  if (actor.mustChangePassword) {
-    throw new DomainError(
-      "PASSWORD_CHANGE_REQUIRED",
-      "Bạn phải đổi mật khẩu tạm thời trước khi tiếp tục.",
-    );
-  }
   console.info(
     JSON.stringify({
       event: "request.authorized",

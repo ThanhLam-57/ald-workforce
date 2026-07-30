@@ -586,7 +586,6 @@ export type AdminUserDto = Readonly<{
   role: "GENERAL_MANAGER" | "TRAINING_MANAGER" | "LIVE_EMPLOYEE";
   canManagePayroll: boolean;
   active: boolean;
-  mustChangePassword: boolean;
   staff: Readonly<{ id: string; staffCode: string; fullName: string }> | null;
   version: number;
   updatedAt: string;
@@ -672,28 +671,45 @@ export const attendanceFilterOptionsQuerySchema = z.object({
 const attendanceMachineImportMimeType =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" as const;
 
-export const attendanceMachineImportPresignSchema = z.object({
-  staffId: idSchema,
-  branchId: idSchema,
-  month: businessMonthSchema,
-  idempotencyKey: z.string().trim().min(8).max(180),
-  originalFileName: trimmedText("Tên file", 255).refine(
-    (value) => /\.xlsx$/i.test(value),
-    "Chỉ hỗ trợ file XLSX.",
-  ),
-  mimeType: z.literal(attendanceMachineImportMimeType),
-  sizeBytes: z
-    .number()
-    .int()
-    .positive()
-    .max(20 * 1_024 * 1_024),
-  checksumSha256: z
-    .string()
-    .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
-});
+export const attendanceMachineImportPresignSchema = z
+  .object({
+    staffId: idSchema,
+    branchId: idSchema,
+    month: businessMonthSchema,
+    attemptId: z.uuid(),
+    idempotencyKey: z.string().trim().min(8).max(180),
+    originalFileName: trimmedText("Tên file", 255).refine(
+      (value) => /\.xlsx$/i.test(value),
+      "Chỉ hỗ trợ file XLSX.",
+    ),
+    mimeType: z.literal(attendanceMachineImportMimeType),
+    sizeBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(20 * 1_024 * 1_024),
+    checksumSha256: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]{43}=$/, "Checksum SHA-256 phải là base64 hợp lệ."),
+  })
+  .superRefine((value, context) => {
+    if (value.idempotencyKey !== `attendance-machine:${value.attemptId}`) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["idempotencyKey"],
+        message: "Idempotency key khong khop import attempt.",
+      });
+    }
+  });
 
 export const attendanceMachineImportCommitSchema = z.object({
   confirm: z.literal(true),
+});
+
+export const attendanceMachineImportHistoryQuerySchema = z.object({
+  staffId: idSchema,
+  branchId: idSchema,
+  month: businessMonthSchema,
 });
 
 export const automaticViolationReconcileSchema = z.object({
@@ -1948,13 +1964,32 @@ export type AttendanceMachineImportJobDto = Readonly<{
     | "VALIDATED"
     | "COMMITTING"
     | "SUCCEEDED"
-    | "FAILED";
+    | "FAILED"
+    | "EXPIRED"
+    | "SUPERSEDED";
   originalFileName: string;
   uploadedAt: string | null;
   validatedAt: string | null;
   committedAt: string | null;
   committedRows: number;
   errorMessage: string | null;
+}>;
+
+export type AttendanceMachineImportHistoryItemDto = Readonly<{
+  id: string;
+  status: AttendanceMachineImportJobDto["status"];
+  originalFileName: string;
+  createdAt: string;
+  uploadedAt: string | null;
+  validatedAt: string | null;
+  committedAt: string | null;
+  expiredAt: string | null;
+  supersededAt: string | null;
+  totalRows: number;
+  validRows: number;
+  errorRows: number;
+  committedRows: number;
+  ownedByCurrentUser: boolean;
 }>;
 
 export type AttendanceFilterOptionsDto = Readonly<{
@@ -2393,6 +2428,8 @@ export const importListQuerySchema = z.object({
       "COMMITTING",
       "SUCCEEDED",
       "FAILED",
+      "EXPIRED",
+      "SUPERSEDED",
     ])
     .optional(),
   branchId: idSchema.optional(),
@@ -2483,7 +2520,9 @@ export type ImportJobDto = Readonly<{
     | "VALIDATED"
     | "COMMITTING"
     | "SUCCEEDED"
-    | "FAILED";
+    | "FAILED"
+    | "EXPIRED"
+    | "SUPERSEDED";
   branchId: string | null;
   originalFileName: string;
   sizeBytes: string;
@@ -2582,6 +2621,9 @@ export type AttendanceMachineImportPresignInput = z.infer<
 >;
 export type AttendanceMachineImportCommitInput = z.infer<
   typeof attendanceMachineImportCommitSchema
+>;
+export type AttendanceMachineImportHistoryQuery = z.infer<
+  typeof attendanceMachineImportHistoryQuerySchema
 >;
 export type AutomaticViolationReconcileInput = z.infer<typeof automaticViolationReconcileSchema>;
 export type BranchOverviewQuery = z.infer<typeof branchOverviewQuerySchema>;

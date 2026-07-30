@@ -271,8 +271,16 @@ describe("audit skeleton", () => {
     const audit = await prisma.auditLog.findFirstOrThrow({
       where: { entityType: "User", entityId: created.id, action: "user.create" },
     });
+    const persisted = await prisma.user.findUniqueOrThrow({
+      where: { id: created.id },
+      select: { mustChangePassword: true, passwordChangedAt: true },
+    });
 
     expect(signIn.user.id).toBe(created.id);
+    expect(created.mustChangePassword).toBe(false);
+    expect(persisted.mustChangePassword).toBe(false);
+    expect(persisted.passwordChangedAt).toBeInstanceOf(Date);
     expect(JSON.stringify(audit.after)).not.toContain(password);
+    expect(audit.after).toMatchObject({ mustChangePassword: false });
   });
 });

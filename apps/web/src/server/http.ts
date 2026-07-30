@@ -38,7 +38,6 @@ export function toErrorResponse(error: unknown): Response {
     const statusByCode = {
       AUTHENTICATION_REQUIRED: 401,
       ACCOUNT_DISABLED: 403,
-      PASSWORD_CHANGE_REQUIRED: 403,
       RATE_LIMITED: 429,
       FORBIDDEN: 403,
       NOT_FOUND: 404,

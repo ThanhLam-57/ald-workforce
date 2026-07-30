@@ -1,11 +1,18 @@
 "use client";
 
 import type {
+  AttendanceMachineImportHistoryItemDto,
   AttendanceMachineImportJobDto,
   AttendanceMachineImportPreviewDto,
   AttendanceMachineImportRowStatus,
 } from "@ald/contracts";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+
+import {
+  attendanceMachineAttemptKey,
+  attendanceMachineImportHistoryPath,
+  attendanceMachineUploadPath,
+} from "./attendance-machine-import-client";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const MAX_FILE_SIZE = 20 * 1_024 * 1_024;
@@ -26,10 +33,7 @@ type PresignResult = Readonly<{
   job: AttendanceMachineImportJobDto;
   target: AttendanceMachineImportPreviewDto["target"];
   duplicate: boolean;
-  upload: Readonly<{
-    url: string;
-    headers: Readonly<Record<string, string>>;
-  }> | null;
+  unfinishedAttemptExists: boolean;
 }>;
 
 type BusyStep = "checksum" | "upload" | "preview" | "commit" | null;
@@ -56,6 +60,18 @@ const statusClasses: Readonly<Record<AttendanceMachineImportRowStatus, string>> 
   ERROR: "bg-rose-100 text-rose-800",
 };
 
+const jobStatusLabels: Readonly<Record<AttendanceMachineImportJobDto["status"], string>> = {
+  PENDING_UPLOAD: "Chờ tải file",
+  UPLOADED: "Đã tải file",
+  VALIDATING: "Đang kiểm tra",
+  VALIDATED: "Đã xem trước",
+  COMMITTING: "Đang ghi dữ liệu",
+  SUCCEEDED: "Đã import",
+  FAILED: "Thất bại",
+  EXPIRED: "Đã hết hạn",
+  SUPERSEDED: "Đã được thay thế",
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -63,6 +79,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function apiErrorMessage(payload: unknown): string | null {
   if (!isRecord(payload) || !isRecord(payload.error)) return null;
   return typeof payload.error.message === "string" ? payload.error.message : null;
+}
+
+class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly details: Readonly<Record<string, unknown>> | null;
+
+  constructor(
+    message: string,
+    status: number,
+    code: string | null,
+    details: Readonly<Record<string, unknown>> | null,
+  ) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -81,7 +116,13 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
     }
   }
   if (!response.ok) {
-    throw new Error(apiErrorMessage(payload) ?? `Yêu cầu thất bại (${response.status}).`);
+    const errorPayload = isRecord(payload) && isRecord(payload.error) ? payload.error : null;
+    throw new ApiError(
+      apiErrorMessage(payload) ?? `Yêu cầu thất bại (${response.status}).`,
+      response.status,
+      errorPayload && typeof errorPayload.code === "string" ? errorPayload.code : null,
+      errorPayload && isRecord(errorPayload.details) ? errorPayload.details : null,
+    );
   }
   if (!isRecord(payload) || !("data" in payload)) {
     throw new Error("Máy chủ không trả về dữ liệu.");
@@ -105,6 +146,18 @@ function formatDate(value: string | null): string {
 function formatMonth(value: string): string {
   const [year, month] = value.split("-");
   return year && month ? `${month}/${year}` : value;
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("vi-VN", {
+        timeZone: "Asia/Ho_Chi_Minh",
+        dateStyle: "short",
+        timeStyle: "short",
+      }).format(date);
 }
 
 function busyLabel(step: BusyStep): string {
@@ -143,12 +196,19 @@ function AttendanceMachineImportDialogContent({
   const descriptionId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const attemptIdRef = useRef<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [job, setJob] = useState<AttendanceMachineImportJobDto | null>(null);
   const [preview, setPreview] = useState<AttendanceMachineImportPreviewDto | null>(null);
   const [busyStep, setBusyStep] = useState<BusyStep>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [previewStale, setPreviewStale] = useState(false);
+  const [unfinishedAttemptExists, setUnfinishedAttemptExists] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [history, setHistory] = useState<readonly AttendanceMachineImportHistoryItemDto[]>([]);
 
   const reset = useCallback(() => {
     setFile(null);
@@ -157,6 +217,13 @@ function AttendanceMachineImportDialogContent({
     setBusyStep(null);
     setError(null);
     setNotice(null);
+    setPreviewStale(false);
+    setUnfinishedAttemptExists(false);
+    setHistoryOpen(false);
+    setHistoryLoading(false);
+    setHistoryError(null);
+    setHistory([]);
+    attemptIdRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
 
@@ -225,12 +292,60 @@ function AttendanceMachineImportDialogContent({
     );
   }
 
+  function startNewAttempt(): void {
+    attemptIdRef.current = crypto.randomUUID();
+    setJob(null);
+    setPreview(null);
+    setError(null);
+    setNotice(null);
+    setPreviewStale(false);
+    setUnfinishedAttemptExists(false);
+  }
+
+  function stageErrorMessage(stage: Exclude<BusyStep, null>, cause: unknown): string {
+    if (cause instanceof ApiError) {
+      return cause.message;
+    }
+    if (stage === "upload") {
+      return "Không thể tải file lên hệ thống. Hãy kiểm tra kết nối rồi bấm Thử lại.";
+    }
+    if (stage === "preview") {
+      return "Không thể tạo bản xem trước. Vui lòng thử lại.";
+    }
+    if (stage === "checksum") {
+      return "Không thể kiểm tra file XLSX đã chọn.";
+    }
+    return cause instanceof Error ? cause.message : "Không thể chuẩn bị bản xem trước.";
+  }
+
+  async function loadHistory(): Promise<void> {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      setHistory(
+        await api<readonly AttendanceMachineImportHistoryItemDto[]>(
+          attendanceMachineImportHistoryPath({ branchId, staffId, month }),
+        ),
+      );
+    } catch (cause) {
+      setHistoryError(
+        cause instanceof Error ? cause.message : "Không thể tải lịch sử nhập dữ liệu.",
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
   async function preparePreview() {
     const selectedFile = validateInput();
     if (!selectedFile) return;
+    let stage: Exclude<BusyStep, null> = "checksum";
     setBusyStep("checksum");
+    setPreviewStale(false);
     try {
       const checksumSha256 = await checksumBase64(selectedFile);
+      const attemptId = attemptIdRef.current ?? crypto.randomUUID();
+      attemptIdRef.current = attemptId;
       const created = await api<PresignResult>("/api/attendance/machine-imports/presign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -238,7 +353,8 @@ function AttendanceMachineImportDialogContent({
           staffId,
           branchId,
           month,
-          idempotencyKey: `attendance-machine:${branchId}:${staffId}:${month}:${checksumSha256}`,
+          attemptId,
+          idempotencyKey: attendanceMachineAttemptKey(attemptId),
           originalFileName: selectedFile.name,
           mimeType: XLSX_MIME,
           sizeBytes: selectedFile.size,
@@ -247,20 +363,18 @@ function AttendanceMachineImportDialogContent({
       });
       let currentJob = created.job;
       setJob(currentJob);
+      setUnfinishedAttemptExists(created.unfinishedAttemptExists);
 
-      if (created.upload) {
+      if (currentJob.status === "PENDING_UPLOAD") {
+        stage = "upload";
         setBusyStep("upload");
-        const uploadResponse = await fetch(created.upload.url, {
-          method: "PUT",
-          headers: { ...created.upload.headers },
-          body: selectedFile,
-        });
-        if (!uploadResponse.ok) {
-          throw new Error(`Tải file lên kho riêng tư thất bại (${uploadResponse.status}).`);
-        }
         currentJob = await api<AttendanceMachineImportJobDto>(
-          `/api/attendance/machine-imports/${currentJob.id}/complete`,
-          { method: "POST" },
+          attendanceMachineUploadPath(currentJob.id),
+          {
+            method: "PUT",
+            headers: { "Content-Type": XLSX_MIME },
+            body: selectedFile,
+          },
         );
         setJob(currentJob);
       }
@@ -274,8 +388,11 @@ function AttendanceMachineImportDialogContent({
         return;
       }
       if (currentJob.status === "VALIDATING" || currentJob.status === "COMMITTING") {
-        setNotice("File trùng đang được hệ thống xử lý. Vui lòng thử lại sau.");
+        setNotice("Lượt import đang được hệ thống xử lý. Vui lòng thử lại sau.");
         return;
+      }
+      if (currentJob.status === "EXPIRED" || currentJob.status === "SUPERSEDED") {
+        throw new Error("Lượt import đã hết hạn hoặc đã được thay thế. Hãy tạo lượt import mới.");
       }
       if (!["UPLOADED", "VALIDATED"].includes(currentJob.status)) {
         throw new Error(
@@ -283,11 +400,15 @@ function AttendanceMachineImportDialogContent({
             "File chưa ở trạng thái sẵn sàng để đối chiếu. Hãy chọn lại file.",
         );
       }
+      stage = "preview";
       await loadPreview(currentJob.id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Không thể chuẩn bị bản xem trước.");
+      const stale = cause instanceof ApiError && cause.details?.code === "IMPORT_PREVIEW_STALE";
+      setPreviewStale(stale);
+      setError(stageErrorMessage(stage, cause));
     } finally {
       setBusyStep(null);
+      if (historyOpen) void loadHistory();
     }
   }
 
@@ -315,7 +436,15 @@ function AttendanceMachineImportDialogContent({
       reset();
       onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Không thể import giờ chấm công.");
+      const stale = cause instanceof ApiError && cause.details?.code === "IMPORT_PREVIEW_STALE";
+      setPreviewStale(stale);
+      setError(
+        stale
+          ? "Dữ liệu chấm công đã thay đổi sau khi xem trước. Hãy tạo lại bản xem trước."
+          : cause instanceof Error
+            ? cause.message
+            : "Không thể import giờ chấm công.",
+      );
     } finally {
       setBusyStep(null);
     }
@@ -396,10 +525,13 @@ function AttendanceMachineImportDialogContent({
                 disabled={Boolean(busyStep)}
                 onChange={(event) => {
                   setFile(event.target.files?.[0] ?? null);
+                  attemptIdRef.current = crypto.randomUUID();
                   setJob(null);
                   setPreview(null);
                   setError(null);
                   setNotice(null);
+                  setPreviewStale(false);
+                  setUnfinishedAttemptExists(false);
                 }}
                 ref={fileInputRef}
                 type="file"
@@ -420,11 +552,48 @@ function AttendanceMachineImportDialogContent({
             <button
               className="rounded-lg bg-sky-700 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={Boolean(busyStep) || !attendanceMachineCode}
-              onClick={() => void preparePreview()}
+              onClick={() => {
+                if (previewStale) startNewAttempt();
+                void preparePreview();
+              }}
               type="button"
             >
-              {busyStep && busyStep !== "commit" ? busyLabel(busyStep) : "Tải lên và xem trước"}
+              {busyStep && busyStep !== "commit"
+                ? busyLabel(busyStep)
+                : error
+                  ? previewStale
+                    ? "Xem trước lại"
+                    : "Thử lại"
+                  : "Tải lên và xem trước"}
             </button>
+            <button
+              aria-expanded={historyOpen}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={historyLoading}
+              onClick={() => {
+                if (historyOpen) {
+                  setHistoryOpen(false);
+                  return;
+                }
+                setHistoryOpen(true);
+                void loadHistory();
+              }}
+              type="button"
+            >
+              {historyLoading ? "Đang tải lịch sử..." : historyOpen ? "Ẩn lịch sử nhập" : "Xem lịch sử nhập"}
+            </button>
+            {job && !busyStep ? (
+              <button
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                onClick={() => {
+                  startNewAttempt();
+                  setNotice("Đã tạo lượt nhập mới. Bấm Tải lên và xem trước để tiếp tục.");
+                }}
+                type="button"
+              >
+                Tạo lượt nhập mới
+              </button>
+            ) : null}
             {job ? (
               <span className="break-all text-xs text-slate-500">
                 Mã lượt import: {job.id} · {job.status}
@@ -433,6 +602,12 @@ function AttendanceMachineImportDialogContent({
           </div>
 
           <div aria-live="polite" className="mt-3">
+            {unfinishedAttemptExists ? (
+              <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                Có một lượt nhập chưa hoàn tất trước đó. Bạn vẫn có thể tiếp tục bằng lượt nhập mới
+                này.
+              </p>
+            ) : null}
             {error ? (
               <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700">
                 {error}
@@ -444,6 +619,107 @@ function AttendanceMachineImportDialogContent({
               </p>
             ) : null}
           </div>
+
+          {historyOpen ? (
+            <section
+              aria-labelledby={`${titleId}-history`}
+              className="mt-4 rounded-xl border border-slate-200 bg-white p-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-semibold" id={`${titleId}-history`}>
+                    Lịch sử nhập của hồ sơ đang chọn
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Chỉ hiển thị các lượt của đúng cơ sở, nhân viên và tháng này.
+                  </p>
+                </div>
+                <button
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                  disabled={historyLoading}
+                  onClick={() => void loadHistory()}
+                  type="button"
+                >
+                  Làm mới
+                </button>
+              </div>
+
+              {historyError ? (
+                <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                  {historyError}
+                </p>
+              ) : historyLoading && history.length === 0 ? (
+                <p className="mt-3 text-sm text-slate-500">Đang tải lịch sử nhập...</p>
+              ) : history.length === 0 ? (
+                <p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  Chưa có lượt nhập nào cho hồ sơ và tháng này.
+                </p>
+              ) : (
+                <div className="mt-3 max-h-64 overflow-auto rounded-lg border border-slate-200">
+                  <table className="min-w-[1050px] table-fixed text-left text-xs">
+                    <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700">
+                      <tr>
+                        <th className="w-64 px-3 py-2">File</th>
+                        <th className="w-40 px-3 py-2">Trạng thái</th>
+                        <th className="w-40 px-3 py-2">Tạo lúc</th>
+                        <th className="w-40 px-3 py-2">Hoàn tất</th>
+                        <th className="w-40 px-3 py-2">Số dòng</th>
+                        <th className="w-32 px-3 py-2">Người thực hiện</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.map((item) => (
+                        <tr className="border-t border-slate-100 align-top" key={item.id}>
+                          <td className="px-3 py-2">
+                            <span className="block break-all font-medium">
+                              {item.originalFileName}
+                            </span>
+                            <span className="block break-all font-mono text-[10px] text-slate-400">
+                              {item.id}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className="inline-flex max-w-full whitespace-normal rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-700">
+                              {jobStatusLabels[item.status]}
+                            </span>
+                            {item.expiredAt ? (
+                              <span className="mt-1 block text-[10px] text-slate-500">
+                                Hết hạn: {formatTimestamp(item.expiredAt)}
+                              </span>
+                            ) : null}
+                            {item.supersededAt ? (
+                              <span className="mt-1 block text-[10px] text-slate-500">
+                                Thay thế: {formatTimestamp(item.supersededAt)}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2">{formatTimestamp(item.createdAt)}</td>
+                          <td className="px-3 py-2">
+                            {formatTimestamp(item.committedAt ?? item.validatedAt ?? item.uploadedAt)}
+                          </td>
+                          <td className="px-3 py-2">
+                            <span className="block">Tổng: {item.totalRows.toLocaleString("vi-VN")}</span>
+                            <span className="block text-emerald-700">
+                              Hợp lệ: {item.validRows.toLocaleString("vi-VN")}
+                            </span>
+                            <span className="block text-rose-700">
+                              Lỗi: {item.errorRows.toLocaleString("vi-VN")}
+                            </span>
+                            <span className="block text-sky-700">
+                              Đã ghi: {item.committedRows.toLocaleString("vi-VN")}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2">
+                            {item.ownedByCurrentUser ? "Lượt của bạn" : "Người khác"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          ) : null}
 
           {preview ? (
             <section aria-labelledby={`${titleId}-preview`} className="mt-5">

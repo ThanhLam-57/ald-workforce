@@ -1,7 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   AttendanceMachineImportCommitInput,
+  AttendanceMachineImportHistoryItemDto,
+  AttendanceMachineImportHistoryQuery,
   AttendanceMachineImportJobDto,
   AttendanceMachineImportPresignInput,
   AttendanceMachineImportPreviewDto,
@@ -9,7 +11,7 @@ import type {
   AttendanceMachineImportRowStatus,
   AttendanceMachineImportSummaryDto,
 } from "@ald/contracts";
-import { Prisma, prisma } from "@ald/db";
+import { prisma, type Prisma } from "@ald/db";
 import {
   DomainError,
   requirePermission,
@@ -22,13 +24,17 @@ import {
   parseAttendanceMachineWorkbook,
   type ParsedAttendanceMachineRow,
 } from "./attendance-machine-import-parser";
+import { readAttendanceMachineUploadBody } from "./attendance-machine-upload-body";
 import { parseBusinessDate } from "./business-date";
-import { createPrivateUploadUrl, readPrivateObject, verifyPrivateObject } from "./object-storage";
+import { putPrivateObject, readPrivateObject, verifyPrivateObject } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
 import { reconcileAutomaticViolationsInTransaction } from "./violation-service";
 
 const PREVIEW_ROW_LIMIT = 200;
+const PENDING_UPLOAD_TTL_MS = 30 * 60 * 1_000;
+const UPLOADED_TTL_MS = 24 * 60 * 60 * 1_000;
+const VALIDATING_TTL_MS = 15 * 60 * 1_000;
 type Transaction = Prisma.TransactionClient;
 
 type ImportTarget = Awaited<ReturnType<typeof resolveImportTarget>>;
@@ -98,11 +104,31 @@ const importJobSelect = {
   uploadedAt: true,
   validatedAt: true,
   committedAt: true,
+  expiresAt: true,
+  supersededAt: true,
+  objectDeletedAt: true,
 } satisfies Prisma.ImportJobSelect;
 
 type AttendanceMachineImportJob = Prisma.ImportJobGetPayload<{
   select: typeof importJobSelect;
 }>;
+
+const importHistorySelect = {
+  id: true,
+  status: true,
+  originalFileName: true,
+  createdAt: true,
+  uploadedAt: true,
+  validatedAt: true,
+  committedAt: true,
+  expiresAt: true,
+  supersededAt: true,
+  totalRows: true,
+  validRows: true,
+  errorRows: true,
+  committedRows: true,
+  requestedByUserId: true,
+} satisfies Prisma.ImportJobSelect;
 
 function monthBounds(month: string): { start: Date; end: Date } {
   const [yearText, monthText] = month.split("-");
@@ -117,8 +143,64 @@ function normalizeMachineCode(value: string | null | undefined): string {
   return value?.trim().toUpperCase() ?? "";
 }
 
-function importScopeKey(branchId: string, staffId: string, month: string): string {
-  return `attendance:${branchId}:${staffId}:${month}`;
+function importScopeKey(
+  branchId: string,
+  staffId: string,
+  month: string,
+  attemptId: string,
+): string {
+  return `attendance:${branchId}:${staffId}:${month}:attempt:${attemptId}`;
+}
+
+function importCommitLockIds(
+  companyId: string,
+  branchId: string,
+  staffId: string,
+  month: string,
+): readonly [number, number] {
+  const digest = createHash("sha256")
+    .update(`attendance-machine:${companyId}:${branchId}:${staffId}:${month}`)
+    .digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
+}
+
+async function lockImportCommitScope(tx: Transaction, target: ImportTarget): Promise<void> {
+  const [firstKey, secondKey] = importCommitLockIds(
+    target.companyId,
+    target.branchId,
+    target.id,
+    target.month,
+  );
+  await tx.$queryRaw`
+    SELECT pg_advisory_xact_lock(${firstKey}, ${secondKey})::text AS "lockResult"
+  `;
+}
+
+function expiresAfter(milliseconds: number): Date {
+  return new Date(Date.now() + milliseconds);
+}
+
+function isExpired(job: AttendanceMachineImportJob): boolean {
+  return (
+    job.expiresAt !== null &&
+    job.expiresAt.getTime() <= Date.now() &&
+    ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED", "COMMITTING"].includes(job.status)
+  );
+}
+
+function stalePreviewError(businessDate?: string): DomainError {
+  return new DomainError(
+    "CONFLICT",
+    "Dữ liệu chấm công đã thay đổi sau khi xem trước. Hãy tạo lại bản xem trước.",
+    {
+      code: "IMPORT_PREVIEW_STALE",
+      ...(businessDate ? { businessDate } : {}),
+    },
+  );
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "P2002";
 }
 
 function toJobDto(job: AttendanceMachineImportJob): AttendanceMachineImportJobDto {
@@ -288,6 +370,43 @@ async function resolveImportTarget(
   };
 }
 
+async function resolveImportHistoryScope(
+  actor: ActorContext,
+  input: { staffId: string; branchId: string; month: string },
+) {
+  requirePermission(actor, "attendance:write");
+  if (
+    actor.role === "TRAINING_MANAGER" &&
+    (!actor.activeBranchIds.includes(input.branchId) || actor.staffId === input.staffId)
+  ) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
+  }
+
+  const [branch, staff] = await Promise.all([
+    prisma.branch.findFirst({
+      where: { id: input.branchId, companyId: actor.companyId },
+      select: { id: true },
+    }),
+    prisma.staffMember.findFirst({
+      where: { id: input.staffId, companyId: actor.companyId },
+      select: {
+        id: true,
+        user: { select: { role: true } },
+      },
+    }),
+  ]);
+  const isLiveEmployee = !staff?.user || staff.user.role === "LIVE_EMPLOYEE";
+  if (!branch || !staff || (actor.role === "TRAINING_MANAGER" && !isLiveEmployee)) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
+  }
+
+  return {
+    branchId: branch.id,
+    staffId: staff.id,
+    month: input.month,
+  };
+}
+
 async function authorizedJob(
   actor: ActorContext,
   id: string,
@@ -298,9 +417,9 @@ async function authorizedJob(
       id,
       companyId: actor.companyId,
       template: "ATTENDANCE_MACHINE",
+      requestedByUserId: actor.userId,
       ...(actor.role === "TRAINING_MANAGER"
         ? {
-            requestedByUserId: actor.userId,
             branchId: { in: [...actor.activeBranchIds] },
           }
         : {}),
@@ -309,6 +428,13 @@ async function authorizedJob(
   });
   if (!job?.branchId || !job.targetStaffId || !job.targetMonth) {
     throw new DomainError("NOT_FOUND", "Không tìm thấy import máy chấm công trong phạm vi.");
+  }
+  if (isExpired(job) || ["EXPIRED", "SUPERSEDED"].includes(job.status)) {
+    throw new DomainError(
+      "CONFLICT",
+      "Lượt import đã hết hạn hoặc đã được thay thế. Hãy tạo lượt import mới.",
+      { code: job.status === "SUPERSEDED" ? "IMPORT_PREVIEW_STALE" : "IMPORT_ATTEMPT_EXPIRED" },
+    );
   }
   const target = await resolveImportTarget(actor, {
     branchId: job.branchId,
@@ -364,36 +490,69 @@ function previewDto(
   };
 }
 
+export async function listAttendanceMachineImportHistory(
+  actor: ActorContext,
+  input: AttendanceMachineImportHistoryQuery,
+): Promise<readonly AttendanceMachineImportHistoryItemDto[]> {
+  const target = await resolveImportHistoryScope(actor, input);
+  const jobs = await prisma.importJob.findMany({
+    where: {
+      companyId: actor.companyId,
+      branchId: target.branchId,
+      targetStaffId: target.staffId,
+      targetMonth: target.month,
+      template: "ATTENDANCE_MACHINE",
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 50,
+    select: importHistorySelect,
+  });
+
+  return jobs.map((job) => ({
+    id: job.id,
+    status: job.status,
+    originalFileName: job.originalFileName,
+    createdAt: job.createdAt.toISOString(),
+    uploadedAt: job.uploadedAt?.toISOString() ?? null,
+    validatedAt: job.validatedAt?.toISOString() ?? null,
+    committedAt: job.committedAt?.toISOString() ?? null,
+    expiredAt: job.status === "EXPIRED" ? (job.expiresAt?.toISOString() ?? null) : null,
+    supersededAt: job.supersededAt?.toISOString() ?? null,
+    totalRows: job.totalRows,
+    validRows: job.validRows,
+    errorRows: job.errorRows,
+    committedRows: job.committedRows,
+    ownedByCurrentUser: job.requestedByUserId === actor.userId,
+  }));
+}
+
 export async function presignAttendanceMachineImportUpload(
   actor: ActorContext,
   input: AttendanceMachineImportPresignInput,
   metadata: RequestMetadata,
 ) {
   const target = await resolveImportTarget(actor, input);
-  const scopeKey = importScopeKey(input.branchId, input.staffId, input.month);
+  const scopeKey = importScopeKey(input.branchId, input.staffId, input.month, input.attemptId);
   const byKey = await prisma.importJob.findFirst({
     where: { companyId: actor.companyId, idempotencyKey: input.idempotencyKey },
     select: importJobSelect,
   });
   if (
     byKey &&
-    (byKey.checksumSha256 !== input.checksumSha256 ||
+    (byKey.requestedByUserId !== actor.userId ||
+      byKey.checksumSha256 !== input.checksumSha256 ||
+      byKey.branchId !== input.branchId ||
+      byKey.targetStaffId !== input.staffId ||
+      byKey.targetMonth !== input.month ||
       byKey.scopeKey !== scopeKey ||
-      byKey.template !== "ATTENDANCE_MACHINE")
+      byKey.template !== "ATTENDANCE_MACHINE" ||
+      byKey.originalFileName !== input.originalFileName ||
+      byKey.mimeType !== input.mimeType ||
+      byKey.sizeBytes !== BigInt(input.sizeBytes))
   ) {
     throw new DomainError("CONFLICT", "Idempotency key đã được dùng cho dữ liệu khác.");
   }
-  let job =
-    byKey ??
-    (await prisma.importJob.findFirst({
-      where: {
-        companyId: actor.companyId,
-        template: "ATTENDANCE_MACHINE",
-        checksumSha256: input.checksumSha256,
-        scopeKey,
-      },
-      select: importJobSelect,
-    }));
+  let job = byKey;
 
   if (job && job.requestedByUserId !== actor.userId) {
     throw new DomainError(
@@ -410,59 +569,71 @@ export async function presignAttendanceMachineImportUpload(
     throw new DomainError("CONFLICT", "File import đã tồn tại cho một hồ sơ khác.");
   }
 
+  if (job && (isExpired(job) || ["FAILED", "EXPIRED", "SUPERSEDED"].includes(job.status))) {
+    throw new DomainError(
+      "CONFLICT",
+      "Lượt import đã hết hạn hoặc đã được thay thế. Hãy tạo lượt import mới.",
+      {
+        code:
+          job.status === "SUPERSEDED"
+            ? "IMPORT_PREVIEW_STALE"
+            : job.status === "FAILED"
+              ? "IMPORT_ATTEMPT_FAILED"
+              : "IMPORT_ATTEMPT_EXPIRED",
+      },
+    );
+  }
+
   let duplicate = Boolean(job);
   if (!job) {
     const objectKey = `attendance-machine-imports/${actor.companyId}/${randomUUID()}/source.xlsx`;
-    job = await prisma.importJob.create({
-      data: {
-        companyId: actor.companyId,
-        branchId: input.branchId,
-        targetStaffId: input.staffId,
-        targetMonth: input.month,
-        template: "ATTENDANCE_MACHINE",
-        scopeKey,
-        idempotencyKey: input.idempotencyKey,
-        objectKey,
-        originalFileName: input.originalFileName,
-        mimeType: input.mimeType,
-        sizeBytes: input.sizeBytes,
-        checksumSha256: input.checksumSha256,
-        requestedByUserId: actor.userId,
-        reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_UPLOAD_REQUEST"),
-      },
-      select: importJobSelect,
-    });
-    duplicate = false;
-  } else if (job.status === "FAILED") {
-    job = await prisma.importJob.update({
-      where: { id: job.id },
-      data: {
-        status: "PENDING_UPLOAD",
-        reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_UPLOAD_RETRY"),
-        originalFileName: input.originalFileName,
-        mimeType: input.mimeType,
-        sizeBytes: input.sizeBytes,
-        errorMessage: null,
-        sourceHeaders: Prisma.JsonNull,
-        previewRows: Prisma.JsonNull,
-        mapping: Prisma.JsonNull,
-        totalRows: 0,
-        validRows: 0,
-        errorRows: 0,
-      },
-      select: importJobSelect,
-    });
-  }
-
-  const upload =
-    job.status === "PENDING_UPLOAD"
-      ? await createPrivateUploadUrl({
-          objectKey: job.objectKey,
+    try {
+      job = await prisma.importJob.create({
+        data: {
+          companyId: actor.companyId,
+          branchId: input.branchId,
+          targetStaffId: input.staffId,
+          targetMonth: input.month,
+          template: "ATTENDANCE_MACHINE",
+          scopeKey,
+          idempotencyKey: input.idempotencyKey,
+          objectKey,
+          originalFileName: input.originalFileName,
           mimeType: input.mimeType,
           sizeBytes: input.sizeBytes,
           checksumSha256: input.checksumSha256,
-        })
-      : null;
+          requestedByUserId: actor.userId,
+          reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_UPLOAD_REQUEST"),
+          expiresAt: expiresAfter(PENDING_UPLOAD_TTL_MS),
+        },
+        select: importJobSelect,
+      });
+    } catch (cause) {
+      if (!isUniqueConstraintError(cause)) throw cause;
+      job = await prisma.importJob.findFirst({
+        where: {
+          companyId: actor.companyId,
+          idempotencyKey: input.idempotencyKey,
+          requestedByUserId: actor.userId,
+          template: "ATTENDANCE_MACHINE",
+          branchId: input.branchId,
+          targetStaffId: input.staffId,
+          targetMonth: input.month,
+          checksumSha256: input.checksumSha256,
+          scopeKey,
+        },
+        select: importJobSelect,
+      });
+      if (!job) {
+        throw new DomainError(
+          "CONFLICT",
+          "Không thể tạo lượt import do dữ liệu attempt đã thay đổi.",
+        );
+      }
+      duplicate = true;
+    }
+  }
+
   await appendSecureAudit({
     actor,
     action: "ATTENDANCE_MACHINE_IMPORT_UPLOAD_REQUEST",
@@ -479,12 +650,166 @@ export async function presignAttendanceMachineImportUpload(
     },
     metadata,
   });
+  const unfinishedAttemptExists =
+    (await prisma.importJob.count({
+      where: {
+        id: { not: job.id },
+        companyId: actor.companyId,
+        branchId: input.branchId,
+        targetStaffId: input.staffId,
+        targetMonth: input.month,
+        template: "ATTENDANCE_MACHINE",
+        status: {
+          in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED", "COMMITTING"],
+        },
+      },
+    })) > 0;
   return {
     job: toJobDto(job),
     target: targetDto(target),
     duplicate,
-    upload,
+    unfinishedAttemptExists,
   };
+}
+
+export async function uploadAttendanceMachineImport(
+  actor: ActorContext,
+  id: string,
+  request: Request,
+  metadata: RequestMetadata,
+): Promise<AttendanceMachineImportJobDto> {
+  await enforceSensitiveMutationRateLimit(actor, "attendance-machine-import.upload", {
+    windowSeconds: 300,
+    maxAttempts: 20,
+  });
+  const { job } = await authorizedJob(actor, id);
+
+  if (["UPLOADED", "VALIDATED", "VALIDATING", "COMMITTING", "SUCCEEDED"].includes(job.status)) {
+    return toJobDto(job);
+  }
+  if (job.status !== "PENDING_UPLOAD") {
+    throw new DomainError(
+      "CONFLICT",
+      "Lượt import không còn ở trạng thái cho phép tải file. Hãy tạo lượt import mới.",
+    );
+  }
+
+  try {
+    const upload = await readAttendanceMachineUploadBody(request);
+    if (upload.mimeType !== job.mimeType) {
+      throw new DomainError("VALIDATION_ERROR", "Content-Type của file không khớp lượt import.");
+    }
+    if (BigInt(upload.sizeBytes) !== job.sizeBytes) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Dung lượng file thực tế không khớp file đã chọn.",
+        { code: "IMPORT_FILE_SIZE_MISMATCH" },
+      );
+    }
+
+    const checksumSha256 = createHash("sha256").update(upload.body).digest("base64");
+    if (checksumSha256 !== job.checksumSha256) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Checksum file không khớp. Hãy chọn lại file và thử lại.",
+        { code: "IMPORT_CHECKSUM_MISMATCH" },
+      );
+    }
+
+    let parsed: Awaited<ReturnType<typeof parseAttendanceMachineWorkbook>>;
+    try {
+      parsed = await parseAttendanceMachineWorkbook(upload.body);
+    } catch (cause) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        cause instanceof Error ? cause.message : "File XLSX không đúng định dạng.",
+        { code: "IMPORT_XLSX_INVALID" },
+      );
+    }
+    await putPrivateObject({
+      objectKey: job.objectKey,
+      mimeType: job.mimeType,
+      body: upload.body,
+      checksumSha256,
+    });
+
+    const uploadedAt = new Date();
+    const transitioned = await prisma.importJob.updateMany({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        template: "ATTENDANCE_MACHINE",
+        status: "PENDING_UPLOAD",
+      },
+      data: {
+        status: "UPLOADED",
+        sourceHeaders: [...parsed.headers],
+        totalRows: parsed.rows.length,
+        uploadedAt,
+        expiresAt: new Date(uploadedAt.getTime() + UPLOADED_TTL_MS),
+        errorMessage: null,
+      },
+    });
+
+    const updated = await prisma.importJob.findFirst({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        template: "ATTENDANCE_MACHINE",
+      },
+      select: importJobSelect,
+    });
+    if (!updated) {
+      throw new DomainError("NOT_FOUND", "Không tìm thấy lượt import trong phạm vi.");
+    }
+    if (
+      transitioned.count !== 1 &&
+      !["UPLOADED", "VALIDATED", "VALIDATING", "COMMITTING", "SUCCEEDED"].includes(updated.status)
+    ) {
+      throw new DomainError(
+        "CONFLICT",
+        "Lượt import đã thay đổi trong khi tải file. Hãy tạo lượt import mới.",
+      );
+    }
+
+    if (transitioned.count === 1) {
+      await appendSecureAudit({
+        actor,
+        action: "ATTENDANCE_MACHINE_IMPORT_UPLOAD_COMPLETE",
+        entityType: "ImportJob",
+        entityId: job.id,
+        branchId: job.branchId,
+        reason: job.reason,
+        before: { status: job.status },
+        after: {
+          status: updated.status,
+          sheetName: parsed.sheetName,
+          headerRowNumber: parsed.headerRowNumber,
+          totalRows: parsed.rows.length,
+        },
+        metadata,
+      });
+    }
+    return toJobDto(updated);
+  } catch (cause) {
+    const message =
+      cause instanceof DomainError ? cause.message : "Không thể tải file XLSX lên hệ thống.";
+    await prisma.importJob.updateMany({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        status: "PENDING_UPLOAD",
+      },
+      data: { errorMessage: message },
+    });
+    if (cause instanceof DomainError) throw cause;
+    throw new DomainError("CONFLICT", "Không thể tải file lên hệ thống. Vui lòng thử lại.", {
+      code: "IMPORT_UPLOAD_FAILED",
+    });
+  }
 }
 
 export async function completeAttendanceMachineImportUpload(
@@ -502,17 +827,33 @@ export async function completeAttendanceMachineImportUpload(
       checksumSha256: job.checksumSha256,
     });
     const parsed = await parseAttendanceMachineWorkbook(await readPrivateObject(job.objectKey));
-    const updated = await prisma.importJob.update({
-      where: { id: job.id },
+    const uploadedAt = new Date();
+    const transitioned = await prisma.importJob.updateMany({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        status: "PENDING_UPLOAD",
+      },
       data: {
         status: "UPLOADED",
         sourceHeaders: [...parsed.headers],
         totalRows: parsed.rows.length,
-        uploadedAt: new Date(),
+        uploadedAt,
+        expiresAt: new Date(uploadedAt.getTime() + UPLOADED_TTL_MS),
         errorMessage: null,
       },
+    });
+    const updated = await prisma.importJob.findUnique({
+      where: { id: job.id },
       select: importJobSelect,
     });
+    if (!updated || transitioned.count !== 1) {
+      throw new DomainError(
+        "CONFLICT",
+        "Lượt import đã thay đổi trong khi xác nhận file. Hãy tạo lượt import mới.",
+      );
+    }
     await appendSecureAudit({
       actor,
       action: "ATTENDANCE_MACHINE_IMPORT_UPLOAD_COMPLETE",
@@ -532,9 +873,14 @@ export async function completeAttendanceMachineImportUpload(
     return toJobDto(updated);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : "Không thể đọc file máy chấm công.";
-    await prisma.importJob.update({
-      where: { id: job.id },
-      data: { status: "FAILED", errorMessage: message },
+    await prisma.importJob.updateMany({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        status: "PENDING_UPLOAD",
+      },
+      data: { status: "FAILED", errorMessage: message, expiresAt: new Date() },
     });
     throw new DomainError("VALIDATION_ERROR", message);
   }
@@ -856,9 +1202,37 @@ export async function previewAttendanceMachineImport(
   if (!["UPLOADED", "VALIDATED"].includes(job.status)) {
     throw new DomainError("CONFLICT", "File chưa sẵn sàng để xem trước.");
   }
-  await prisma.importJob.update({ where: { id }, data: { status: "VALIDATING" } });
+  const validating = await prisma.importJob.updateMany({
+    where: {
+      id,
+      companyId: actor.companyId,
+      requestedByUserId: actor.userId,
+      status: { in: ["UPLOADED", "VALIDATED"] },
+    },
+    data: {
+      status: "VALIDATING",
+      expiresAt: expiresAfter(VALIDATING_TTL_MS),
+      errorMessage: null,
+    },
+  });
+  if (validating.count !== 1) {
+    throw stalePreviewError();
+  }
   try {
     const parsed = await parseAttendanceMachineWorkbook(await readPrivateObject(job.objectKey));
+    const baseCommittedJob = await prisma.importJob.findFirst({
+      where: {
+        id: { not: job.id },
+        companyId: actor.companyId,
+        branchId: target.branchId,
+        targetStaffId: target.id,
+        targetMonth: target.month,
+        template: "ATTENDANCE_MACHINE",
+        status: "SUCCEEDED",
+      },
+      select: { id: true },
+      orderBy: [{ committedAt: "desc" }, { id: "desc" }],
+    });
     const result = await buildPreview(target, parsed.rows);
     const rowsToStore = persistedRows(result.rows);
     const truncated = result.rows.length > PREVIEW_ROW_LIMIT;
@@ -882,21 +1256,36 @@ export async function previewAttendanceMachineImport(
           })),
         });
       }
-      return tx.importJob.update({
-        where: { id: job.id },
+      const transitioned = await tx.importJob.updateMany({
+        where: {
+          id: job.id,
+          companyId: actor.companyId,
+          requestedByUserId: actor.userId,
+          status: "VALIDATING",
+        },
         data: {
           status: "VALIDATED",
-          mapping: summaryRecord(result.summary, truncated),
+          mapping: {
+            ...summaryRecord(result.summary, truncated),
+            baseCommittedImportJobId: baseCommittedJob?.id ?? "",
+          },
           previewRows: rowsToStore as unknown as Prisma.InputJsonValue,
           totalRows: result.summary.totalRows,
           validRows:
             result.summary.createRows + result.summary.updateRows + result.summary.unchangedRows,
           errorRows: result.summary.errorRows,
           validatedAt: new Date(),
+          expiresAt: expiresAfter(UPLOADED_TTL_MS),
           errorMessage: truncated
             ? `Chỉ hiển thị ${PREVIEW_ROW_LIMIT.toLocaleString("vi-VN")} dòng đầu tiên.`
             : null,
         },
+      });
+      if (transitioned.count !== 1) {
+        throw stalePreviewError();
+      }
+      return tx.importJob.findUniqueOrThrow({
+        where: { id: job.id },
         select: importJobSelect,
       });
     });
@@ -914,9 +1303,14 @@ export async function previewAttendanceMachineImport(
     return previewDto(updated, target);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : "Không thể preview file.";
-    await prisma.importJob.update({
-      where: { id: job.id },
-      data: { status: "FAILED", errorMessage: message },
+    await prisma.importJob.updateMany({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        status: "VALIDATING",
+      },
+      data: { status: "FAILED", errorMessage: message, expiresAt: new Date() },
     });
     if (cause instanceof DomainError) throw cause;
     throw new DomainError("VALIDATION_ERROR", message);
@@ -1027,6 +1421,71 @@ async function assertPreviewStillCurrent(
   }
 }
 
+async function supersedeSiblingPreviews(
+  actor: ActorContext,
+  target: ImportTarget,
+  winningJobId: string,
+  metadata: RequestMetadata,
+): Promise<void> {
+  try {
+    const siblings = await prisma.importJob.findMany({
+      where: {
+        id: { not: winningJobId },
+        companyId: actor.companyId,
+        branchId: target.branchId,
+        targetStaffId: target.id,
+        targetMonth: target.month,
+        template: "ATTENDANCE_MACHINE",
+        status: { in: ["VALIDATING", "VALIDATED"] },
+      },
+      select: { id: true, status: true },
+    });
+    for (const sibling of siblings) {
+      const supersededAt = new Date();
+      await prisma.$transaction(async (tx) => {
+        const superseded = await tx.importJob.updateMany({
+          where: {
+            id: sibling.id,
+            companyId: actor.companyId,
+            status: { in: ["VALIDATING", "VALIDATED"] },
+          },
+          data: {
+            status: "SUPERSEDED",
+            supersededAt,
+            expiresAt: supersededAt,
+            errorMessage: "Bản xem trước đã cũ vì một lượt import mới đã được ghi thành công.",
+          },
+        });
+        if (superseded.count !== 1) return;
+        await tx.auditLog.create({
+          data: {
+            companyId: actor.companyId,
+            branchId: target.branchId,
+            actorUserId: actor.userId,
+            action: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
+            entityType: "ImportJob",
+            entityId: sibling.id,
+            reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_SUPERSEDED"),
+            before: { status: sibling.status },
+            after: { status: "SUPERSEDED", supersededByImportJobId: winningJobId },
+            requestId: metadata.requestId,
+            ipAddress: metadata.ipAddress,
+            userAgent: metadata.userAgent,
+          },
+        });
+      });
+    }
+  } catch (cause) {
+    console.error(
+      JSON.stringify({
+        event: "attendance_machine_import.supersede_failed",
+        importJobId: winningJobId,
+        message: cause instanceof Error ? cause.message : "Unknown supersede error",
+      }),
+    );
+  }
+}
+
 export async function commitAttendanceMachineImport(
   actor: ActorContext,
   id: string,
@@ -1056,143 +1515,207 @@ export async function commitAttendanceMachineImport(
   }
   await assertPreviewStillCurrent(actor, target, rows);
 
-  const updatedJob = await prisma.$transaction(
-    async (tx) => {
-      const locked = await tx.importJob.updateMany({
-        where: {
-          id: job.id,
-          companyId: actor.companyId,
-          template: "ATTENDANCE_MACHINE",
-          status: "VALIDATED",
-        },
-        data: { status: "COMMITTING", errorMessage: null },
-      });
-      if (locked.count !== 1) {
-        throw new DomainError("CONFLICT", "Import đang được xử lý hoặc đã thay đổi.");
-      }
-
-      for (const row of rows) {
-        const businessDate = parseBusinessDate(row.businessDate!);
-        let before: PreviewAttendance | null = null;
-        let attendanceId: string;
-        if (row.status === "CREATE") {
-          const created = await tx.attendanceDay.create({
-            data: {
-              companyId: actor.companyId,
-              branchId: target.branchId,
-              staffId: target.id,
-              businessDate,
-              checkInAt: row.nextCheckInAt ? new Date(row.nextCheckInAt) : null,
-              checkOutAt: row.nextCheckOutAt ? new Date(row.nextCheckOutAt) : null,
-              spansNextDay: row.nextSpansNextDay,
-              workUnits: "0",
-              overtimeMinutes: 0,
-              note: null,
-              status: "DRAFT",
-              createdByUserId: actor.userId,
-              updatedByUserId: actor.userId,
-            },
-          });
-          attendanceId = created.id;
-          await tx.liveDailyMetric.create({
-            data: {
-              companyId: actor.companyId,
-              branchId: target.branchId,
-              attendanceId,
-              actualLiveMinutes: 0,
-              revenueAmount: 0n,
-              revenueUnit: target.company.revenueUnit,
-              revenueScale: target.company.revenueScale,
-            },
-          });
-        } else {
-          before = await tx.attendanceDay.findUnique({
-            where: { id: row.attendanceId! },
-            select: previewAttendanceSelect,
-          });
-          if (!before) {
-            throw new DomainError("CONFLICT", "Attendance đã thay đổi; hãy preview lại.", {
-              code: "IMPORT_PREVIEW_STALE",
-              businessDate: row.businessDate,
-            });
-          }
-          const result = await tx.attendanceDay.updateMany({
-            where: {
-              id: row.attendanceId!,
-              companyId: actor.companyId,
-              branchId: target.branchId,
-              staffId: target.id,
-              version: row.expectedVersion!,
-            },
-            data: {
-              checkInAt: row.nextCheckInAt ? new Date(row.nextCheckInAt) : null,
-              checkOutAt: row.nextCheckOutAt ? new Date(row.nextCheckOutAt) : null,
-              spansNextDay: row.nextSpansNextDay,
-              updatedByUserId: actor.userId,
-              version: { increment: 1 },
-            },
-          });
-          if (result.count !== 1) {
-            throw new DomainError("CONFLICT", "Attendance đã thay đổi; hãy preview lại.", {
-              code: "IMPORT_PREVIEW_STALE",
-              businessDate: row.businessDate,
-            });
-          }
-          attendanceId = row.attendanceId!;
+  let updatedJob: AttendanceMachineImportJob;
+  try {
+    updatedJob = await prisma.$transaction(
+      async (tx) => {
+        await lockImportCommitScope(tx, target);
+        const currentJob = await tx.importJob.findFirst({
+          where: {
+            id: job.id,
+            companyId: actor.companyId,
+            requestedByUserId: actor.userId,
+            template: "ATTENDANCE_MACHINE",
+          },
+          select: importJobSelect,
+        });
+        if (!currentJob) {
+          throw new DomainError("NOT_FOUND", "Kh么ng t矛m th岷 l瓢峄 import trong ph岷 vi.");
+        }
+        if (currentJob.status === "SUCCEEDED") {
+          return currentJob;
+        }
+        if (currentJob.status !== "VALIDATED") {
+          throw stalePreviewError();
         }
 
-        const after = await tx.attendanceDay.findUniqueOrThrow({
-          where: { id: attendanceId },
-          select: previewAttendanceSelect,
-        });
-        await appendAttendanceImportAudit(tx, actor, {
-          job,
-          row,
-          before,
-          after,
-          reason: commitReason,
-          metadata,
-        });
-        await reconcileAutomaticViolationsInTransaction(
-          tx,
-          actor,
-          attendanceId,
-          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_MACHINE_IMPORT"),
-          metadata,
-        );
-      }
-
-      await tx.auditLog.create({
-        data: {
-          companyId: actor.companyId,
-          branchId: target.branchId,
-          actorUserId: actor.userId,
-          action: "ATTENDANCE_MACHINE_IMPORT_COMMIT",
-          entityType: "ImportJob",
-          entityId: job.id,
-          reason: commitReason,
-          after: {
+        const latestCommittedJob = await tx.importJob.findFirst({
+          where: {
+            id: { not: job.id },
+            companyId: actor.companyId,
+            branchId: target.branchId,
             targetStaffId: target.id,
             targetMonth: target.month,
-            committedRows: rows.length,
+            template: "ATTENDANCE_MACHINE",
+            status: "SUCCEEDED",
           },
-          requestId: metadata.requestId,
-          ipAddress: metadata.ipAddress,
-          userAgent: metadata.userAgent,
-        },
-      });
-      return tx.importJob.update({
-        where: { id: job.id },
-        data: {
-          status: "SUCCEEDED",
-          committedRows: rows.length,
-          committedAt: new Date(),
-          errorMessage: null,
-        },
-        select: importJobSelect,
-      });
-    },
-    { maxWait: 5_000, timeout: 60_000 },
-  );
+          select: { id: true, committedAt: true },
+          orderBy: [{ committedAt: "desc" }, { id: "desc" }],
+        });
+        const baseCommittedImportJobId = jsonStringRecord(job.mapping).baseCommittedImportJobId;
+        const scopeChanged =
+          baseCommittedImportJobId !== undefined
+            ? (latestCommittedJob?.id ?? "") !== baseCommittedImportJobId
+            : Boolean(
+                latestCommittedJob?.committedAt &&
+                  (!job.validatedAt ||
+                    latestCommittedJob.committedAt.getTime() >= job.validatedAt.getTime()),
+              );
+        if (scopeChanged) {
+          throw stalePreviewError();
+        }
+
+        const locked = await tx.importJob.updateMany({
+          where: {
+            id: job.id,
+            companyId: actor.companyId,
+            requestedByUserId: actor.userId,
+            template: "ATTENDANCE_MACHINE",
+            status: "VALIDATED",
+          },
+          data: {
+            status: "COMMITTING",
+            errorMessage: null,
+            expiresAt: expiresAfter(VALIDATING_TTL_MS),
+          },
+        });
+        if (locked.count !== 1) {
+          throw stalePreviewError();
+        }
+
+        for (const row of rows) {
+          const businessDate = parseBusinessDate(row.businessDate!);
+          let before: PreviewAttendance | null = null;
+          let attendanceId: string;
+          if (row.status === "CREATE") {
+            const created = await tx.attendanceDay.create({
+              data: {
+                companyId: actor.companyId,
+                branchId: target.branchId,
+                staffId: target.id,
+                businessDate,
+                checkInAt: row.nextCheckInAt ? new Date(row.nextCheckInAt) : null,
+                checkOutAt: row.nextCheckOutAt ? new Date(row.nextCheckOutAt) : null,
+                spansNextDay: row.nextSpansNextDay,
+                workUnits: "0",
+                overtimeMinutes: 0,
+                note: null,
+                status: "DRAFT",
+                createdByUserId: actor.userId,
+                updatedByUserId: actor.userId,
+              },
+            });
+            attendanceId = created.id;
+            await tx.liveDailyMetric.create({
+              data: {
+                companyId: actor.companyId,
+                branchId: target.branchId,
+                attendanceId,
+                actualLiveMinutes: 0,
+                revenueAmount: 0n,
+                revenueUnit: target.company.revenueUnit,
+                revenueScale: target.company.revenueScale,
+              },
+            });
+          } else {
+            before = await tx.attendanceDay.findUnique({
+              where: { id: row.attendanceId! },
+              select: previewAttendanceSelect,
+            });
+            if (!before) {
+              throw new DomainError("CONFLICT", "Attendance đã thay đổi; hãy preview lại.", {
+                code: "IMPORT_PREVIEW_STALE",
+                businessDate: row.businessDate,
+              });
+            }
+            const result = await tx.attendanceDay.updateMany({
+              where: {
+                id: row.attendanceId!,
+                companyId: actor.companyId,
+                branchId: target.branchId,
+                staffId: target.id,
+                version: row.expectedVersion!,
+              },
+              data: {
+                checkInAt: row.nextCheckInAt ? new Date(row.nextCheckInAt) : null,
+                checkOutAt: row.nextCheckOutAt ? new Date(row.nextCheckOutAt) : null,
+                spansNextDay: row.nextSpansNextDay,
+                updatedByUserId: actor.userId,
+                version: { increment: 1 },
+              },
+            });
+            if (result.count !== 1) {
+              throw new DomainError("CONFLICT", "Attendance đã thay đổi; hãy preview lại.", {
+                code: "IMPORT_PREVIEW_STALE",
+                businessDate: row.businessDate,
+              });
+            }
+            attendanceId = row.attendanceId!;
+          }
+
+          const after = await tx.attendanceDay.findUniqueOrThrow({
+            where: { id: attendanceId },
+            select: previewAttendanceSelect,
+          });
+          await appendAttendanceImportAudit(tx, actor, {
+            job,
+            row,
+            before,
+            after,
+            reason: commitReason,
+            metadata,
+          });
+          await reconcileAutomaticViolationsInTransaction(
+            tx,
+            actor,
+            attendanceId,
+            systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_MACHINE_IMPORT"),
+            metadata,
+          );
+        }
+
+        await tx.auditLog.create({
+          data: {
+            companyId: actor.companyId,
+            branchId: target.branchId,
+            actorUserId: actor.userId,
+            action: "ATTENDANCE_MACHINE_IMPORT_COMMIT",
+            entityType: "ImportJob",
+            entityId: job.id,
+            reason: commitReason,
+            after: {
+              targetStaffId: target.id,
+              targetMonth: target.month,
+              committedRows: rows.length,
+            },
+            requestId: metadata.requestId,
+            ipAddress: metadata.ipAddress,
+            userAgent: metadata.userAgent,
+          },
+        });
+        return tx.importJob.update({
+          where: { id: job.id },
+          data: {
+            status: "SUCCEEDED",
+            committedRows: rows.length,
+            committedAt: new Date(),
+            expiresAt: null,
+            errorMessage: null,
+          },
+          select: importJobSelect,
+        });
+      },
+      { maxWait: 5_000, timeout: 60_000 },
+    );
+  } catch (cause) {
+    if (
+      isUniqueConstraintError(cause) ||
+      (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "P2034")
+    ) {
+      throw stalePreviewError();
+    }
+    throw cause;
+  }
+  await supersedeSiblingPreviews(actor, target, updatedJob.id, metadata);
   return toJobDto(updatedJob);
 }
