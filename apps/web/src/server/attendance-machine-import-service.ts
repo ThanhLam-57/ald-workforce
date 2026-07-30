@@ -35,6 +35,12 @@ const PREVIEW_ROW_LIMIT = 200;
 const PENDING_UPLOAD_TTL_MS = 30 * 60 * 1_000;
 const UPLOADED_TTL_MS = 24 * 60 * 60 * 1_000;
 const VALIDATING_TTL_MS = 15 * 60 * 1_000;
+const SUPERSEDABLE_IMPORT_STATUSES = [
+  "PENDING_UPLOAD",
+  "UPLOADED",
+  "VALIDATING",
+  "VALIDATED",
+] as const;
 type Transaction = Prisma.TransactionClient;
 
 type ImportTarget = Awaited<ReturnType<typeof resolveImportTarget>>;
@@ -101,6 +107,7 @@ const importJobSelect = {
   errorMessage: true,
   requestedByUserId: true,
   reason: true,
+  createdAt: true,
   uploadedAt: true,
   validatedAt: true,
   committedAt: true,
@@ -201,6 +208,10 @@ function stalePreviewError(businessDate?: string): DomainError {
 
 function isUniqueConstraintError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "P2002";
+}
+
+function prismaErrorCode(error: unknown): string | null {
+  return typeof error === "object" && error !== null && "code" in error ? String(error.code) : null;
 }
 
 function toJobDto(job: AttendanceMachineImportJob): AttendanceMachineImportJobDto {
@@ -923,9 +934,31 @@ export async function uploadAttendanceMachineImport(
       data: { errorMessage: message },
     });
     if (cause instanceof DomainError) throw cause;
-    throw new DomainError("CONFLICT", "Không thể tải file lên hệ thống. Vui lòng thử lại.", {
-      code: "IMPORT_UPLOAD_FAILED",
-    });
+    const errorCode = prismaErrorCode(cause);
+    console.error(
+      JSON.stringify({
+        event: "attendance_machine_import.upload_failed",
+        requestId: metadata.requestId,
+        importJobId: job.id,
+        errorName: cause instanceof Error ? cause.name : "UnknownError",
+        errorMessage: cause instanceof Error ? cause.message : "Unknown upload error",
+        prismaCode: errorCode,
+      }),
+    );
+    if (errorCode === "P2028") {
+      throw new DomainError(
+        "DEPENDENCY_UNAVAILABLE",
+        "Xử lý file quá lâu và đã được hoàn tác. Hãy bấm Thử lại để tạo lượt import mới.",
+        { code: "IMPORT_PREVIEW_TIMEOUT" },
+      );
+    }
+    throw new DomainError(
+      "DEPENDENCY_UNAVAILABLE",
+      "Không thể xử lý file trên hệ thống. Hãy bấm Thử lại để tạo lượt import mới.",
+      {
+        code: "IMPORT_UPLOAD_FAILED",
+      },
+    );
   }
 }
 
@@ -1352,6 +1385,91 @@ function persistedRows(rows: readonly StoredPreviewRow[]): readonly StoredPrevie
   return [...visibleRows, ...additionalActionRows];
 }
 
+async function supersedeOlderImportAttempts(
+  tx: Transaction,
+  input: Readonly<{
+    actor: ActorContext;
+    target: ImportTarget;
+    winningJobId: string;
+    winningJobCreatedAt: Date;
+    metadata: RequestMetadata;
+    now: Date;
+    reasonCode: string;
+    message: string;
+  }>,
+): Promise<number> {
+  const candidates = await tx.importJob.findMany({
+    where: {
+      companyId: input.actor.companyId,
+      branchId: input.target.branchId,
+      targetStaffId: input.target.id,
+      targetMonth: input.target.month,
+      template: "ATTENDANCE_MACHINE",
+      status: { in: [...SUPERSEDABLE_IMPORT_STATUSES] },
+      OR: [
+        { createdAt: { lt: input.winningJobCreatedAt } },
+        {
+          createdAt: input.winningJobCreatedAt,
+          id: { lt: input.winningJobId },
+        },
+      ],
+    },
+    select: { id: true, status: true },
+  });
+  if (candidates.length === 0) return 0;
+
+  const candidateIds = candidates.map((candidate) => candidate.id);
+  const statusById = new Map(
+    candidates.map((candidate) => [candidate.id, candidate.status] as const),
+  );
+  const superseded = await tx.importJob.updateMany({
+    where: {
+      id: { in: candidateIds },
+      companyId: input.actor.companyId,
+      status: { in: [...SUPERSEDABLE_IMPORT_STATUSES] },
+    },
+    data: {
+      status: "SUPERSEDED",
+      supersededAt: input.now,
+      expiresAt: input.now,
+      errorMessage: input.message,
+    },
+  });
+  if (superseded.count === 0) return 0;
+
+  const updatedRows = await tx.importJob.findMany({
+    where: {
+      id: { in: candidateIds },
+      companyId: input.actor.companyId,
+      status: "SUPERSEDED",
+      supersededAt: input.now,
+    },
+    select: { id: true },
+  });
+  if (updatedRows.length === 0) return 0;
+
+  await tx.auditLog.createMany({
+    data: updatedRows.map((row) => ({
+      companyId: input.actor.companyId,
+      branchId: input.target.branchId,
+      actorUserId: input.actor.userId,
+      action: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
+      entityType: "ImportJob",
+      entityId: row.id,
+      reason: systemAuditReason(input.reasonCode),
+      before: { status: statusById.get(row.id) ?? "UNKNOWN" },
+      after: {
+        status: "SUPERSEDED",
+        supersededByImportJobId: input.winningJobId,
+      },
+      requestId: input.metadata.requestId,
+      ipAddress: input.metadata.ipAddress,
+      userAgent: input.metadata.userAgent,
+    })),
+  });
+  return updatedRows.length;
+}
+
 async function persistAttendanceMachineImportPreview(input: {
   actor: ActorContext;
   job: AttendanceMachineImportJob;
@@ -1432,50 +1550,16 @@ async function persistAttendanceMachineImportPreview(input: {
     if (transitioned.count !== 1) {
       throw stalePreviewError();
     }
-    const siblingAttempts = await tx.importJob.findMany({
-      where: {
-        id: { not: job.id },
-        companyId: actor.companyId,
-        branchId: target.branchId,
-        targetStaffId: target.id,
-        targetMonth: target.month,
-        template: "ATTENDANCE_MACHINE",
-        status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
-      },
-      select: { id: true, status: true },
+    await supersedeOlderImportAttempts(tx, {
+      actor,
+      target,
+      winningJobId: job.id,
+      winningJobCreatedAt: job.createdAt,
+      metadata,
+      now,
+      reasonCode: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED_BY_NEW_PREVIEW",
+      message: "Lượt import đã được thay thế bởi bản xem trước mới hơn.",
     });
-    for (const sibling of siblingAttempts) {
-      const superseded = await tx.importJob.updateMany({
-        where: {
-          id: sibling.id,
-          companyId: actor.companyId,
-          status: sibling.status,
-        },
-        data: {
-          status: "SUPERSEDED",
-          supersededAt: now,
-          expiresAt: now,
-          errorMessage: "Lượt import đã được thay thế bởi bản xem trước mới hơn.",
-        },
-      });
-      if (superseded.count !== 1) continue;
-      await tx.auditLog.create({
-        data: {
-          companyId: actor.companyId,
-          branchId: target.branchId,
-          actorUserId: actor.userId,
-          action: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
-          entityType: "ImportJob",
-          entityId: sibling.id,
-          reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_SUPERSEDED_BY_NEW_PREVIEW"),
-          before: { status: sibling.status },
-          after: { status: "SUPERSEDED", supersededByImportJobId: job.id },
-          requestId: metadata.requestId,
-          ipAddress: metadata.ipAddress,
-          userAgent: metadata.userAgent,
-        },
-      });
-    }
     const persistedJob = await tx.importJob.findUniqueOrThrow({
       where: { id: job.id },
       select: importJobSelect,
@@ -1703,62 +1787,31 @@ async function assertPreviewStillCurrent(
 async function supersedeSiblingPreviews(
   actor: ActorContext,
   target: ImportTarget,
-  winningJobId: string,
+  winningJob: Pick<AttendanceMachineImportJob, "id" | "createdAt">,
   metadata: RequestMetadata,
 ): Promise<void> {
   try {
-    const siblings = await prisma.importJob.findMany({
-      where: {
-        id: { not: winningJobId },
-        companyId: actor.companyId,
-        branchId: target.branchId,
-        targetStaffId: target.id,
-        targetMonth: target.month,
-        template: "ATTENDANCE_MACHINE",
-        status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
+    const now = new Date();
+    await prisma.$transaction(
+      async (tx) => {
+        await supersedeOlderImportAttempts(tx, {
+          actor,
+          target,
+          winningJobId: winningJob.id,
+          winningJobCreatedAt: winningJob.createdAt,
+          metadata,
+          now,
+          reasonCode: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
+          message: "Bản xem trước đã cũ vì một lượt import mới đã được ghi thành công.",
+        });
       },
-      select: { id: true, status: true },
-    });
-    for (const sibling of siblings) {
-      const supersededAt = new Date();
-      await prisma.$transaction(async (tx) => {
-        const superseded = await tx.importJob.updateMany({
-          where: {
-            id: sibling.id,
-            companyId: actor.companyId,
-            status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
-          },
-          data: {
-            status: "SUPERSEDED",
-            supersededAt,
-            expiresAt: supersededAt,
-            errorMessage: "Bản xem trước đã cũ vì một lượt import mới đã được ghi thành công.",
-          },
-        });
-        if (superseded.count !== 1) return;
-        await tx.auditLog.create({
-          data: {
-            companyId: actor.companyId,
-            branchId: target.branchId,
-            actorUserId: actor.userId,
-            action: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
-            entityType: "ImportJob",
-            entityId: sibling.id,
-            reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_SUPERSEDED"),
-            before: { status: sibling.status },
-            after: { status: "SUPERSEDED", supersededByImportJobId: winningJobId },
-            requestId: metadata.requestId,
-            ipAddress: metadata.ipAddress,
-            userAgent: metadata.userAgent,
-          },
-        });
-      });
-    }
+      { maxWait: 5_000, timeout: 30_000 },
+    );
   } catch (cause) {
     console.error(
       JSON.stringify({
         event: "attendance_machine_import.supersede_failed",
-        importJobId: winningJobId,
+        importJobId: winningJob.id,
         message: cause instanceof Error ? cause.message : "Unknown supersede error",
       }),
     );
@@ -1991,8 +2044,7 @@ export async function commitAttendanceMachineImport(
       { maxWait: 5_000, timeout: 60_000 },
     );
   } catch (cause) {
-    const prismaCode =
-      typeof cause === "object" && cause !== null && "code" in cause ? String(cause.code) : null;
+    const prismaCode = prismaErrorCode(cause);
     if (isUniqueConstraintError(cause) || prismaCode === "P2025" || prismaCode === "P2034") {
       throw stalePreviewError();
     }
@@ -2005,6 +2057,6 @@ export async function commitAttendanceMachineImport(
     }
     throw cause;
   }
-  await supersedeSiblingPreviews(actor, target, updatedJob.id, metadata);
+  await supersedeSiblingPreviews(actor, target, updatedJob, metadata);
   return toJobDto(updatedJob);
 }

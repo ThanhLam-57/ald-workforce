@@ -1701,6 +1701,81 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     ).toMatchObject({ status: "SUPERSEDED", requestedByUserId: manager.userId });
   });
 
+  it("thay thế nhiều lượt bỏ dở bằng batch mà không làm upload hết thời gian", async () => {
+    const month = "2027-01";
+    const abandonedIds = Array.from({ length: 80 }, () => randomUUID());
+    const oldCreatedAt = new Date(Date.now() - 60 * 60 * 1_000);
+    await prisma.importJob.createMany({
+      data: abandonedIds.map((id, index) => {
+        const attemptId = randomUUID();
+        return {
+          id,
+          companyId,
+          branchId: branchAId,
+          targetStaffId: liveAId,
+          targetMonth: month,
+          template: "ATTENDANCE_MACHINE",
+          scopeKey: `attendance:${branchAId}:${liveAId}:${month}:attempt:${attemptId}`,
+          status: (["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] as const)[index % 4]!,
+          idempotencyKey: `attendance-machine:${attemptId}`,
+          objectKey: `attendance-machine-imports/${companyId}/${attemptId}/source.xlsx`,
+          originalFileName: `abandoned-${index}.xlsx`,
+          mimeType: XLSX_MIME,
+          sizeBytes: 1,
+          checksumSha256: randomUUID(),
+          requestedByUserId: index % 2 === 0 ? manager.userId : gm.userId,
+          reason: "Integration fixture: abandoned attendance import",
+          createdAt: oldCreatedAt,
+          expiresAt: new Date(Date.now() + 60 * 60 * 1_000),
+        };
+      }),
+    });
+
+    const staged = await stageWorkbook(gm, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month,
+      bytes: await workbookBytes([
+        {
+          machineCode: "00123",
+          businessDate: "05/01/2027",
+          checkInTime: "09:00",
+          checkOutTime: "17:00",
+        },
+      ]),
+      label: "replacement-after-many-abandoned",
+    });
+
+    expect(staged.presigned.job.status).toBe("PENDING_UPLOAD");
+    expect(staged.preview.summary.createRows).toBe(1);
+    expect(
+      await prisma.importJob.count({
+        where: {
+          id: { in: abandonedIds },
+          status: "SUPERSEDED",
+          supersededAt: { not: null },
+        },
+      }),
+    ).toBe(abandonedIds.length);
+    expect(
+      await prisma.importJob.count({
+        where: {
+          id: { in: abandonedIds },
+          status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
+        },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.auditLog.count({
+        where: {
+          companyId,
+          action: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
+          entityId: { in: abandonedIds },
+        },
+      }),
+    ).toBe(abandonedIds.length);
+  });
+
   it("chỉ commit các ngày được tick và bỏ qua dòng lỗi", async () => {
     const staged = await stageWorkbook(manager, {
       staffId: liveAId,

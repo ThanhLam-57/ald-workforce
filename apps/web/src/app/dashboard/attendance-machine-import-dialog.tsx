@@ -414,6 +414,13 @@ function AttendanceMachineImportDialogContent({
     } catch (cause) {
       const stale = cause instanceof ApiError && cause.details?.code === "IMPORT_PREVIEW_STALE";
       setPreviewStale(stale);
+      if (stage === "upload") {
+        attemptIdRef.current = null;
+        setJob(null);
+        setPreview(null);
+        setSelectedRowKeys(new Set());
+        setUnfinishedAttemptExists(false);
+      }
       setError(stageErrorMessage(stage, cause));
     } finally {
       setBusyStep(null);
