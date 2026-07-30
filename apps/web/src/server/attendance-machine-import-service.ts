@@ -359,12 +359,38 @@ async function resolveImportTarget(
       "Nhân viên chưa được cấu hình mã máy chấm công trong tháng này.",
     );
   }
+  const distinctMachineCodes = new Set(
+    staff.assignments
+      .map((assignment) => normalizeMachineCode(assignment.attendanceMachineCode))
+      .filter(Boolean),
+  );
+  const singleMachineCode = distinctMachineCodes.size === 1 ? [...distinctMachineCodes][0]! : null;
+  const conflictingHistoricalOwner = singleMachineCode
+    ? await prisma.branchAssignment.findFirst({
+        where: {
+          companyId: actor.companyId,
+          branchId: input.branchId,
+          staffId: { not: staff.id },
+          assignmentType: "MEMBER",
+          attendanceMachineCode: {
+            equals: singleMachineCode,
+            mode: "insensitive",
+          },
+          archivedAt: null,
+          effectiveFrom: { lt: end },
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: start } }],
+        },
+        select: { id: true },
+      })
+    : null;
   return {
     ...staff,
     branch,
     branchId: branch.id,
     month: input.month,
     displayedMachineCode,
+    nullAssignmentFallbackMachineCode:
+      singleMachineCode && !conflictingHistoricalOwner ? singleMachineCode : null,
     start,
     end,
   };
@@ -960,6 +986,46 @@ function assignmentForDate(target: ImportTarget, businessDate: string) {
   );
 }
 
+function expectedMachineCodeForDate(
+  target: ImportTarget,
+  businessDate: string,
+): Readonly<{ hasAssignment: boolean; machineCode: string | null }> {
+  const assignment = assignmentForDate(target, businessDate);
+  if (!assignment) {
+    return { hasAssignment: false, machineCode: null };
+  }
+  const assignmentMachineCode = normalizeMachineCode(assignment.attendanceMachineCode);
+  const isLegacyNullIntervalImmediatelyBeforeConfiguredCode =
+    !assignmentMachineCode &&
+    assignment.effectiveTo !== null &&
+    target.assignments.some(
+      (candidate) =>
+        candidate.effectiveFrom.getTime() === assignment.effectiveTo!.getTime() &&
+        normalizeMachineCode(candidate.attendanceMachineCode) ===
+          target.nullAssignmentFallbackMachineCode,
+    );
+  return {
+    hasAssignment: true,
+    machineCode:
+      assignmentMachineCode ||
+      (isLegacyNullIntervalImmediatelyBeforeConfiguredCode
+        ? target.nullAssignmentFallbackMachineCode
+        : null),
+  };
+}
+
+function machineCodeMismatchMessage(
+  businessDate: string,
+  expectedMachineCode: string | null,
+  fileMachineCode: string,
+): string {
+  const formattedDate = businessDate.split("-").reverse().join("/");
+  const expected = expectedMachineCode
+    ? `mã áp dụng ${expectedMachineCode}`
+    : "chưa cấu hình mã áp dụng";
+  return `Ngày ${formattedDate}: ${expected}; mã trong file là ${fileMachineCode}.`;
+}
+
 function displayTime(value: Date | null): string | null {
   if (!value) return null;
   return new Intl.DateTimeFormat("vi-VN", {
@@ -1124,8 +1190,8 @@ async function buildPreview(
         matched: false,
       };
     }
-    const effectiveAssignment = assignmentForDate(target, source.businessDate);
-    if (!effectiveAssignment) {
+    const expectedMachineCode = expectedMachineCodeForDate(target, source.businessDate);
+    if (!expectedMachineCode.hasAssignment) {
       return {
         source,
         row: errorRow(source, "Ngày không thuộc thời gian nhân viên làm việc tại cơ sở đang chọn."),
@@ -1133,14 +1199,18 @@ async function buildPreview(
       };
     }
     if (
-      normalizeMachineCode(effectiveAssignment.attendanceMachineCode) !==
+      normalizeMachineCode(expectedMachineCode.machineCode) !==
       normalizeMachineCode(source.machineCode)
     ) {
       return {
         source,
         row: errorRow(
           source,
-          "Mã trong file không trùng mã máy của nhân viên tại ngày chấm công.",
+          machineCodeMismatchMessage(
+            source.businessDate,
+            expectedMachineCode.machineCode,
+            source.machineCode,
+          ),
           "SKIP_CODE_MISMATCH",
         ),
         matched: false,
@@ -1515,10 +1585,10 @@ async function assertPreviewStillCurrent(
 ) {
   for (const row of rows) {
     if (!row.businessDate || !["CREATE", "UPDATE"].includes(row.status)) continue;
-    const effectiveAssignment = assignmentForDate(target, row.businessDate);
+    const expectedMachineCode = expectedMachineCodeForDate(target, row.businessDate);
     if (
-      !effectiveAssignment ||
-      normalizeMachineCode(effectiveAssignment.attendanceMachineCode) !==
+      !expectedMachineCode.hasAssignment ||
+      normalizeMachineCode(expectedMachineCode.machineCode) !==
         normalizeMachineCode(row.machineCode)
     ) {
       throw new DomainError("CONFLICT", "Mã máy hoặc phân công đã thay đổi; hãy preview lại.", {

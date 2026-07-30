@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { prisma } from "@ald/db";
 import type { ActorContext } from "@ald/domain";
 import ExcelJS from "exceljs";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const privateObjectStorage = vi.hoisted(() => ({
   bytes: new Uint8Array(),
@@ -409,6 +409,13 @@ beforeAll(async () => {
   automaticPenaltyItemId = automaticItem.id;
 });
 
+afterEach(async () => {
+  if (!companyId) return;
+  await prisma.rateLimit.deleteMany({
+    where: { key: { startsWith: `app:${companyId}:` } },
+  });
+});
+
 afterAll(async () => {
   if (!companyId) return;
   await prisma.$transaction(async (tx) => {
@@ -591,6 +598,259 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
         })
       ).map((assignment) => assignment.attendanceMachineCode),
     ).toEqual(["00033", "00044"]);
+  });
+
+  it("backfill mã máy duy nhất cho khoảng legacy chưa có mã mà không bỏ qua ngày cũ", async () => {
+    const legacyStaff = await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: `LIVE-BACKFILL-${runId}`,
+        fullName: "Nhân viên bổ sung mã máy lần đầu",
+        jobTitle: "Nhân viên Live",
+        employmentCategory: "OFFICIAL",
+        joinedDate: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    });
+    await prisma.branchAssignment.createMany({
+      data: [
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: legacyStaff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: null,
+          effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+          effectiveTo: new Date("2026-07-31T00:00:00.000Z"),
+        },
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: legacyStaff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: "00014",
+          effectiveFrom: new Date("2026-07-31T00:00:00.000Z"),
+        },
+      ],
+    });
+    await prisma.staffWorkSchedule.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: legacyStaff.id,
+        name: "Ca chuẩn mã máy 00014",
+        scheduledStartMinutes: 540,
+        scheduledEndMinutes: 1_020,
+        spansNextDay: false,
+        requiredLiveMinutes: 360,
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
+
+    const { presigned, preview } = await stageWorkbook(manager, {
+      staffId: legacyStaff.id,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes: await workbookBytes([
+        {
+          machineCode: "00014",
+          businessDate: "01/07/2026",
+          checkInTime: "09:01",
+          checkOutTime: "17:01",
+        },
+      ]),
+      label: "legacy-first-machine-code",
+    });
+
+    expect(preview.target.attendanceMachineCode).toBe("00014");
+    expect(preview.summary).toMatchObject({
+      totalRows: 1,
+      matchedRows: 1,
+      createRows: 1,
+      skippedRows: 0,
+      errorRows: 0,
+    });
+    expect(preview.rows[0]).toMatchObject({
+      businessDate: "2026-07-01",
+      machineCode: "00014",
+      status: "CREATE",
+    });
+
+    await expect(
+      commitAttendanceMachineImport(manager, presigned.job.id, { confirm: true }, metadata),
+    ).resolves.toMatchObject({ status: "SUCCEEDED", committedRows: 1 });
+  });
+
+  it("không backfill mã máy nếu mã đó thuộc nhân viên khác trong phần đầu tháng", async () => {
+    const [formerOwner, nextOwner] = await Promise.all([
+      prisma.staffMember.create({
+        data: {
+          companyId,
+          staffCode: `LIVE-FORMER-CODE-${runId}`,
+          fullName: "Nhân viên giữ mã cũ",
+          jobTitle: "Nhân viên Live",
+          employmentCategory: "OFFICIAL",
+          joinedDate: new Date("2026-01-01T00:00:00.000Z"),
+        },
+      }),
+      prisma.staffMember.create({
+        data: {
+          companyId,
+          staffCode: `LIVE-NEXT-CODE-${runId}`,
+          fullName: "Nhân viên nhận mã mới",
+          jobTitle: "Nhân viên Live",
+          employmentCategory: "OFFICIAL",
+          joinedDate: new Date("2026-01-01T00:00:00.000Z"),
+        },
+      }),
+    ]);
+    await prisma.branchAssignment.createMany({
+      data: [
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: formerOwner.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: "00015",
+          effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+          effectiveTo: new Date("2026-07-31T00:00:00.000Z"),
+        },
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: nextOwner.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: null,
+          effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+          effectiveTo: new Date("2026-07-31T00:00:00.000Z"),
+        },
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: nextOwner.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: "00015",
+          effectiveFrom: new Date("2026-07-31T00:00:00.000Z"),
+        },
+      ],
+    });
+    await prisma.staffWorkSchedule.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: nextOwner.id,
+        name: "Ca chuẩn mã máy tái sử dụng",
+        scheduledStartMinutes: 540,
+        scheduledEndMinutes: 1_020,
+        spansNextDay: false,
+        requiredLiveMinutes: 360,
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
+
+    const { preview } = await stageWorkbook(manager, {
+      staffId: nextOwner.id,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes: await workbookBytes([
+        {
+          machineCode: "00015",
+          businessDate: "01/07/2026",
+          checkInTime: "09:01",
+          checkOutTime: "17:01",
+        },
+      ]),
+      label: "reused-machine-code",
+    });
+
+    expect(preview.summary).toMatchObject({
+      totalRows: 1,
+      matchedRows: 0,
+      createRows: 0,
+      skippedRows: 1,
+      errorRows: 0,
+    });
+    expect(preview.rows[0]).toMatchObject({
+      businessDate: "2026-07-01",
+      machineCode: "00015",
+      status: "SKIP_CODE_MISMATCH",
+      message: "Ngày 01/07/2026: chưa cấu hình mã áp dụng; mã trong file là 00015.",
+    });
+  });
+
+  it("không dùng lại mã cũ cho ngày sau khi mã máy đã được xóa", async () => {
+    const clearedCodeStaff = await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: `LIVE-CLEARED-CODE-${runId}`,
+        fullName: "Nhân viên đã xóa mã máy",
+        jobTitle: "Nhân viên Live",
+        employmentCategory: "OFFICIAL",
+        joinedDate: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    });
+    await prisma.branchAssignment.createMany({
+      data: [
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: clearedCodeStaff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: "00016",
+          effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+          effectiveTo: new Date("2026-07-15T00:00:00.000Z"),
+        },
+        {
+          companyId,
+          branchId: branchAId,
+          staffId: clearedCodeStaff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: null,
+          effectiveFrom: new Date("2026-07-15T00:00:00.000Z"),
+        },
+      ],
+    });
+    await prisma.staffWorkSchedule.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: clearedCodeStaff.id,
+        name: "Ca chuẩn nhân viên đã xóa mã",
+        scheduledStartMinutes: 540,
+        scheduledEndMinutes: 1_020,
+        spansNextDay: false,
+        requiredLiveMinutes: 360,
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
+
+    const { preview } = await stageWorkbook(manager, {
+      staffId: clearedCodeStaff.id,
+      branchId: branchAId,
+      month: "2026-07",
+      bytes: await workbookBytes([
+        {
+          machineCode: "00016",
+          businessDate: "16/07/2026",
+          checkInTime: "09:01",
+          checkOutTime: "17:01",
+        },
+      ]),
+      label: "cleared-machine-code",
+    });
+
+    expect(preview.summary).toMatchObject({
+      matchedRows: 0,
+      createRows: 0,
+      skippedRows: 1,
+      errorRows: 0,
+    });
+    expect(preview.rows[0]).toMatchObject({
+      status: "SKIP_CODE_MISMATCH",
+      message: "Ngày 16/07/2026: chưa cấu hình mã áp dụng; mã trong file là 00016.",
+    });
   });
 
   it("chỉ match mã máy/ngày hợp lệ, chỉ cập nhật giờ và reconcile lỗi tự động", async () => {

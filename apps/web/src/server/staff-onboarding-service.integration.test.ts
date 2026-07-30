@@ -491,15 +491,25 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
       attendanceMachineCode: "00033",
     });
     expect(
-      await prisma.branchAssignment.findFirstOrThrow({
+      await prisma.branchAssignment.findMany({
         where: {
           companyId,
           staffId: legacy.id,
-          effectiveFrom: new Date("2026-07-10T00:00:00.000Z"),
         },
-        select: { attendanceMachineCode: true },
+        orderBy: { effectiveFrom: "asc" },
+        select: {
+          attendanceMachineCode: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+        },
       }),
-    ).toEqual({ attendanceMachineCode: "00033" });
+    ).toEqual([
+      {
+        attendanceMachineCode: "00033",
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        effectiveTo: null,
+      },
+    ]);
   });
 
   it("manager không thể thêm hoặc đọc nhân viên ở cơ sở khác bằng ID trực tiếp", async () => {

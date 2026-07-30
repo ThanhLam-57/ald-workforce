@@ -11,10 +11,7 @@ import { DomainError, requirePermission, type ActorContext } from "@ald/domain";
 
 import { parseBusinessDate, toBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
-import {
-  safeAssignmentAuditSnapshot,
-  safeStaffAuditSnapshot,
-} from "./staff-audit-snapshot";
+import { safeAssignmentAuditSnapshot, safeStaffAuditSnapshot } from "./staff-audit-snapshot";
 import { systemAuditReason } from "./audit-service";
 
 type Transaction = Prisma.TransactionClient;
@@ -675,8 +672,11 @@ export async function updateStaffProfile(
           input.attendanceMachineCode !== undefined &&
           input.attendanceMachineCode !== scope.attendanceMachineCode
         ) {
-          const newEffectiveFrom =
-            scope.assignmentEffectiveFrom < businessDate
+          const isInitialMachineCodeBackfill =
+            scope.attendanceMachineCode === null && input.attendanceMachineCode !== null;
+          const newEffectiveFrom = isInitialMachineCodeBackfill
+            ? scope.assignmentEffectiveFrom
+            : scope.assignmentEffectiveFrom < businessDate
               ? businessDate
               : scope.assignmentEffectiveFrom;
           const duplicateMachineCode = await tx.branchAssignment.findFirst({
@@ -697,7 +697,28 @@ export async function updateStaffProfile(
           if (duplicateMachineCode) {
             throw machineCodeConflictError();
           }
-          if (scope.assignmentEffectiveFrom < businessDate) {
+          if (isInitialMachineCodeBackfill) {
+            const assignmentUpdate = await tx.branchAssignment.updateMany({
+              where: {
+                id: scope.assignmentId,
+                companyId: actor.companyId,
+                branchId: scope.branchId,
+                assignmentType: "MEMBER",
+                archivedAt: null,
+                version: input.assignmentVersion,
+              },
+              data: {
+                attendanceMachineCode: input.attendanceMachineCode,
+                version: { increment: 1 },
+              },
+            });
+            if (assignmentUpdate.count !== 1) {
+              throw new DomainError(
+                "CONFLICT",
+                "Phân công đã được cập nhật bởi người khác. Hãy tải lại hồ sơ.",
+              );
+            }
+          } else if (scope.assignmentEffectiveFrom < businessDate) {
             const assignmentUpdate = await tx.branchAssignment.updateMany({
               where: {
                 id: scope.assignmentId,
