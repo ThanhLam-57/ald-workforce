@@ -13,26 +13,34 @@ function jsonValue(value: unknown): Prisma.InputJsonValue {
   return redactSensitiveAuditValue(value) as Prisma.InputJsonValue;
 }
 
+type AuditPersistence = Pick<Prisma.TransactionClient, "auditLog">;
+
 /**
  * Audit descriptions are derived on the server so routine mutations never
  * depend on free-text supplied by the client.
  */
 export function systemAuditReason(action: string): string {
-  return `SYSTEM:${action.trim().toUpperCase().replaceAll(/[^A-Z0-9]+/g, "_")}`;
+  return `SYSTEM:${action
+    .trim()
+    .toUpperCase()
+    .replaceAll(/[^A-Z0-9]+/g, "_")}`;
 }
 
-export async function appendSecureAudit(input: {
-  actor: ActorContext;
-  action: string;
-  entityType: string;
-  entityId: string;
-  branchId?: string | null;
-  reason: string;
-  before?: unknown;
-  after?: unknown;
-  metadata: RequestMetadata;
-}): Promise<void> {
-  await prisma.auditLog.create({
+export async function appendSecureAudit(
+  input: {
+    actor: ActorContext;
+    action: string;
+    entityType: string;
+    entityId: string;
+    branchId?: string | null;
+    reason: string;
+    before?: unknown;
+    after?: unknown;
+    metadata: RequestMetadata;
+  },
+  persistence: AuditPersistence = prisma,
+): Promise<void> {
+  await persistence.auditLog.create({
     data: {
       companyId: input.actor.companyId,
       branchId: input.branchId ?? null,

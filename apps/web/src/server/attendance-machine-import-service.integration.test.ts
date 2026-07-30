@@ -24,7 +24,7 @@ import {
   previewAttendanceMachineImport,
   uploadAttendanceMachineImport,
 } from "./attendance-machine-import-service";
-import { putPrivateObject } from "./object-storage";
+import { putPrivateObject, readPrivateObject } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -1088,7 +1088,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     expect(putPrivateObject).not.toHaveBeenCalled();
   });
 
-  it("reports a sanitized storage outage, keeps the job pending and retries successfully", async () => {
+  it("validates and commits in memory without depending on object storage", async () => {
     const bytes = await workbookBytes([
       {
         machineCode: "00123",
@@ -1102,72 +1102,14 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       staffId: liveAId,
       branchId: branchAId,
       month: "2026-07",
-      originalFileName: "storage-retry.xlsx",
+      originalFileName: "storage-independent.xlsx",
       mimeType: XLSX_MIME,
       sizeBytes: bytes.byteLength,
       checksumSha256: createHash("sha256").update(bytes).digest("base64"),
     } as const;
     const first = await presignAttendanceMachineImportUpload(manager, input, metadata);
-    const storageError = Object.assign(
-      new Error(
-        "request to https://private-storage.internal failed with access key do-not-log-this",
-      ),
-      {
-        name: "TimeoutError",
-        $metadata: { httpStatusCode: 503 },
-      },
-    );
-    vi.mocked(putPrivateObject).mockRejectedValueOnce(storageError);
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-    try {
-      await expect(
-        uploadAttendanceMachineImport(
-          manager,
-          first.job.id,
-          new Request("http://localhost/upload", {
-            method: "PUT",
-            headers: { "Content-Type": XLSX_MIME },
-            body: requestBody(bytes),
-          }),
-          metadata,
-        ),
-      ).rejects.toMatchObject({
-        code: "DEPENDENCY_UNAVAILABLE",
-        message:
-          "Kho lưu trữ file đang tạm thời không khả dụng. Vui lòng thử lại sau hoặc báo quản trị viên kiểm tra cấu hình lưu trữ.",
-        details: { code: "STORAGE_UNAVAILABLE", retryable: true },
-      });
-
-      expect(consoleError).toHaveBeenCalledTimes(1);
-      const logLine = String(consoleError.mock.calls[0]?.[0]);
-      expect(JSON.parse(logLine)).toEqual({
-        event: "attendance_machine_import.storage_upload_failed",
-        requestId: metadata.requestId,
-        importJobId: first.job.id,
-        error: {
-          name: "TimeoutError",
-          message: "Private object storage request failed.",
-          status: 503,
-        },
-      });
-      expect(logLine).not.toContain("private-storage.internal");
-      expect(logLine).not.toContain("do-not-log-this");
-    } finally {
-      consoleError.mockRestore();
-    }
-    await expect(
-      prisma.importJob.findUniqueOrThrow({
-        where: { id: first.job.id },
-        select: { status: true },
-      }),
-    ).resolves.toEqual({ status: "PENDING_UPLOAD" });
-
-    const sameAttempt = await presignAttendanceMachineImportUpload(manager, input, metadata);
-    expect(sameAttempt).toMatchObject({
-      duplicate: true,
-      job: { id: first.job.id, status: "PENDING_UPLOAD" },
-    });
+    vi.mocked(putPrivateObject).mockClear();
+    vi.mocked(readPrivateObject).mockClear();
 
     const uploaded = await uploadAttendanceMachineImport(
       manager,
@@ -1179,7 +1121,108 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       }),
       metadata,
     );
-    expect(uploaded).toMatchObject({ id: first.job.id, status: "UPLOADED" });
+    expect(uploaded).toMatchObject({
+      id: first.job.id,
+      status: "VALIDATED",
+      validatedAt: expect.any(String),
+      errorMessage: null,
+    });
+    expect(putPrivateObject).not.toHaveBeenCalled();
+    expect(readPrivateObject).not.toHaveBeenCalled();
+
+    const storedJob = await prisma.importJob.findUniqueOrThrow({
+      where: { id: first.job.id },
+      select: {
+        status: true,
+        mapping: true,
+        previewRows: true,
+        totalRows: true,
+        validRows: true,
+        errorRows: true,
+        uploadedAt: true,
+        validatedAt: true,
+        objectDeletedAt: true,
+      },
+    });
+    expect(storedJob).toMatchObject({
+      status: "VALIDATED",
+      totalRows: 1,
+      validRows: 1,
+      errorRows: 0,
+      uploadedAt: expect.any(Date),
+      validatedAt: expect.any(Date),
+      objectDeletedAt: expect.any(Date),
+      mapping: expect.objectContaining({
+        createRows: "1",
+        sourceObjectStored: "false",
+      }),
+      previewRows: [
+        expect.objectContaining({
+          businessDate: "2026-07-17",
+          fileCheckInTime: "09:00",
+          fileCheckOutTime: "17:00",
+          status: "CREATE",
+        }),
+      ],
+    });
+
+    const firstPreview = await previewAttendanceMachineImport(manager, first.job.id, metadata);
+    const secondPreview = await previewAttendanceMachineImport(manager, first.job.id, metadata);
+    expect(secondPreview).toEqual(firstPreview);
+    expect(firstPreview).toMatchObject({
+      status: "VALIDATED",
+      canCommit: true,
+      summary: { createRows: 1, updateRows: 0, errorRows: 0 },
+      rows: [
+        expect.objectContaining({
+          businessDate: "2026-07-17",
+          fileCheckInTime: "09:00",
+          fileCheckOutTime: "17:00",
+        }),
+      ],
+    });
+    expect(readPrivateObject).not.toHaveBeenCalled();
+
+    const sameAttempt = await presignAttendanceMachineImportUpload(manager, input, metadata);
+    expect(sameAttempt).toMatchObject({
+      duplicate: true,
+      job: { id: first.job.id, status: "VALIDATED" },
+    });
+
+    const repeatedUpload = await uploadAttendanceMachineImport(
+      manager,
+      first.job.id,
+      new Request("http://localhost/upload", {
+        method: "PUT",
+        headers: { "Content-Type": XLSX_MIME },
+        body: requestBody(bytes),
+      }),
+      metadata,
+    );
+    expect(repeatedUpload).toMatchObject({ id: first.job.id, status: "VALIDATED" });
+    expect(putPrivateObject).not.toHaveBeenCalled();
+
+    const committed = await commitAttendanceMachineImport(
+      manager,
+      first.job.id,
+      { confirm: true },
+      metadata,
+    );
+    expect(committed).toMatchObject({ status: "SUCCEEDED", committedRows: 1 });
+    await expect(
+      prisma.attendanceDay.findFirstOrThrow({
+        where: {
+          companyId,
+          branchId: branchAId,
+          staffId: liveAId,
+          businessDate: new Date("2026-07-17T00:00:00.000Z"),
+        },
+        select: { checkInAt: true, checkOutAt: true },
+      }),
+    ).resolves.toEqual({
+      checkInAt: new Date("2026-07-17T02:00:00.000Z"),
+      checkOutAt: new Date("2026-07-17T10:00:00.000Z"),
+    });
     expect(
       await prisma.importJob.count({
         where: {
@@ -1314,7 +1357,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     });
   });
 
-  it("job PENDING hoặc UPLOADED bị bỏ dở không chặn người có quyền khác", async () => {
+  it("job PENDING hoặc VALIDATED bị bỏ dở không chặn người có quyền khác", async () => {
     const bytes = await workbookBytes([
       {
         machineCode: "00123",
@@ -1368,7 +1411,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       }),
       metadata,
     );
-    expect(uploadedDto.status).toBe("UPLOADED");
+    expect(uploadedDto.status).toBe("VALIDATED");
     expect(uploadedDto).not.toHaveProperty("objectKey");
     expect(uploadedDto).not.toHaveProperty("checksumSha256");
     expect(uploadedDto).not.toHaveProperty("upload");
@@ -1392,7 +1435,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     ).toMatchObject({ status: "PENDING_UPLOAD", requestedByUserId: manager.userId });
     expect(
       await prisma.importJob.findUniqueOrThrow({ where: { id: uploaded.job.id } }),
-    ).toMatchObject({ status: "UPLOADED", requestedByUserId: manager.userId });
+    ).toMatchObject({ status: "SUPERSEDED", requestedByUserId: manager.userId });
   });
 
   it("hai commit đồng thời chỉ có một lượt thắng và lượt còn lại nhận preview stale", async () => {
