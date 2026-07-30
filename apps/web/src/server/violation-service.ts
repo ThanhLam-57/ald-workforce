@@ -12,7 +12,7 @@ import type {
   ViolationPreviewDto,
 } from "@ald/contracts";
 import { automaticPenaltyConditionSchema } from "@ald/contracts";
-import { prisma, type Prisma } from "@ald/db";
+import { prisma, Prisma } from "@ald/db";
 import {
   calculatePenaltyOccurrence,
   DomainError,
@@ -36,7 +36,7 @@ import { activateDueSimpleRules } from "./simple-rule-service";
 
 type Transaction = Prisma.TransactionClient;
 
-export const violationSelect = {
+const violationAuditSelect = {
   id: true,
   branchId: true,
   attendanceId: true,
@@ -64,6 +64,14 @@ export const violationSelect = {
   automaticKey: true,
   automaticSnapshot: true,
   version: true,
+} satisfies Prisma.ViolationSelect;
+
+type ViolationAuditRecord = Prisma.ViolationGetPayload<{
+  select: typeof violationAuditSelect;
+}>;
+
+export const violationSelect = {
+  ...violationAuditSelect,
   penaltyItem: {
     select: {
       displayColor: true,
@@ -168,7 +176,7 @@ async function appendAudit(
   });
 }
 
-function violationAuditShape(violation: ViolationRecord): Record<string, unknown> {
+function violationAuditShape(violation: ViolationAuditRecord): Record<string, unknown> {
   return {
     branchId: violation.branchId,
     attendanceId: violation.attendanceId,
@@ -529,6 +537,67 @@ type AutomaticPenaltyItem = Prisma.PenaltyItemGetPayload<{
   select: typeof automaticPenaltyItemSelect;
 }>;
 
+const automaticPenaltyBatchItemSelect = {
+  ...automaticPenaltyItemSelect,
+  ruleVersion: {
+    select: {
+      effectiveFrom: true,
+      effectiveTo: true,
+    },
+  },
+} satisfies Prisma.PenaltyItemSelect;
+
+type AutomaticPenaltyBatchItem = Prisma.PenaltyItemGetPayload<{
+  select: typeof automaticPenaltyBatchItemSelect;
+}>;
+
+const automaticAttendanceSelect = {
+  id: true,
+  companyId: true,
+  branchId: true,
+  staffId: true,
+  businessDate: true,
+  checkInAt: true,
+  status: true,
+  company: { select: { timezone: true } },
+  liveMetric: { select: { actualLiveMinutes: true } },
+} satisfies Prisma.AttendanceDaySelect;
+
+type AutomaticAttendance = Prisma.AttendanceDayGetPayload<{
+  select: typeof automaticAttendanceSelect;
+}>;
+
+const automaticScheduleSelect = {
+  id: true,
+  companyId: true,
+  branchId: true,
+  staffId: true,
+  version: true,
+  name: true,
+  scheduledStartMinutes: true,
+  scheduledEndMinutes: true,
+  spansNextDay: true,
+  requiredLiveMinutes: true,
+  effectiveFrom: true,
+  effectiveTo: true,
+} satisfies Prisma.StaffWorkScheduleSelect;
+
+type AutomaticSchedule = Prisma.StaffWorkScheduleGetPayload<{
+  select: typeof automaticScheduleSelect;
+}>;
+
+type AutomaticViolationBatchContext = {
+  attendanceById: ReadonlyMap<string, AutomaticAttendance>;
+  orderedAttendanceIds: readonly string[];
+  penaltyItems: readonly AutomaticPenaltyBatchItem[];
+  schedules: readonly AutomaticSchedule[];
+  existingByAttendanceId: ReadonlyMap<string, readonly ViolationAuditRecord[]>;
+  lockedAttendanceIds: ReadonlySet<string>;
+  lockedOccurrenceKeys: Set<string>;
+  nextOccurrenceNoByKey: Map<string, number>;
+  skipTotals: true;
+};
+
 function readAutomaticCondition(metadata: Prisma.JsonValue | null): AutomaticCondition | null {
   if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return null;
   const parsed = automaticPenaltyConditionSchema.safeParse(metadata.automaticCondition);
@@ -577,40 +646,100 @@ function monthBoundsForBusinessDate(date: Date): Readonly<{ start: Date; end: Da
   };
 }
 
-export async function reconcileAutomaticViolationsInTransaction(
+function effectiveOnDate(
+  effectiveFrom: Date | null,
+  effectiveTo: Date | null,
+  businessDate: Date,
+): boolean {
+  if (effectiveFrom === null) return false;
+  return (
+    effectiveFrom.getTime() <= businessDate.getTime() &&
+    (effectiveTo === null || effectiveTo.getTime() > businessDate.getTime())
+  );
+}
+
+function batchPenaltyItemsForDate(
+  context: AutomaticViolationBatchContext,
+  businessDate: Date,
+): readonly AutomaticPenaltyItem[] {
+  return context.penaltyItems.filter((item) =>
+    effectiveOnDate(item.ruleVersion.effectiveFrom, item.ruleVersion.effectiveTo, businessDate),
+  );
+}
+
+function batchScheduleForAttendance(
+  context: AutomaticViolationBatchContext,
+  attendance: AutomaticAttendance,
+): AutomaticSchedule | null {
+  return (
+    context.schedules.find(
+      (schedule) =>
+        schedule.branchId === attendance.branchId &&
+        schedule.staffId === attendance.staffId &&
+        effectiveOnDate(schedule.effectiveFrom, schedule.effectiveTo, attendance.businessDate),
+    ) ?? null
+  );
+}
+
+async function lockAutomaticAttendanceBatch(
   tx: Transaction,
   actor: ActorContext,
-  attendanceId: string,
-  reason: string,
-  metadata: RequestMetadata,
-  now = new Date(),
-): Promise<AutomaticViolationReconcileSummaryDto> {
-  const attendance = await tx.attendanceDay.findFirst({
+  attendance: readonly AutomaticAttendance[],
+): Promise<void> {
+  const lockKeys = attendance
+    .map((record) => `automatic-violations:${actor.companyId}:${record.id}`)
+    .sort();
+  if (lockKeys.length === 0) return;
+  const values = Prisma.join(lockKeys.map((lockKey) => Prisma.sql`(${lockKey})`));
+  await tx.$queryRaw(
+    Prisma.sql`
+      SELECT pg_advisory_xact_lock(hashtextextended("lockKey", 0))::text AS "lockResult"
+      FROM (
+        SELECT "lockKey"
+        FROM (VALUES ${values}) AS "lockValues"("lockKey")
+        ORDER BY "lockKey"
+      ) AS "orderedLocks"
+    `,
+  );
+}
+
+async function prepareAutomaticViolationBatchContext(
+  tx: Transaction,
+  actor: ActorContext,
+  attendanceIds: readonly string[],
+): Promise<AutomaticViolationBatchContext> {
+  const uniqueAttendanceIds = [...new Set(attendanceIds)];
+  if (uniqueAttendanceIds.length === 0) {
+    throw new DomainError("VALIDATION_ERROR", "Danh sách ngày cần tính lỗi đang trống.");
+  }
+  const attendance = await tx.attendanceDay.findMany({
     where: {
-      id: attendanceId,
+      id: { in: uniqueAttendanceIds },
       companyId: actor.companyId,
     },
-    select: {
-      id: true,
-      companyId: true,
-      branchId: true,
-      staffId: true,
-      businessDate: true,
-      checkInAt: true,
-      status: true,
-      company: { select: { timezone: true } },
-      liveMetric: { select: { actualLiveMinutes: true } },
-    },
+    select: automaticAttendanceSelect,
+    orderBy: [{ businessDate: "asc" }, { id: "asc" }],
   });
-  if (!attendance?.liveMetric) {
-    throw new DomainError("NOT_FOUND", "Không tìm thấy attendance để tính lỗi tự động.");
+  if (
+    attendance.length !== uniqueAttendanceIds.length ||
+    attendance.some((record) => !record.liveMetric)
+  ) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy đủ dữ liệu chấm công để tính lỗi tự động.");
   }
 
-  const attendanceLockKey = `automatic-violations:${actor.companyId}:${attendance.id}`;
-  await tx.$queryRaw`
-    SELECT 1::integer AS "locked"
-    FROM pg_advisory_xact_lock(hashtextextended(${attendanceLockKey}, 0))
-  `;
+  await lockAutomaticAttendanceBatch(tx, actor, attendance);
+  const firstDate = attendance[0]!.businessDate;
+  const lastDate = attendance.at(-1)!.businessDate;
+  const rangeEnd = new Date(lastDate);
+  rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 1);
+  const staffBranchPairs = [
+    ...new Map(
+      attendance.map((record) => [
+        `${record.staffId}:${record.branchId}`,
+        { staffId: record.staffId, branchId: record.branchId },
+      ]),
+    ).values(),
+  ];
 
   const penaltyItems = await tx.penaltyItem.findMany({
     where: {
@@ -622,8 +751,8 @@ export async function reconcileAutomaticViolationsInTransaction(
         status: { in: ["ACTIVE", "SCHEDULED"] },
         isSimpleCurrent: true,
         supersededAt: null,
-        effectiveFrom: { lte: attendance.businessDate },
-        OR: [{ effectiveTo: null }, { effectiveTo: { gt: attendance.businessDate } }],
+        effectiveFrom: { lt: rangeEnd },
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: firstDate } }],
         ruleSet: {
           companyId: actor.companyId,
           type: "PENALTY",
@@ -631,9 +760,109 @@ export async function reconcileAutomaticViolationsInTransaction(
         },
       },
     },
-    select: automaticPenaltyItemSelect,
+    select: automaticPenaltyBatchItemSelect,
     orderBy: [{ displayOrder: "asc" }, { code: "asc" }],
   });
+  const schedules = await tx.staffWorkSchedule.findMany({
+    where: {
+      companyId: actor.companyId,
+      archivedAt: null,
+      effectiveFrom: { lt: rangeEnd },
+      AND: [
+        { OR: [{ effectiveTo: null }, { effectiveTo: { gt: firstDate } }] },
+        {
+          OR: staffBranchPairs.map((pair) => ({
+            staffId: pair.staffId,
+            branchId: pair.branchId,
+          })),
+        },
+      ],
+    },
+    select: automaticScheduleSelect,
+    orderBy: [{ effectiveFrom: "desc" }, { id: "asc" }],
+  });
+  const existing = await tx.violation.findMany({
+    where: {
+      companyId: actor.companyId,
+      attendanceId: { in: uniqueAttendanceIds },
+      origin: "AUTOMATIC",
+    },
+    select: violationAuditSelect,
+  });
+  const existingByAttendanceId = new Map<string, ViolationAuditRecord[]>();
+  for (const violation of existing) {
+    const records = existingByAttendanceId.get(violation.attendanceId) ?? [];
+    records.push(violation);
+    existingByAttendanceId.set(violation.attendanceId, records);
+  }
+
+  return {
+    attendanceById: new Map(attendance.map((record) => [record.id, record])),
+    orderedAttendanceIds: attendance.map((record) => record.id),
+    penaltyItems,
+    schedules,
+    existingByAttendanceId,
+    lockedAttendanceIds: new Set(attendance.map((record) => record.id)),
+    lockedOccurrenceKeys: new Set(),
+    nextOccurrenceNoByKey: new Map(),
+    skipTotals: true,
+  };
+}
+
+export async function reconcileAutomaticViolationsInTransaction(
+  tx: Transaction,
+  actor: ActorContext,
+  attendanceId: string,
+  reason: string,
+  metadata: RequestMetadata,
+  now = new Date(),
+  batchContext?: AutomaticViolationBatchContext,
+): Promise<AutomaticViolationReconcileSummaryDto> {
+  const attendance =
+    batchContext?.attendanceById.get(attendanceId) ??
+    (await tx.attendanceDay.findFirst({
+      where: {
+        id: attendanceId,
+        companyId: actor.companyId,
+      },
+      select: automaticAttendanceSelect,
+    }));
+  if (!attendance?.liveMetric) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy attendance để tính lỗi tự động.");
+  }
+
+  if (!batchContext?.lockedAttendanceIds.has(attendance.id)) {
+    const attendanceLockKey = `automatic-violations:${actor.companyId}:${attendance.id}`;
+    await tx.$queryRaw`
+      SELECT 1::integer AS "locked"
+      FROM pg_advisory_xact_lock(hashtextextended(${attendanceLockKey}, 0))
+    `;
+  }
+
+  const penaltyItems = batchContext
+    ? batchPenaltyItemsForDate(batchContext, attendance.businessDate)
+    : await tx.penaltyItem.findMany({
+        where: {
+          companyId: actor.companyId,
+          isActive: true,
+          archivedAt: null,
+          ruleVersion: {
+            companyId: actor.companyId,
+            status: { in: ["ACTIVE", "SCHEDULED"] },
+            isSimpleCurrent: true,
+            supersededAt: null,
+            effectiveFrom: { lte: attendance.businessDate },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gt: attendance.businessDate } }],
+            ruleSet: {
+              companyId: actor.companyId,
+              type: "PENALTY",
+              managementMode: "SIMPLE_MUTABLE",
+            },
+          },
+        },
+        select: automaticPenaltyItemSelect,
+        orderBy: [{ displayOrder: "asc" }, { code: "asc" }],
+      });
   const candidates = penaltyItems.flatMap((item) => {
     const condition = readAutomaticCondition(item.metadata);
     return condition ? [{ item, condition }] : [];
@@ -656,41 +885,32 @@ export async function reconcileAutomaticViolationsInTransaction(
     ({ condition }) => condition.thresholdSource === "STAFF_SHIFT",
   );
   const staffSchedule = needsStaffSchedule
-    ? await tx.staffWorkSchedule.findFirst({
-        where: {
-          companyId: actor.companyId,
-          branchId: attendance.branchId,
-          staffId: attendance.staffId,
-          archivedAt: null,
-          effectiveFrom: { lte: attendance.businessDate },
-          OR: [
-            { effectiveTo: null },
-            { effectiveTo: { gt: attendance.businessDate } },
-          ],
-        },
-        orderBy: { effectiveFrom: "desc" },
-        select: {
-          id: true,
-          version: true,
-          name: true,
-          scheduledStartMinutes: true,
-          scheduledEndMinutes: true,
-          spansNextDay: true,
-          requiredLiveMinutes: true,
-          effectiveFrom: true,
-          effectiveTo: true,
-        },
-      })
+    ? batchContext
+      ? batchScheduleForAttendance(batchContext, attendance)
+      : await tx.staffWorkSchedule.findFirst({
+          where: {
+            companyId: actor.companyId,
+            branchId: attendance.branchId,
+            staffId: attendance.staffId,
+            archivedAt: null,
+            effectiveFrom: { lte: attendance.businessDate },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gt: attendance.businessDate } }],
+          },
+          orderBy: { effectiveFrom: "desc" },
+          select: automaticScheduleSelect,
+        })
     : null;
 
-  const existing = await tx.violation.findMany({
-    where: {
-      companyId: actor.companyId,
-      attendanceId: attendance.id,
-      origin: "AUTOMATIC",
-    },
-    select: violationSelect,
-  });
+  const existing =
+    batchContext?.existingByAttendanceId.get(attendance.id) ??
+    (await tx.violation.findMany({
+      where: {
+        companyId: actor.companyId,
+        attendanceId: attendance.id,
+        origin: "AUTOMATIC",
+      },
+      select: violationAuditSelect,
+    }));
   const existingByKey = new Map(
     existing.flatMap((violation) =>
       violation.automaticKey ? [[violation.automaticKey, violation] as const] : [],
@@ -715,7 +935,7 @@ export async function reconcileAutomaticViolationsInTransaction(
       : [];
 
   const cancelAutomaticViolation = async (
-    violation: ViolationRecord,
+    violation: ViolationAuditRecord,
     cancellationReason: string,
   ): Promise<void> => {
     if (violation.status !== "ACTIVE") {
@@ -731,7 +951,7 @@ export async function reconcileAutomaticViolationsInTransaction(
         cancellationReason,
         version: { increment: 1 },
       },
-      select: violationSelect,
+      select: violationAuditSelect,
     });
     cancelledCount += 1;
     await appendAudit(tx, {
@@ -829,18 +1049,11 @@ export async function reconcileAutomaticViolationsInTransaction(
     const snapshotBase = {
       triggerType: condition.type,
       condition: resolvedCondition,
-      scheduleId:
-        thresholdSource === "STAFF_SHIFT" && staffSchedule
-          ? staffSchedule.id
-          : null,
+      scheduleId: thresholdSource === "STAFF_SHIFT" && staffSchedule ? staffSchedule.id : null,
       scheduleVersion:
-        thresholdSource === "STAFF_SHIFT" && staffSchedule
-          ? staffSchedule.version
-          : null,
+        thresholdSource === "STAFF_SHIFT" && staffSchedule ? staffSchedule.version : null,
       scheduledStartMinutes:
-        resolvedCondition.type === "CHECK_IN_LATE"
-          ? resolvedCondition.scheduledStartMinutes
-          : null,
+        resolvedCondition.type === "CHECK_IN_LATE" ? resolvedCondition.scheduledStartMinutes : null,
       requiredLiveMinutes:
         resolvedCondition.type === "LIVE_DURATION_SHORT"
           ? resolvedCondition.requiredLiveMinutes
@@ -857,8 +1070,7 @@ export async function reconcileAutomaticViolationsInTransaction(
               spansNextDay: staffSchedule.spansNextDay,
               requiredLiveMinutes: staffSchedule.requiredLiveMinutes,
               effectiveFrom: staffSchedule.effectiveFrom.toISOString().slice(0, 10),
-              effectiveTo:
-                staffSchedule.effectiveTo?.toISOString().slice(0, 10) ?? null,
+              effectiveTo: staffSchedule.effectiveTo?.toISOString().slice(0, 10) ?? null,
             }
           : null,
       actualMinutes: evaluation.actualMinutes,
@@ -885,7 +1097,7 @@ export async function reconcileAutomaticViolationsInTransaction(
             cancellationReason: null,
             version: { increment: 1 },
           },
-          select: violationSelect,
+          select: violationAuditSelect,
         });
         reactivatedCount += 1;
         await appendAudit(tx, {
@@ -909,7 +1121,7 @@ export async function reconcileAutomaticViolationsInTransaction(
             automaticSnapshot: snapshot,
             version: { increment: 1 },
           },
-          select: violationSelect,
+          select: violationAuditSelect,
         });
         await appendAudit(tx, {
           actor,
@@ -936,20 +1148,46 @@ export async function reconcileAutomaticViolationsInTransaction(
       policy.countingKey,
       period.start,
     ].join(":");
-    await tx.$queryRaw`
-      SELECT 1::integer AS "locked"
-      FROM pg_advisory_xact_lock(hashtextextended(${occurrenceLockKey}, 0))
-    `;
-    const sequence = await tx.violation.aggregate({
-      where: {
-        companyId: actor.companyId,
-        staffId: attendance.staffId,
-        countingKey: policy.countingKey,
-        countingPeriodStart: parseBusinessDate(period.start),
-      },
-      _max: { occurrenceNo: true },
-    });
-    const occurrenceNo = (sequence._max.occurrenceNo ?? 0) + 1;
+    let occurrenceNo: number;
+    if (batchContext) {
+      if (!batchContext.lockedOccurrenceKeys.has(occurrenceLockKey)) {
+        await tx.$queryRaw`
+          SELECT 1::integer AS "locked"
+          FROM pg_advisory_xact_lock(hashtextextended(${occurrenceLockKey}, 0))
+        `;
+        const sequence = await tx.violation.aggregate({
+          where: {
+            companyId: actor.companyId,
+            staffId: attendance.staffId,
+            countingKey: policy.countingKey,
+            countingPeriodStart: parseBusinessDate(period.start),
+          },
+          _max: { occurrenceNo: true },
+        });
+        batchContext.lockedOccurrenceKeys.add(occurrenceLockKey);
+        batchContext.nextOccurrenceNoByKey.set(
+          occurrenceLockKey,
+          (sequence._max.occurrenceNo ?? 0) + 1,
+        );
+      }
+      occurrenceNo = batchContext.nextOccurrenceNoByKey.get(occurrenceLockKey)!;
+      batchContext.nextOccurrenceNoByKey.set(occurrenceLockKey, occurrenceNo + 1);
+    } else {
+      await tx.$queryRaw`
+        SELECT 1::integer AS "locked"
+        FROM pg_advisory_xact_lock(hashtextextended(${occurrenceLockKey}, 0))
+      `;
+      const sequence = await tx.violation.aggregate({
+        where: {
+          companyId: actor.companyId,
+          staffId: attendance.staffId,
+          countingKey: policy.countingKey,
+          countingPeriodStart: parseBusinessDate(period.start),
+        },
+        _max: { occurrenceNo: true },
+      });
+      occurrenceNo = (sequence._max.occurrenceNo ?? 0) + 1;
+    }
     const calculation = calculatePenaltyOccurrence(
       policy,
       occurrenceNo,
@@ -984,7 +1222,7 @@ export async function reconcileAutomaticViolationsInTransaction(
         automaticSnapshot: snapshot,
         createdByUserId: actor.userId,
       },
-      select: violationSelect,
+      select: violationAuditSelect,
     });
     createdCount += 1;
     await appendAudit(tx, {
@@ -1009,6 +1247,19 @@ export async function reconcileAutomaticViolationsInTransaction(
         "Rule tự động không còn áp dụng cho ngày hoặc cơ sở này.",
       );
     }
+  }
+
+  if (batchContext?.skipTotals) {
+    return {
+      createdCount,
+      reactivatedCount,
+      cancelledCount,
+      unchangedCount,
+      missingScheduleCount: warnings.length,
+      warnings,
+      attendanceActivePenaltyTotal: "0",
+      staffMonthActivePenaltyTotal: "0",
+    };
   }
 
   const month = monthBoundsForBusinessDate(attendance.businessDate);
@@ -1042,6 +1293,28 @@ export async function reconcileAutomaticViolationsInTransaction(
     attendanceActivePenaltyTotal: (attendanceTotal._sum.amount ?? 0n).toString(),
     staffMonthActivePenaltyTotal: (staffMonthTotal._sum.amount ?? 0n).toString(),
   };
+}
+
+export async function reconcileAutomaticViolationsBatchInTransaction(
+  tx: Transaction,
+  actor: ActorContext,
+  attendanceIds: readonly string[],
+  reason: string,
+  metadata: RequestMetadata,
+): Promise<void> {
+  const context = await prepareAutomaticViolationBatchContext(tx, actor, attendanceIds);
+  const now = new Date();
+  for (const attendanceId of context.orderedAttendanceIds) {
+    await reconcileAutomaticViolationsInTransaction(
+      tx,
+      actor,
+      attendanceId,
+      reason,
+      metadata,
+      now,
+      context,
+    );
+  }
 }
 
 export async function cancelViolation(

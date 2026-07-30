@@ -704,6 +704,12 @@ export const attendanceMachineImportPresignSchema = z
 
 export const attendanceMachineImportCommitSchema = z.object({
   confirm: z.literal(true),
+  selectedRowKeys: z
+    .array(z.string().trim().min(16).max(100))
+    .min(1)
+    .max(200)
+    .refine((keys) => new Set(keys).size === keys.length, "Danh sách dòng import bị trùng.")
+    .optional(),
 });
 
 export const attendanceMachineImportHistoryQuerySchema = z.object({
@@ -1916,6 +1922,7 @@ export type AttendanceMachineImportRowStatus =
   | "ERROR";
 
 export type AttendanceMachineImportPreviewRowDto = Readonly<{
+  rowKey: string;
   sheetName: string;
   rowNumber: number;
   machineCode: string;

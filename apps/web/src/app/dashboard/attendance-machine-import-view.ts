@@ -1,3 +1,8 @@
+import type {
+  AttendanceMachineImportPreviewRowDto,
+  AttendanceMachineImportRowStatus,
+} from "@ald/contracts";
+
 export type AttendanceMachineImportAvailability = Readonly<{
   branchId: string;
   staffId: string;
@@ -12,6 +17,20 @@ export type AttendanceMachineImportAvailability = Readonly<{
   reconciling: boolean;
   hasReconcilePreview: boolean;
 }>;
+
+export function isAttendanceMachineImportRowSelectable(
+  status: AttendanceMachineImportRowStatus,
+): boolean {
+  return status === "CREATE" || status === "UPDATE";
+}
+
+export function attendanceMachineImportSelectableRowKeys(
+  rows: readonly AttendanceMachineImportPreviewRowDto[],
+): readonly string[] {
+  return rows
+    .filter((row) => isAttendanceMachineImportRowSelectable(row.status))
+    .map((row) => row.rowKey);
+}
 
 export function attendanceMachineImportBlockedReason(
   input: AttendanceMachineImportAvailability,

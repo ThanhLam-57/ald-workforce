@@ -1549,7 +1549,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     expect(replacement.job.id).not.toBe(first.job.id);
   });
 
-  it("cho phép người có quyền tạo attempt mới cùng file và supersede preview cũ sau commit", async () => {
+  it("preview mới thay thế preview cũ trước khi commit", async () => {
     const bytes = await workbookBytes([
       {
         machineCode: "00123",
@@ -1576,6 +1576,9 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     expect(attemptA.presigned.job.id).not.toBe(attemptB.presigned.job.id);
     expect(attemptA.preview.summary.createRows).toBe(1);
     expect(attemptB.preview.summary.createRows).toBe(1);
+    await expect(
+      prisma.importJob.findUniqueOrThrow({ where: { id: attemptA.presigned.job.id } }),
+    ).resolves.toMatchObject({ status: "SUPERSEDED", supersededAt: expect.any(Date) });
 
     const jobsBeforeCommit = await prisma.importJob.findMany({
       where: { id: { in: [attemptA.presigned.job.id, attemptB.presigned.job.id] } },
@@ -1692,13 +1695,167 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
 
     expect(
       await prisma.importJob.findUniqueOrThrow({ where: { id: pending.job.id } }),
-    ).toMatchObject({ status: "PENDING_UPLOAD", requestedByUserId: manager.userId });
+    ).toMatchObject({ status: "SUPERSEDED", requestedByUserId: manager.userId });
     expect(
       await prisma.importJob.findUniqueOrThrow({ where: { id: uploaded.job.id } }),
     ).toMatchObject({ status: "SUPERSEDED", requestedByUserId: manager.userId });
   });
 
-  it("hai commit đồng thời chỉ có một lượt thắng và lượt còn lại nhận preview stale", async () => {
+  it("chỉ commit các ngày được tick và bỏ qua dòng lỗi", async () => {
+    const staged = await stageWorkbook(manager, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-09",
+      bytes: await workbookBytes([
+        {
+          machineCode: "00123",
+          businessDate: "01/09/2026",
+          checkInTime: "09:10",
+          checkOutTime: "17:00",
+        },
+        {
+          machineCode: "00123",
+          businessDate: "02/09/2026",
+          checkInTime: "09:20",
+          checkOutTime: "17:10",
+        },
+        {
+          machineCode: "00123",
+          businessDate: "03/09/2026",
+          checkInTime: "25:99",
+          checkOutTime: "17:00",
+        },
+      ]),
+      label: "selected-days",
+    });
+
+    expect(staged.preview).toMatchObject({
+      canCommit: true,
+      summary: { createRows: 2, errorRows: 1 },
+    });
+    const selectableRows = staged.preview.rows.filter((row) =>
+      ["CREATE", "UPDATE"].includes(row.status),
+    );
+    const errorRow = staged.preview.rows.find((row) => row.status === "ERROR");
+    expect(selectableRows).toHaveLength(2);
+    expect(errorRow?.rowKey).toEqual(expect.any(String));
+
+    await expect(
+      commitAttendanceMachineImport(
+        manager,
+        staged.presigned.job.id,
+        { confirm: true, selectedRowKeys: [errorRow!.rowKey] },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      details: { code: "IMPORT_ROW_SELECTION_INVALID" },
+    });
+
+    const selected = selectableRows.find((row) => row.businessDate === "2026-09-02")!;
+    const committed = await commitAttendanceMachineImport(
+      manager,
+      staged.presigned.job.id,
+      { confirm: true, selectedRowKeys: [selected.rowKey] },
+      metadata,
+    );
+    expect(committed).toMatchObject({ status: "SUCCEEDED", committedRows: 1 });
+    const attendance = await prisma.attendanceDay.findMany({
+      where: {
+        companyId,
+        branchId: branchAId,
+        staffId: liveAId,
+        businessDate: {
+          gte: new Date("2026-09-01T00:00:00.000Z"),
+          lt: new Date("2026-10-01T00:00:00.000Z"),
+        },
+      },
+      select: { businessDate: true, checkInAt: true, checkOutAt: true },
+    });
+    expect(attendance).toEqual([
+      {
+        businessDate: new Date("2026-09-02T00:00:00.000Z"),
+        checkInAt: new Date("2026-09-02T02:20:00.000Z"),
+        checkOutAt: new Date("2026-09-02T10:10:00.000Z"),
+      },
+    ]);
+  });
+
+  it("commit đủ 31 ngày và tính thứ tự lỗi tự động theo batch", async () => {
+    const rows = Array.from({ length: 31 }, (_, index) => ({
+      machineCode: "00123",
+      businessDate: `${String(index + 1).padStart(2, "0")}/10/2026`,
+      checkInTime: "09:30",
+      checkOutTime: "17:00",
+    }));
+    await Promise.all(
+      rows.map((_, index) => {
+        const day = String(index + 1).padStart(2, "0");
+        return createAttendanceFixture({
+          staffId: liveAId,
+          branchId: branchAId,
+          businessDate: `2026-10-${day}`,
+          checkInAt: `2026-10-${day}T02:00:00.000Z`,
+          checkOutAt: `2026-10-${day}T10:00:00.000Z`,
+        });
+      }),
+    );
+    const staged = await stageWorkbook(manager, {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-10",
+      bytes: await workbookBytes(rows),
+      label: "full-month-batch",
+    });
+    expect(staged.preview).toMatchObject({
+      canCommit: true,
+      summary: { createRows: 0, updateRows: 31, errorRows: 0 },
+    });
+
+    const committed = await commitAttendanceMachineImport(
+      manager,
+      staged.presigned.job.id,
+      {
+        confirm: true,
+        selectedRowKeys: staged.preview.rows.map((row) => row.rowKey),
+      },
+      metadata,
+    );
+    expect(committed).toMatchObject({ status: "SUCCEEDED", committedRows: 31 });
+    expect(
+      await prisma.attendanceDay.count({
+        where: {
+          companyId,
+          branchId: branchAId,
+          staffId: liveAId,
+          businessDate: {
+            gte: new Date("2026-10-01T00:00:00.000Z"),
+            lt: new Date("2026-11-01T00:00:00.000Z"),
+          },
+        },
+      }),
+    ).toBe(31);
+    const violations = await prisma.violation.findMany({
+      where: {
+        companyId,
+        branchId: branchAId,
+        staffId: liveAId,
+        businessDate: {
+          gte: new Date("2026-10-01T00:00:00.000Z"),
+          lt: new Date("2026-11-01T00:00:00.000Z"),
+        },
+        origin: "AUTOMATIC",
+        status: "ACTIVE",
+      },
+      select: { occurrenceNo: true },
+      orderBy: { occurrenceNo: "asc" },
+    });
+    expect(violations.map((violation) => violation.occurrenceNo)).toEqual(
+      Array.from({ length: 31 }, (_, index) => index + 1),
+    );
+  });
+
+  it("hai preview đồng thời chỉ giữ một lượt hợp lệ để tránh commit cạnh tranh", async () => {
     const bytes = await workbookBytes([
       {
         machineCode: "00123",
@@ -1707,7 +1864,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
         checkOutTime: "17:15",
       },
     ]);
-    const [attemptA, attemptB] = await Promise.all([
+    const stagedResults = await Promise.allSettled([
       stageWorkbook(manager, {
         staffId: liveAId,
         branchId: branchAId,
@@ -1723,19 +1880,41 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
         label: "concurrent-b",
       }),
     ]);
-    const jobIds = [attemptA.presigned.job.id, attemptB.presigned.job.id];
-    const results = await Promise.allSettled([
-      commitAttendanceMachineImport(manager, jobIds[0]!, { confirm: true }, metadata),
-      commitAttendanceMachineImport(gm, jobIds[1]!, { confirm: true }, metadata),
-    ]);
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    const rejected = results.find(
+    for (const rejected of stagedResults.filter(
       (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    expect(rejected?.reason).toMatchObject({
-      code: "CONFLICT",
-      details: { code: "IMPORT_PREVIEW_STALE" },
+    )) {
+      expect(rejected.reason).toMatchObject({ code: "CONFLICT" });
+      expect(["IMPORT_UPLOAD_FAILED", "IMPORT_PREVIEW_STALE"]).toContain(
+        rejected.reason instanceof Error &&
+          "details" in rejected.reason &&
+          typeof rejected.reason.details === "object" &&
+          rejected.reason.details !== null &&
+          "code" in rejected.reason.details
+          ? rejected.reason.details.code
+          : null,
+      );
+    }
+    const concurrentJobs = await prisma.importJob.findMany({
+      where: {
+        companyId,
+        branchId: branchAId,
+        targetStaffId: liveAId,
+        targetMonth: "2026-07",
+        template: "ATTENDANCE_MACHINE",
+        originalFileName: { in: ["concurrent-a.xlsx", "concurrent-b.xlsx"] },
+      },
+      select: { id: true, requestedByUserId: true, status: true },
     });
+    expect(concurrentJobs.map((job) => job.status).sort()).toEqual(["SUPERSEDED", "VALIDATED"]);
+    const winningJob = concurrentJobs.find((job) => job.status === "VALIDATED")!;
+    const winningActor = winningJob.requestedByUserId === manager.userId ? manager : gm;
+    const committed = await commitAttendanceMachineImport(
+      winningActor,
+      winningJob.id,
+      { confirm: true },
+      metadata,
+    );
+    expect(committed.status).toBe("SUCCEEDED");
     expect(
       await prisma.attendanceDay.count({
         where: {
@@ -1749,7 +1928,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       await prisma.auditLog.count({
         where: {
           companyId,
-          entityId: { in: jobIds },
+          entityId: winningJob.id,
           action: "ATTENDANCE_MACHINE_IMPORT_COMMIT",
         },
       }),

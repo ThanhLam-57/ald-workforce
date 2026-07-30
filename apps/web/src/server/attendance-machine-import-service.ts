@@ -29,7 +29,7 @@ import { parseBusinessDate } from "./business-date";
 import { readPrivateObject, verifyPrivateObject } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
 import { enforceSensitiveMutationRateLimit } from "./sensitive-rate-limit";
-import { reconcileAutomaticViolationsInTransaction } from "./violation-service";
+import { reconcileAutomaticViolationsBatchInTransaction } from "./violation-service";
 
 const PREVIEW_ROW_LIMIT = 200;
 const PENDING_UPLOAD_TTL_MS = 30 * 60 * 1_000;
@@ -255,12 +255,25 @@ function summaryFromJob(job: AttendanceMachineImportJob): AttendanceMachineImpor
   };
 }
 
+function previewRowKey(input: {
+  sheetName: string;
+  rowNumber: number;
+  machineCode: string;
+  businessDate: string | null;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([input.sheetName, input.rowNumber, input.machineCode, input.businessDate]),
+    )
+    .digest("base64url");
+}
+
 function storedPreviewRows(value: Prisma.JsonValue | null): readonly StoredPreviewRow[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((item): item is StoredPreviewRow => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+  return value.flatMap((item): readonly StoredPreviewRow[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const row = item as Record<string, unknown>;
-    return (
+    const valid =
       typeof row.sheetName === "string" &&
       typeof row.rowNumber === "number" &&
       typeof row.machineCode === "string" &&
@@ -269,8 +282,23 @@ function storedPreviewRows(value: Prisma.JsonValue | null): readonly StoredPrevi
       (row.expectedVersion === null || typeof row.expectedVersion === "number") &&
       (row.nextCheckInAt === null || typeof row.nextCheckInAt === "string") &&
       (row.nextCheckOutAt === null || typeof row.nextCheckOutAt === "string") &&
-      typeof row.nextSpansNextDay === "boolean"
-    );
+      typeof row.nextSpansNextDay === "boolean";
+    if (!valid) return [];
+    const stored = row as unknown as StoredPreviewRow;
+    return [
+      {
+        ...stored,
+        rowKey:
+          typeof row.rowKey === "string" && row.rowKey.length > 0
+            ? row.rowKey
+            : previewRowKey({
+                sheetName: stored.sheetName,
+                rowNumber: stored.rowNumber,
+                machineCode: stored.machineCode,
+                businessDate: stored.businessDate,
+              }),
+      },
+    ];
   });
 }
 
@@ -483,6 +511,7 @@ function targetDto(target: ImportTarget) {
 
 function publicPreviewRow(row: StoredPreviewRow): AttendanceMachineImportPreviewRowDto {
   return {
+    rowKey: row.rowKey,
     sheetName: row.sheetName,
     rowNumber: row.rowNumber,
     machineCode: row.machineCode,
@@ -508,10 +537,7 @@ function previewDto(
     target: targetDto(target),
     rows: storedPreviewRows(job.previewRows).slice(0, PREVIEW_ROW_LIMIT).map(publicPreviewRow),
     summary,
-    canCommit:
-      job.status === "VALIDATED" &&
-      summary.errorRows === 0 &&
-      summary.createRows + summary.updateRows > 0,
+    canCommit: job.status === "VALIDATED" && summary.createRows + summary.updateRows > 0,
     truncated: mapping.truncated === "true",
   };
 }
@@ -1058,6 +1084,7 @@ function errorRow(
   status: AttendanceMachineImportRowStatus = "ERROR",
 ): StoredPreviewRow {
   return {
+    rowKey: previewRowKey(source),
     sheetName: source.sheetName,
     rowNumber: source.rowNumber,
     machineCode: source.machineCode,
@@ -1273,6 +1300,7 @@ async function buildPreview(
             ? "Chỉ nhập Giờ ra; Giờ vào hiện có được giữ nguyên."
             : null;
       rows.push({
+        rowKey: previewRowKey(source),
         sheetName: source.sheetName,
         rowNumber: source.rowNumber,
         machineCode: source.machineCode,
@@ -1403,6 +1431,50 @@ async function persistAttendanceMachineImportPreview(input: {
     });
     if (transitioned.count !== 1) {
       throw stalePreviewError();
+    }
+    const siblingAttempts = await tx.importJob.findMany({
+      where: {
+        id: { not: job.id },
+        companyId: actor.companyId,
+        branchId: target.branchId,
+        targetStaffId: target.id,
+        targetMonth: target.month,
+        template: "ATTENDANCE_MACHINE",
+        status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
+      },
+      select: { id: true, status: true },
+    });
+    for (const sibling of siblingAttempts) {
+      const superseded = await tx.importJob.updateMany({
+        where: {
+          id: sibling.id,
+          companyId: actor.companyId,
+          status: sibling.status,
+        },
+        data: {
+          status: "SUPERSEDED",
+          supersededAt: now,
+          expiresAt: now,
+          errorMessage: "Lượt import đã được thay thế bởi bản xem trước mới hơn.",
+        },
+      });
+      if (superseded.count !== 1) continue;
+      await tx.auditLog.create({
+        data: {
+          companyId: actor.companyId,
+          branchId: target.branchId,
+          actorUserId: actor.userId,
+          action: "ATTENDANCE_MACHINE_IMPORT_SUPERSEDED",
+          entityType: "ImportJob",
+          entityId: sibling.id,
+          reason: systemAuditReason("ATTENDANCE_MACHINE_IMPORT_SUPERSEDED_BY_NEW_PREVIEW"),
+          before: { status: sibling.status },
+          after: { status: "SUPERSEDED", supersededByImportJobId: job.id },
+          requestId: metadata.requestId,
+          ipAddress: metadata.ipAddress,
+          userAgent: metadata.userAgent,
+        },
+      });
     }
     const persistedJob = await tx.importJob.findUniqueOrThrow({
       where: { id: job.id },
@@ -1583,6 +1655,22 @@ async function assertPreviewStillCurrent(
   target: ImportTarget,
   rows: readonly StoredPreviewRow[],
 ) {
+  const businessDates = rows.flatMap((row) =>
+    row.businessDate && ["CREATE", "UPDATE"].includes(row.status)
+      ? [parseBusinessDate(row.businessDate)]
+      : [],
+  );
+  const currentAttendance = await prisma.attendanceDay.findMany({
+    where: {
+      companyId: actor.companyId,
+      staffId: target.id,
+      businessDate: { in: businessDates },
+    },
+    select: { id: true, branchId: true, version: true, businessDate: true },
+  });
+  const currentByDate = new Map(
+    currentAttendance.map((record) => [record.businessDate.toISOString().slice(0, 10), record]),
+  );
   for (const row of rows) {
     if (!row.businessDate || !["CREATE", "UPDATE"].includes(row.status)) continue;
     const expectedMachineCode = expectedMachineCodeForDate(target, row.businessDate);
@@ -1595,14 +1683,7 @@ async function assertPreviewStillCurrent(
         code: "IMPORT_PREVIEW_STALE",
       });
     }
-    const current = await prisma.attendanceDay.findFirst({
-      where: {
-        companyId: actor.companyId,
-        staffId: target.id,
-        businessDate: parseBusinessDate(row.businessDate),
-      },
-      select: { id: true, branchId: true, version: true },
-    });
+    const current = currentByDate.get(row.businessDate) ?? null;
     const stale =
       row.expectedVersion === null
         ? current !== null
@@ -1634,7 +1715,7 @@ async function supersedeSiblingPreviews(
         targetStaffId: target.id,
         targetMonth: target.month,
         template: "ATTENDANCE_MACHINE",
-        status: { in: ["VALIDATING", "VALIDATED"] },
+        status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
       },
       select: { id: true, status: true },
     });
@@ -1645,7 +1726,7 @@ async function supersedeSiblingPreviews(
           where: {
             id: sibling.id,
             companyId: actor.companyId,
-            status: { in: ["VALIDATING", "VALIDATED"] },
+            status: { in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED"] },
           },
           data: {
             status: "SUPERSEDED",
@@ -1687,7 +1768,7 @@ async function supersedeSiblingPreviews(
 export async function commitAttendanceMachineImport(
   actor: ActorContext,
   id: string,
-  _input: AttendanceMachineImportCommitInput,
+  input: AttendanceMachineImportCommitInput,
   metadata: RequestMetadata,
 ): Promise<AttendanceMachineImportJobDto> {
   const commitReason = systemAuditReason("ATTENDANCE_MACHINE_IMPORT_COMMIT");
@@ -1698,19 +1779,27 @@ export async function commitAttendanceMachineImport(
   const { job, target } = await authorizedJob(actor, id);
   if (job.status === "SUCCEEDED") return toJobDto(job);
   const summary = summaryFromJob(job);
-  if (
-    job.status !== "VALIDATED" ||
-    summary.errorRows > 0 ||
-    summary.createRows + summary.updateRows === 0
-  ) {
+  if (job.status !== "VALIDATED" || summary.createRows + summary.updateRows === 0) {
     throw new DomainError("CONFLICT", "Preview chưa hợp lệ hoặc không có dòng cần cập nhật.");
   }
-  const rows = storedPreviewRows(job.previewRows).filter((row) =>
+  const actionRows = storedPreviewRows(job.previewRows).filter((row) =>
     ["CREATE", "UPDATE"].includes(row.status),
   );
-  if (rows.length !== summary.createRows + summary.updateRows) {
+  if (actionRows.length !== summary.createRows + summary.updateRows) {
     throw new DomainError("CONFLICT", "Preview không đầy đủ; hãy đọc lại file.");
   }
+  const actionRowsByKey = new Map(actionRows.map((row) => [row.rowKey, row]));
+  const selectedRows = input.selectedRowKeys
+    ? input.selectedRowKeys.map((rowKey) => actionRowsByKey.get(rowKey))
+    : actionRows;
+  if (selectedRows.length === 0 || selectedRows.some((row) => row === undefined)) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      "Danh sách ngày được chọn không thuộc bản xem trước hiện tại.",
+      { code: "IMPORT_ROW_SELECTION_INVALID" },
+    );
+  }
+  const rows = selectedRows as readonly StoredPreviewRow[];
   await assertPreviewStillCurrent(actor, target, rows);
 
   let updatedJob: AttendanceMachineImportJob;
@@ -1781,10 +1870,12 @@ export async function commitAttendanceMachineImport(
           throw stalePreviewError();
         }
 
+        const changedAttendanceIds: string[] = [];
         for (const row of rows) {
           const businessDate = parseBusinessDate(row.businessDate!);
           let before: PreviewAttendance | null = null;
           let attendanceId: string;
+          let after: PreviewAttendance;
           if (row.status === "CREATE") {
             const created = await tx.attendanceDay.create({
               data: {
@@ -1801,20 +1892,21 @@ export async function commitAttendanceMachineImport(
                 status: "DRAFT",
                 createdByUserId: actor.userId,
                 updatedByUserId: actor.userId,
+                liveMetric: {
+                  create: {
+                    companyId: actor.companyId,
+                    branchId: target.branchId,
+                    actualLiveMinutes: 0,
+                    revenueAmount: 0n,
+                    revenueUnit: target.company.revenueUnit,
+                    revenueScale: target.company.revenueScale,
+                  },
+                },
               },
+              select: previewAttendanceSelect,
             });
             attendanceId = created.id;
-            await tx.liveDailyMetric.create({
-              data: {
-                companyId: actor.companyId,
-                branchId: target.branchId,
-                attendanceId,
-                actualLiveMinutes: 0,
-                revenueAmount: 0n,
-                revenueUnit: target.company.revenueUnit,
-                revenueScale: target.company.revenueScale,
-              },
-            });
+            after = created;
           } else {
             before = await tx.attendanceDay.findUnique({
               where: { id: row.attendanceId! },
@@ -1826,7 +1918,7 @@ export async function commitAttendanceMachineImport(
                 businessDate: row.businessDate,
               });
             }
-            const result = await tx.attendanceDay.updateMany({
+            const updated = await tx.attendanceDay.update({
               where: {
                 id: row.attendanceId!,
                 companyId: actor.companyId,
@@ -1841,20 +1933,13 @@ export async function commitAttendanceMachineImport(
                 updatedByUserId: actor.userId,
                 version: { increment: 1 },
               },
+              select: previewAttendanceSelect,
             });
-            if (result.count !== 1) {
-              throw new DomainError("CONFLICT", "Attendance đã thay đổi; hãy preview lại.", {
-                code: "IMPORT_PREVIEW_STALE",
-                businessDate: row.businessDate,
-              });
-            }
             attendanceId = row.attendanceId!;
+            after = updated;
           }
+          changedAttendanceIds.push(attendanceId);
 
-          const after = await tx.attendanceDay.findUniqueOrThrow({
-            where: { id: attendanceId },
-            select: previewAttendanceSelect,
-          });
           await appendAttendanceImportAudit(tx, actor, {
             job,
             row,
@@ -1863,14 +1948,14 @@ export async function commitAttendanceMachineImport(
             reason: commitReason,
             metadata,
           });
-          await reconcileAutomaticViolationsInTransaction(
-            tx,
-            actor,
-            attendanceId,
-            systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_MACHINE_IMPORT"),
-            metadata,
-          );
         }
+        await reconcileAutomaticViolationsBatchInTransaction(
+          tx,
+          actor,
+          changedAttendanceIds,
+          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_MACHINE_IMPORT"),
+          metadata,
+        );
 
         await tx.auditLog.create({
           data: {
@@ -1906,11 +1991,17 @@ export async function commitAttendanceMachineImport(
       { maxWait: 5_000, timeout: 60_000 },
     );
   } catch (cause) {
-    if (
-      isUniqueConstraintError(cause) ||
-      (typeof cause === "object" && cause !== null && "code" in cause && cause.code === "P2034")
-    ) {
+    const prismaCode =
+      typeof cause === "object" && cause !== null && "code" in cause ? String(cause.code) : null;
+    if (isUniqueConstraintError(cause) || prismaCode === "P2025" || prismaCode === "P2034") {
       throw stalePreviewError();
+    }
+    if (prismaCode === "P2028") {
+      throw new DomainError(
+        "DEPENDENCY_UNAVAILABLE",
+        "Quá trình ghi dữ liệu quá lâu và đã được hoàn tác. Chưa có dữ liệu nào được ghi; vui lòng thử lại.",
+        { code: "IMPORT_COMMIT_TIMEOUT" },
+      );
     }
     throw cause;
   }

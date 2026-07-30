@@ -13,6 +13,10 @@ import {
   attendanceMachineImportHistoryPath,
   attendanceMachineUploadPath,
 } from "./attendance-machine-import-client";
+import {
+  attendanceMachineImportSelectableRowKeys,
+  isAttendanceMachineImportRowSelectable,
+} from "./attendance-machine-import-view";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const MAX_FILE_SIZE = 20 * 1_024 * 1_024;
@@ -200,6 +204,7 @@ function AttendanceMachineImportDialogContent({
   const [file, setFile] = useState<File | null>(null);
   const [job, setJob] = useState<AttendanceMachineImportJobDto | null>(null);
   const [preview, setPreview] = useState<AttendanceMachineImportPreviewDto | null>(null);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<ReadonlySet<string>>(new Set());
   const [busyStep, setBusyStep] = useState<BusyStep>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -214,6 +219,7 @@ function AttendanceMachineImportDialogContent({
     setFile(null);
     setJob(null);
     setPreview(null);
+    setSelectedRowKeys(new Set());
     setBusyStep(null);
     setError(null);
     setNotice(null);
@@ -279,6 +285,8 @@ function AttendanceMachineImportDialogContent({
       { method: "POST" },
     );
     setPreview(result);
+    setSelectedRowKeys(new Set(attendanceMachineImportSelectableRowKeys(result.rows)));
+    setUnfinishedAttemptExists(false);
     setNotice(
       result.summary.matchedRows === 0
         ? `Không tìm thấy dữ liệu phù hợp với mã máy chấm công ${
@@ -296,6 +304,7 @@ function AttendanceMachineImportDialogContent({
     attemptIdRef.current = crypto.randomUUID();
     setJob(null);
     setPreview(null);
+    setSelectedRowKeys(new Set());
     setError(null);
     setNotice(null);
     setPreviewStale(false);
@@ -413,7 +422,7 @@ function AttendanceMachineImportDialogContent({
   }
 
   async function commitImport() {
-    if (!job || !preview?.canCommit) {
+    if (!job || !preview?.canCommit || selectedRowKeys.size === 0) {
       setError("Bản xem trước chưa thể import.");
       return;
     }
@@ -426,7 +435,10 @@ function AttendanceMachineImportDialogContent({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ confirm: true }),
+          body: JSON.stringify({
+            confirm: true,
+            selectedRowKeys: [...selectedRowKeys],
+          }),
         },
       );
       if (committed.status !== "SUCCEEDED") {
@@ -448,6 +460,24 @@ function AttendanceMachineImportDialogContent({
     } finally {
       setBusyStep(null);
     }
+  }
+
+  const selectableRows =
+    preview?.rows.filter((row) => isAttendanceMachineImportRowSelectable(row.status)) ?? [];
+  const allSelectableRowsChecked =
+    selectableRows.length > 0 && selectableRows.every((row) => selectedRowKeys.has(row.rowKey));
+
+  function toggleRow(rowKey: string, checked: boolean): void {
+    setSelectedRowKeys((current) => {
+      const next = new Set(current);
+      if (checked) next.add(rowKey);
+      else next.delete(rowKey);
+      return next;
+    });
+  }
+
+  function toggleAllRows(checked: boolean): void {
+    setSelectedRowKeys(checked ? new Set(selectableRows.map((row) => row.rowKey)) : new Set());
   }
 
   return (
@@ -580,7 +610,11 @@ function AttendanceMachineImportDialogContent({
               }}
               type="button"
             >
-              {historyLoading ? "Đang tải lịch sử..." : historyOpen ? "Ẩn lịch sử nhập" : "Xem lịch sử nhập"}
+              {historyLoading
+                ? "Đang tải lịch sử..."
+                : historyOpen
+                  ? "Ẩn lịch sử nhập"
+                  : "Xem lịch sử nhập"}
             </button>
             {job && !busyStep ? (
               <button
@@ -695,10 +729,14 @@ function AttendanceMachineImportDialogContent({
                           </td>
                           <td className="px-3 py-2">{formatTimestamp(item.createdAt)}</td>
                           <td className="px-3 py-2">
-                            {formatTimestamp(item.committedAt ?? item.validatedAt ?? item.uploadedAt)}
+                            {formatTimestamp(
+                              item.committedAt ?? item.validatedAt ?? item.uploadedAt,
+                            )}
                           </td>
                           <td className="px-3 py-2">
-                            <span className="block">Tổng: {item.totalRows.toLocaleString("vi-VN")}</span>
+                            <span className="block">
+                              Tổng: {item.totalRows.toLocaleString("vi-VN")}
+                            </span>
                             <span className="block text-emerald-700">
                               Hợp lệ: {item.validRows.toLocaleString("vi-VN")}
                             </span>
@@ -755,11 +793,26 @@ function AttendanceMachineImportDialogContent({
                   </div>
                 ))}
               </div>
+              <p className="mt-3 text-sm font-medium text-slate-700">
+                Đã chọn {selectedRowKeys.size.toLocaleString("vi-VN")}/
+                {selectableRows.length.toLocaleString("vi-VN")} ngày có thể import. Dòng lỗi hoặc bỏ
+                qua sẽ không được ghi.
+              </p>
 
               <div className="mt-3 max-h-[42dvh] overflow-auto rounded-xl border border-slate-200">
-                <table className="min-w-[1380px] table-fixed text-left text-xs">
+                <table className="min-w-[1440px] table-fixed text-left text-xs">
                   <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700">
                     <tr>
+                      <th className="w-16 px-3 py-2 text-center">
+                        <input
+                          aria-label="Chọn tất cả dòng có thể import"
+                          checked={allSelectableRowsChecked}
+                          className="h-4 w-4 accent-sky-700"
+                          disabled={selectableRows.length === 0 || Boolean(busyStep)}
+                          onChange={(event) => toggleAllRows(event.target.checked)}
+                          type="checkbox"
+                        />
+                      </th>
                       <th className="w-24 px-3 py-2">Dòng</th>
                       <th className="w-28 px-3 py-2">Ngày</th>
                       <th className="w-36 px-3 py-2">Mã trong file</th>
@@ -774,9 +827,37 @@ function AttendanceMachineImportDialogContent({
                   <tbody>
                     {preview.rows.map((row) => (
                       <tr
-                        className="border-t border-slate-100 align-top"
-                        key={`${row.sheetName}:${row.rowNumber}`}
+                        className={`border-t border-slate-100 align-top ${
+                          isAttendanceMachineImportRowSelectable(row.status) &&
+                          !selectedRowKeys.has(row.rowKey)
+                            ? "bg-slate-50 text-slate-500"
+                            : ""
+                        }`}
+                        key={row.rowKey}
                       >
+                        <td className="px-3 py-2 text-center">
+                          <input
+                            aria-label={`Chọn import ngày ${
+                              formatDate(row.businessDate) || `dòng ${row.rowNumber}`
+                            }`}
+                            checked={
+                              isAttendanceMachineImportRowSelectable(row.status) &&
+                              selectedRowKeys.has(row.rowKey)
+                            }
+                            className="h-4 w-4 accent-sky-700"
+                            disabled={
+                              !isAttendanceMachineImportRowSelectable(row.status) ||
+                              Boolean(busyStep)
+                            }
+                            onChange={(event) => toggleRow(row.rowKey, event.target.checked)}
+                            title={
+                              isAttendanceMachineImportRowSelectable(row.status)
+                                ? "Chọn hoặc bỏ dòng này khỏi lần import"
+                                : "Dòng này không đủ điều kiện import"
+                            }
+                            type="checkbox"
+                          />
+                        </td>
                         <td className="break-words px-3 py-2">
                           <span className="block font-medium">{row.rowNumber}</span>
                           <span className="block text-[11px] text-slate-500">{row.sheetName}</span>
@@ -822,7 +903,7 @@ function AttendanceMachineImportDialogContent({
             </button>
             <button
               className="rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={Boolean(busyStep) || !preview?.canCommit}
+              disabled={Boolean(busyStep) || !preview?.canCommit || selectedRowKeys.size === 0}
               onClick={() => void commitImport()}
               type="button"
             >

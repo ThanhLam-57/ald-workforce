@@ -66,6 +66,25 @@ describe("attendance machine import contracts", () => {
     ).toBe(false);
   });
 
+  it("accepts a unique subset of preview row keys", () => {
+    const selectedRowKeys = [
+      "w8teHy1VPl3nVdLZ0mV1QH1WyxvOQeSMGNzV7V3nQxA",
+      "Qy9f0NwM5pO1e2r3t4u5v6w7x8y9z0ABCDEFGHIJKLM",
+    ];
+    expect(
+      attendanceMachineImportCommitSchema.parse({
+        confirm: true,
+        selectedRowKeys,
+      }),
+    ).toEqual({ confirm: true, selectedRowKeys });
+    expect(
+      attendanceMachineImportCommitSchema.safeParse({
+        confirm: true,
+        selectedRowKeys: [selectedRowKeys[0], selectedRowKeys[0]],
+      }).success,
+    ).toBe(false);
+  });
+
   it("validates the exact branch, staff and month history scope", () => {
     expect(
       attendanceMachineImportHistoryQuerySchema.parse({
