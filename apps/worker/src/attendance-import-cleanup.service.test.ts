@@ -137,6 +137,72 @@ describe("cleanupAttendanceMachineImports", () => {
     );
   });
 
+  it("deletes a succeeded source object after retention from its commit time", async () => {
+    mocks.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        id: "job-succeeded",
+        companyId: "company-1",
+        branchId: "branch-1",
+        status: "SUCCEEDED",
+        objectKey: "company-1/imports/job-succeeded/source.xlsx",
+        createdAt: new Date("2026-05-01T00:00:00.000Z"),
+        uploadedAt: new Date("2026-05-01T00:10:00.000Z"),
+        validatedAt: new Date("2026-05-01T00:15:00.000Z"),
+        committedAt: new Date("2026-05-01T00:20:00.000Z"),
+        expiresAt: null,
+      },
+    ]);
+
+    await expect(cleanupAttendanceMachineImports(now)).resolves.toEqual({
+      expired: 0,
+      objectsDeleted: 1,
+      errors: 0,
+    });
+    expect(mocks.findMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: expect.arrayContaining(["SUCCEEDED"]) },
+        }),
+      }),
+    );
+    expect(mocks.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "job-succeeded",
+          status: "SUCCEEDED",
+          objectDeletedAt: null,
+        }),
+        data: { objectDeletedAt: now },
+      }),
+    );
+  });
+
+  it("keeps a succeeded source object until retention has elapsed after commit", async () => {
+    mocks.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      {
+        id: "job-succeeded-recent",
+        companyId: "company-1",
+        branchId: "branch-1",
+        status: "SUCCEEDED",
+        objectKey: "company-1/imports/job-succeeded-recent/source.xlsx",
+        createdAt: new Date("2026-05-01T00:00:00.000Z"),
+        uploadedAt: new Date("2026-07-20T00:00:00.000Z"),
+        validatedAt: new Date("2026-07-20T00:05:00.000Z"),
+        committedAt: new Date("2026-07-20T00:10:00.000Z"),
+        expiresAt: null,
+      },
+    ]);
+
+    await expect(cleanupAttendanceMachineImports(now)).resolves.toEqual({
+      expired: 0,
+      objectsDeleted: 0,
+      errors: 0,
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.updateMany).not.toHaveBeenCalled();
+  });
+
   it("does not write an audit when another worker wins the expiry CAS", async () => {
     mocks.findMany
       .mockResolvedValueOnce([

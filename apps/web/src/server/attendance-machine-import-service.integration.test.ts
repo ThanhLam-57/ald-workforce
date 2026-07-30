@@ -1088,7 +1088,7 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
     expect(putPrivateObject).not.toHaveBeenCalled();
   });
 
-  it("keeps a storage upload failure pending and retries the same attempt successfully", async () => {
+  it("reports a sanitized storage outage, keeps the job pending and retries successfully", async () => {
     const bytes = await workbookBytes([
       {
         machineCode: "00123",
@@ -1108,23 +1108,54 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
       checksumSha256: createHash("sha256").update(bytes).digest("base64"),
     } as const;
     const first = await presignAttendanceMachineImportUpload(manager, input, metadata);
-    vi.mocked(putPrivateObject).mockRejectedValueOnce(new Error("temporary storage outage"));
-
-    await expect(
-      uploadAttendanceMachineImport(
-        manager,
-        first.job.id,
-        new Request("http://localhost/upload", {
-          method: "PUT",
-          headers: { "Content-Type": XLSX_MIME },
-          body: requestBody(bytes),
-        }),
-        metadata,
+    const storageError = Object.assign(
+      new Error(
+        "request to https://private-storage.internal failed with access key do-not-log-this",
       ),
-    ).rejects.toMatchObject({
-      code: "CONFLICT",
-      details: { code: "IMPORT_UPLOAD_FAILED" },
-    });
+      {
+        name: "TimeoutError",
+        $metadata: { httpStatusCode: 503 },
+      },
+    );
+    vi.mocked(putPrivateObject).mockRejectedValueOnce(storageError);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      await expect(
+        uploadAttendanceMachineImport(
+          manager,
+          first.job.id,
+          new Request("http://localhost/upload", {
+            method: "PUT",
+            headers: { "Content-Type": XLSX_MIME },
+            body: requestBody(bytes),
+          }),
+          metadata,
+        ),
+      ).rejects.toMatchObject({
+        code: "DEPENDENCY_UNAVAILABLE",
+        message:
+          "Kho lưu trữ file đang tạm thời không khả dụng. Vui lòng thử lại sau hoặc báo quản trị viên kiểm tra cấu hình lưu trữ.",
+        details: { code: "STORAGE_UNAVAILABLE", retryable: true },
+      });
+
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      const logLine = String(consoleError.mock.calls[0]?.[0]);
+      expect(JSON.parse(logLine)).toEqual({
+        event: "attendance_machine_import.storage_upload_failed",
+        requestId: metadata.requestId,
+        importJobId: first.job.id,
+        error: {
+          name: "TimeoutError",
+          message: "Private object storage request failed.",
+          status: 503,
+        },
+      });
+      expect(logLine).not.toContain("private-storage.internal");
+      expect(logLine).not.toContain("do-not-log-this");
+    } finally {
+      consoleError.mockRestore();
+    }
     await expect(
       prisma.importJob.findUniqueOrThrow({
         where: { id: first.job.id },
@@ -1157,6 +1188,62 @@ describe("attendance machine import theo nhân viên đang chọn", () => {
         },
       }),
     ).toBe(1);
+  });
+
+  it("renews a pending retry window and ignores expired sibling attempts in the warning", async () => {
+    const bytes = await workbookBytes([
+      {
+        machineCode: "00123",
+        businessDate: "18/08/2026",
+        checkInTime: "09:00",
+        checkOutTime: "17:00",
+      },
+    ]);
+    const baseInput = {
+      staffId: liveAId,
+      branchId: branchAId,
+      month: "2026-08",
+      originalFileName: "retry-window.xlsx",
+      mimeType: XLSX_MIME,
+      sizeBytes: bytes.byteLength,
+      checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+    } as const;
+    const firstInput = { ...attemptFields(), ...baseInput };
+    const first = await presignAttendanceMachineImportUpload(manager, firstInput, metadata);
+    await prisma.importJob.update({
+      where: { id: first.job.id },
+      data: { expiresAt: new Date(Date.now() + 5_000) },
+    });
+
+    const retried = await presignAttendanceMachineImportUpload(manager, firstInput, metadata);
+    const renewed = await prisma.importJob.findUniqueOrThrow({
+      where: { id: first.job.id },
+      select: { expiresAt: true },
+    });
+    expect(retried).toMatchObject({
+      duplicate: true,
+      unfinishedAttemptExists: false,
+      job: { id: first.job.id, status: "PENDING_UPLOAD" },
+    });
+    expect(renewed.expiresAt?.getTime()).toBeGreaterThan(Date.now() + 20 * 60 * 1_000);
+
+    await prisma.importJob.update({
+      where: { id: first.job.id },
+      data: { expiresAt: new Date(Date.now() - 1_000) },
+    });
+    await expect(
+      presignAttendanceMachineImportUpload(manager, firstInput, metadata),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      details: { code: "IMPORT_ATTEMPT_EXPIRED" },
+    });
+    const replacement = await presignAttendanceMachineImportUpload(
+      manager,
+      { ...attemptFields(), ...baseInput },
+      metadata,
+    );
+    expect(replacement.unfinishedAttemptExists).toBe(false);
+    expect(replacement.job.id).not.toBe(first.job.id);
   });
 
   it("cho phép người có quyền tạo attempt mới cùng file và supersede preview cũ sau commit", async () => {

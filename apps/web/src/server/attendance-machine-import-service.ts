@@ -35,6 +35,8 @@ const PREVIEW_ROW_LIMIT = 200;
 const PENDING_UPLOAD_TTL_MS = 30 * 60 * 1_000;
 const UPLOADED_TTL_MS = 24 * 60 * 60 * 1_000;
 const VALIDATING_TTL_MS = 15 * 60 * 1_000;
+const STORAGE_UNAVAILABLE_MESSAGE =
+  "Kho lưu trữ file đang tạm thời không khả dụng. Vui lòng thử lại sau hoặc báo quản trị viên kiểm tra cấu hình lưu trữ.";
 type Transaction = Prisma.TransactionClient;
 
 type ImportTarget = Awaited<ReturnType<typeof resolveImportTarget>>;
@@ -201,6 +203,39 @@ function stalePreviewError(businessDate?: string): DomainError {
 
 function isUniqueConstraintError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "P2002";
+}
+
+function storageErrorName(error: unknown): string {
+  const value = error instanceof Error ? error.name : "UnknownError";
+  const normalized = value.replaceAll(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80);
+  return normalized || "UnknownError";
+}
+
+function storageErrorStatus(error: unknown): number | null {
+  if (typeof error !== "object" || error === null || !("$metadata" in error)) return null;
+  const metadata = error.$metadata;
+  if (typeof metadata !== "object" || metadata === null || !("httpStatusCode" in metadata)) {
+    return null;
+  }
+  return typeof metadata.httpStatusCode === "number" ? metadata.httpStatusCode : null;
+}
+
+function logAttendanceMachineStorageFailure(
+  error: unknown,
+  input: { requestId: string; importJobId: string },
+): void {
+  console.error(
+    JSON.stringify({
+      event: "attendance_machine_import.storage_upload_failed",
+      requestId: input.requestId,
+      importJobId: input.importJobId,
+      error: {
+        name: storageErrorName(error),
+        message: "Private object storage request failed.",
+        status: storageErrorStatus(error),
+      },
+    }),
+  );
 }
 
 function toJobDto(job: AttendanceMachineImportJob): AttendanceMachineImportJobDto {
@@ -584,6 +619,52 @@ export async function presignAttendanceMachineImportUpload(
     );
   }
 
+  if (job?.status === "PENDING_UPLOAD") {
+    const retryStartedAt = new Date();
+    const renewedExpiresAt = new Date(retryStartedAt.getTime() + PENDING_UPLOAD_TTL_MS);
+    const renewed = await prisma.importJob.updateMany({
+      where: {
+        id: job.id,
+        companyId: actor.companyId,
+        requestedByUserId: actor.userId,
+        template: "ATTENDANCE_MACHINE",
+        status: "PENDING_UPLOAD",
+        OR: [{ expiresAt: null }, { expiresAt: { gt: retryStartedAt } }],
+      },
+      data: { expiresAt: renewedExpiresAt },
+    });
+    if (renewed.count === 1) {
+      job = { ...job, expiresAt: renewedExpiresAt };
+    } else {
+      job = await prisma.importJob.findFirst({
+        where: {
+          id: job.id,
+          companyId: actor.companyId,
+          requestedByUserId: actor.userId,
+          template: "ATTENDANCE_MACHINE",
+        },
+        select: importJobSelect,
+      });
+      if (!job) {
+        throw new DomainError("NOT_FOUND", "Không tìm thấy lượt import trong phạm vi.");
+      }
+      if (isExpired(job) || ["FAILED", "EXPIRED", "SUPERSEDED"].includes(job.status)) {
+        throw new DomainError(
+          "CONFLICT",
+          "Lượt import đã hết hạn hoặc đã được thay thế. Hãy tạo lượt import mới.",
+          {
+            code:
+              job.status === "SUPERSEDED"
+                ? "IMPORT_PREVIEW_STALE"
+                : job.status === "FAILED"
+                  ? "IMPORT_ATTEMPT_FAILED"
+                  : "IMPORT_ATTEMPT_EXPIRED",
+          },
+        );
+      }
+    }
+  }
+
   let duplicate = Boolean(job);
   if (!job) {
     const objectKey = `attendance-machine-imports/${actor.companyId}/${randomUUID()}/source.xlsx`;
@@ -650,6 +731,7 @@ export async function presignAttendanceMachineImportUpload(
     },
     metadata,
   });
+  const unfinishedCutoff = new Date();
   const unfinishedAttemptExists =
     (await prisma.importJob.count({
       where: {
@@ -662,6 +744,7 @@ export async function presignAttendanceMachineImportUpload(
         status: {
           in: ["PENDING_UPLOAD", "UPLOADED", "VALIDATING", "VALIDATED", "COMMITTING"],
         },
+        OR: [{ expiresAt: null }, { expiresAt: { gt: unfinishedCutoff } }],
       },
     })) > 0;
   return {
@@ -726,12 +809,23 @@ export async function uploadAttendanceMachineImport(
         { code: "IMPORT_XLSX_INVALID" },
       );
     }
-    await putPrivateObject({
-      objectKey: job.objectKey,
-      mimeType: job.mimeType,
-      body: upload.body,
-      checksumSha256,
-    });
+    try {
+      await putPrivateObject({
+        objectKey: job.objectKey,
+        mimeType: job.mimeType,
+        body: upload.body,
+        checksumSha256,
+      });
+    } catch (cause) {
+      logAttendanceMachineStorageFailure(cause, {
+        requestId: metadata.requestId,
+        importJobId: job.id,
+      });
+      throw new DomainError("DEPENDENCY_UNAVAILABLE", STORAGE_UNAVAILABLE_MESSAGE, {
+        code: "STORAGE_UNAVAILABLE",
+        retryable: true,
+      });
+    }
 
     const uploadedAt = new Date();
     const transitioned = await prisma.importJob.updateMany({

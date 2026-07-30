@@ -39,6 +39,7 @@ export function toErrorResponse(error: unknown): Response {
       AUTHENTICATION_REQUIRED: 401,
       ACCOUNT_DISABLED: 403,
       RATE_LIMITED: 429,
+      DEPENDENCY_UNAVAILABLE: 503,
       FORBIDDEN: 403,
       NOT_FOUND: 404,
       CONFLICT: 409,

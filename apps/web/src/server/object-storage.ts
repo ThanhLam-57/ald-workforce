@@ -15,32 +15,145 @@ type StorageConfig = Readonly<{
   autoCreateBucket: boolean;
 }>;
 
+export type ObjectStorageEnvironment = Readonly<Record<string, string | undefined>>;
+
+export type ResolvedObjectStorageEnvironment = Readonly<{
+  endpoint: string;
+  region: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  forcePathStyle: boolean;
+  autoCreateBucket: boolean;
+}>;
+
 let storageConfig: StorageConfig | null = null;
 let bucketReady: Promise<void> | null = null;
 
-function requiredEnvironment(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`Thiếu biến môi trường ${name}.`);
+function environmentValue(environment: ObjectStorageEnvironment, name: string): string | null {
+  const value = environment[name]?.trim();
+  return value ? value : null;
+}
+
+function requiredEnvironment(
+  environment: ObjectStorageEnvironment,
+  names: readonly string[],
+): string {
+  for (const name of names) {
+    const value = environmentValue(environment, name);
+    if (value) return value;
   }
-  return value;
+
+  throw new Error(`Thiếu biến môi trường ${names.join(" hoặc ")}.`);
+}
+
+function optionalEnvironment(
+  environment: ObjectStorageEnvironment,
+  names: readonly string[],
+): string | null {
+  for (const name of names) {
+    const value = environmentValue(environment, name);
+    if (value) return value;
+  }
+  return null;
+}
+
+function railwayEnvironment(environment: ObjectStorageEnvironment): boolean {
+  return Boolean(
+    environmentValue(environment, "RAILWAY_ENVIRONMENT_ID") ??
+      environmentValue(environment, "RAILWAY_PROJECT_ID"),
+  );
+}
+
+const APPLICATION_STORAGE_NAMES = [
+  "S3_ENDPOINT",
+  "S3_BUCKET",
+  "S3_ACCESS_KEY",
+  "S3_SECRET_KEY",
+] as const;
+const RAILWAY_STORAGE_NAMES = [
+  "AWS_ENDPOINT_URL",
+  "AWS_S3_BUCKET_NAME",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+] as const;
+
+type StorageEnvironmentSource = "application" | "railway";
+
+function hasCompleteEnvironment(
+  environment: ObjectStorageEnvironment,
+  names: readonly string[],
+): boolean {
+  return names.every((name) => environmentValue(environment, name) !== null);
+}
+
+function storageEnvironmentSource(environment: ObjectStorageEnvironment): StorageEnvironmentSource {
+  const onRailway = railwayEnvironment(environment);
+  const hasRailwayBundle = hasCompleteEnvironment(environment, RAILWAY_STORAGE_NAMES);
+  const hasApplicationBundle = hasCompleteEnvironment(environment, APPLICATION_STORAGE_NAMES);
+
+  if (onRailway && hasRailwayBundle) return "railway";
+  if (hasApplicationBundle) return "application";
+  if (hasRailwayBundle) return "railway";
+  throw new Error("Thiếu cấu hình object storage đầy đủ: bộ S3_* hoặc bộ AWS_*.");
+}
+
+function resolveForcePathStyle(
+  environment: ObjectStorageEnvironment,
+  source: StorageEnvironmentSource,
+): boolean {
+  if (source === "railway") {
+    const style = environmentValue(environment, "AWS_S3_URL_STYLE")?.toLowerCase() ?? null;
+    return style === "path" || style === "path-style";
+  }
+
+  return environmentValue(environment, "S3_FORCE_PATH_STYLE")?.toLowerCase() === "true";
+}
+
+export function resolveObjectStorageEnvironment(
+  environment: ObjectStorageEnvironment = process.env,
+): ResolvedObjectStorageEnvironment {
+  const source = storageEnvironmentSource(environment);
+
+  if (source === "railway") {
+    return {
+      endpoint: requiredEnvironment(environment, ["AWS_ENDPOINT_URL"]),
+      region: optionalEnvironment(environment, ["AWS_DEFAULT_REGION"]) ?? "auto",
+      bucket: requiredEnvironment(environment, ["AWS_S3_BUCKET_NAME"]),
+      accessKeyId: requiredEnvironment(environment, ["AWS_ACCESS_KEY_ID"]),
+      secretAccessKey: requiredEnvironment(environment, ["AWS_SECRET_ACCESS_KEY"]),
+      forcePathStyle: resolveForcePathStyle(environment, source),
+      autoCreateBucket: false,
+    };
+  }
+
+  return {
+    endpoint: requiredEnvironment(environment, ["S3_ENDPOINT"]),
+    region: optionalEnvironment(environment, ["S3_REGION"]) ?? "us-east-1",
+    bucket: requiredEnvironment(environment, ["S3_BUCKET"]),
+    accessKeyId: requiredEnvironment(environment, ["S3_ACCESS_KEY"]),
+    secretAccessKey: requiredEnvironment(environment, ["S3_SECRET_KEY"]),
+    forcePathStyle: resolveForcePathStyle(environment, source),
+    autoCreateBucket: environmentValue(environment, "S3_AUTO_CREATE_BUCKET") === "true",
+  };
 }
 
 function getStorageConfig(): StorageConfig {
   if (storageConfig) return storageConfig;
 
-  const endpoint = requiredEnvironment("S3_ENDPOINT");
-  const region = process.env.S3_REGION ?? "us-east-1";
+  const environment = resolveObjectStorageEnvironment();
   storageConfig = {
-    bucket: requiredEnvironment("S3_BUCKET"),
-    autoCreateBucket: process.env.S3_AUTO_CREATE_BUCKET === "true",
+    bucket: environment.bucket,
+    autoCreateBucket: environment.autoCreateBucket,
     client: new S3Client({
-      endpoint,
-      region,
-      forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "true",
+      endpoint: environment.endpoint,
+      region: environment.region,
+      forcePathStyle: environment.forcePathStyle,
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
       credentials: {
-        accessKeyId: requiredEnvironment("S3_ACCESS_KEY"),
-        secretAccessKey: requiredEnvironment("S3_SECRET_KEY"),
+        accessKeyId: environment.accessKeyId,
+        secretAccessKey: environment.secretAccessKey,
       },
     }),
   };
@@ -173,7 +286,6 @@ export async function putPrivateObject(input: {
       Body: input.body,
       ...(input.checksumSha256
         ? {
-            ChecksumSHA256: input.checksumSha256,
             Metadata: { sha256: input.checksumSha256 },
           }
         : {}),

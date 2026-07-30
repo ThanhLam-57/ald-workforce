@@ -138,6 +138,7 @@ export class DomainError extends Error {
       | "AUTHENTICATION_REQUIRED"
       | "ACCOUNT_DISABLED"
       | "RATE_LIMITED"
+      | "DEPENDENCY_UNAVAILABLE"
       | "FORBIDDEN"
       | "NOT_FOUND"
       | "CONFLICT"
