@@ -63,6 +63,7 @@ const violationAuditSelect = {
   origin: true,
   automaticKey: true,
   automaticSnapshot: true,
+  cancellationReason: true,
   version: true,
 } satisfies Prisma.ViolationSelect;
 
@@ -203,6 +204,7 @@ function violationAuditShape(violation: ViolationAuditRecord): Record<string, un
     origin: violation.origin,
     automaticKey: violation.automaticKey,
     automaticSnapshot: violation.automaticSnapshot,
+    cancellationReason: violation.cancellationReason,
     version: violation.version,
   };
 }
@@ -1041,6 +1043,8 @@ export async function reconcileAutomaticViolationsInTransaction(
     }
 
     const businessDate = businessDateText;
+    const policy = resolveOccurrencePolicy(item.reminderPolicy, item.code);
+    const period = penaltyCountingPeriod(businessDate, policy.countingWindow);
     const detail = automaticDetail(
       resolvedCondition,
       evaluation.actualMinutes,
@@ -1078,6 +1082,13 @@ export async function reconcileAutomaticViolationsInTransaction(
       businessDate,
       ruleVersionId: item.ruleVersionId,
       penaltyItemId: item.id,
+      penalty: {
+        itemName: item.name,
+        defaultAmount: item.defaultAmount.toString(),
+        penaltyStartsAt: policy.penaltyStartsAt,
+        countingWindow: policy.countingWindow,
+        countingKey: policy.countingKey,
+      },
     };
     const snapshot = {
       ...snapshotBase,
@@ -1085,13 +1096,47 @@ export async function reconcileAutomaticViolationsInTransaction(
     } satisfies Prisma.InputJsonObject;
 
     if (current) {
+      if (
+        current.status === "CANCELLED" &&
+        current.cancellationReason === systemAuditReason("VIOLATION_CANCELLED")
+      ) {
+        unchangedCount += 1;
+        continue;
+      }
+
+      const calculation = calculatePenaltyOccurrence(
+        policy,
+        current.occurrenceNo,
+        item.defaultAmount.toString(),
+      );
+      const computedAmount = BigInt(calculation.computedAmount);
+      const countingPeriodStart = parseBusinessDate(period.start);
+      const countingPeriodEnd = period.end ? parseBusinessDate(period.end) : null;
+      const refreshedRuleData = {
+        penaltyItemId: item.id,
+        ruleVersionId: item.ruleVersionId,
+        penaltyItemCode: item.code,
+        countingKey: policy.countingKey,
+        countingWindow: policy.countingWindow,
+        countingPeriodStart,
+        countingPeriodEnd,
+        penaltyStartsAt: policy.penaltyStartsAt,
+        snapshottedDefaultAmount: item.defaultAmount,
+        computedAmount,
+        isChargeable: calculation.isChargeable,
+        responsibleParty: "VIOLATING_STAFF",
+        itemName: item.name,
+        amount: computedAmount,
+        detail,
+        automaticSnapshot: snapshot,
+      } satisfies Prisma.ViolationUncheckedUpdateInput;
+
       if (current.status === "CANCELLED") {
         const after = await tx.violation.update({
           where: { id: current.id },
           data: {
+            ...refreshedRuleData,
             status: "ACTIVE",
-            detail,
-            automaticSnapshot: snapshot,
             cancelledByUserId: null,
             cancelledAt: null,
             cancellationReason: null,
@@ -1112,13 +1157,26 @@ export async function reconcileAutomaticViolationsInTransaction(
         });
       } else if (
         current.detail !== detail ||
-        comparableAutomaticSnapshot(current.automaticSnapshot) !== stableJson(snapshotBase)
+        comparableAutomaticSnapshot(current.automaticSnapshot) !== stableJson(snapshotBase) ||
+        current.penaltyItemId !== item.id ||
+        current.ruleVersionId !== item.ruleVersionId ||
+        current.penaltyItemCode !== item.code ||
+        current.countingKey !== policy.countingKey ||
+        current.countingWindow !== policy.countingWindow ||
+        current.countingPeriodStart.getTime() !== countingPeriodStart.getTime() ||
+        (current.countingPeriodEnd?.getTime() ?? null) !== (countingPeriodEnd?.getTime() ?? null) ||
+        current.penaltyStartsAt !== policy.penaltyStartsAt ||
+        current.snapshottedDefaultAmount !== item.defaultAmount ||
+        current.computedAmount !== computedAmount ||
+        current.isChargeable !== calculation.isChargeable ||
+        current.responsibleParty !== "VIOLATING_STAFF" ||
+        current.itemName !== item.name ||
+        current.amount !== computedAmount
       ) {
         const after = await tx.violation.update({
           where: { id: current.id },
           data: {
-            detail,
-            automaticSnapshot: snapshot,
+            ...refreshedRuleData,
             version: { increment: 1 },
           },
           select: violationAuditSelect,
@@ -1140,8 +1198,6 @@ export async function reconcileAutomaticViolationsInTransaction(
       continue;
     }
 
-    const policy = resolveOccurrencePolicy(item.reminderPolicy, item.code);
-    const period = penaltyCountingPeriod(businessDate, policy.countingWindow);
     const occurrenceLockKey = [
       actor.companyId,
       attendance.staffId,
@@ -1301,20 +1357,36 @@ export async function reconcileAutomaticViolationsBatchInTransaction(
   attendanceIds: readonly string[],
   reason: string,
   metadata: RequestMetadata,
-): Promise<void> {
+): Promise<AutomaticViolationReconcileSummaryDto> {
   const context = await prepareAutomaticViolationBatchContext(tx, actor, attendanceIds);
   const now = new Date();
+  const summaries: AutomaticViolationReconcileSummaryDto[] = [];
   for (const attendanceId of context.orderedAttendanceIds) {
-    await reconcileAutomaticViolationsInTransaction(
-      tx,
-      actor,
-      attendanceId,
-      reason,
-      metadata,
-      now,
-      context,
+    summaries.push(
+      await reconcileAutomaticViolationsInTransaction(
+        tx,
+        actor,
+        attendanceId,
+        reason,
+        metadata,
+        now,
+        context,
+      ),
     );
   }
+  return {
+    createdCount: summaries.reduce((total, summary) => total + summary.createdCount, 0),
+    reactivatedCount: summaries.reduce((total, summary) => total + summary.reactivatedCount, 0),
+    cancelledCount: summaries.reduce((total, summary) => total + summary.cancelledCount, 0),
+    unchangedCount: summaries.reduce((total, summary) => total + summary.unchangedCount, 0),
+    missingScheduleCount: summaries.reduce(
+      (total, summary) => total + summary.missingScheduleCount,
+      0,
+    ),
+    warnings: summaries.flatMap((summary) => summary.warnings),
+    attendanceActivePenaltyTotal: "0",
+    staffMonthActivePenaltyTotal: "0",
+  };
 }
 
 export async function cancelViolation(

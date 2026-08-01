@@ -1,6 +1,7 @@
 "use client";
 
 import type {
+  AttendanceBatchSaveResultDto,
   AttendanceFilterOptionsDto,
   AttendanceMonthDayDto,
   AttendanceMonthDto,
@@ -18,6 +19,7 @@ import {
   isNextDayCheckout,
   parseDurationMinutes,
 } from "./attendance-duration";
+import { postAttendanceBatch } from "./attendance-batch-client";
 import { AttendanceMachineImportDialog } from "./attendance-machine-import-dialog";
 import { attendanceMachineImportBlockedReason } from "./attendance-machine-import-view";
 import { AttendanceViolations } from "./attendance-violations";
@@ -88,6 +90,10 @@ function displayTime(value: string | null): string {
   }).format(new Date(value));
 }
 
+function displayMoney(value: string): string {
+  return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} ₫`;
+}
+
 function nextDate(value: string): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + 1);
@@ -125,20 +131,39 @@ function errorMessage(payload: ApiPayload, fallback: string): string {
   return typeof payload.error?.message === "string" ? payload.error.message : fallback;
 }
 
-function conflictRecord(payload: ApiPayload): AttendanceRecordDto | null {
+function batchConflictRecords(
+  payload: ApiPayload,
+): ReadonlyMap<string, AttendanceRecordDto | null> {
   const details = payload.error?.details;
   if (
     typeof details !== "object" ||
     details === null ||
-    !("current" in details) ||
-    typeof details.current !== "object" ||
-    details.current === null ||
-    !("id" in details.current) ||
-    !("version" in details.current)
+    !("conflicts" in details) ||
+    !Array.isArray(details.conflicts)
   ) {
-    return null;
+    return new Map();
   }
-  return details.current as AttendanceRecordDto;
+  const result = new Map<string, AttendanceRecordDto | null>();
+  for (const conflict of details.conflicts) {
+    if (
+      typeof conflict !== "object" ||
+      conflict === null ||
+      !("businessDate" in conflict) ||
+      typeof conflict.businessDate !== "string"
+    ) {
+      continue;
+    }
+    const current =
+      "current" in conflict &&
+      typeof conflict.current === "object" &&
+      conflict.current !== null &&
+      "id" in conflict.current &&
+      "version" in conflict.current
+        ? (conflict.current as AttendanceRecordDto)
+        : null;
+    result.set(conflict.businessDate, current);
+  }
+  return result;
 }
 
 function rowFromRecord(day: EditableDay, record: AttendanceRecordDto): EditableDay {
@@ -204,7 +229,6 @@ export function AttendanceWorkspace({
   const [machineImportOpen, setMachineImportOpen] = useState(false);
   const revenueLabel = "Doanh số (xu)";
   const daysRef = useRef(days);
-  const inFlight = useRef(new Set<string>());
   const batchSaving = useRef(false);
   const optionsController = useRef<AbortController | null>(null);
   const pendingCount = useMemo(
@@ -313,133 +337,10 @@ export function AttendanceWorkspace({
     [],
   );
 
-  const saveDay = useCallback(
-    async (businessDate: string, override?: EditableDay): Promise<boolean> => {
-      const day =
-        override ?? daysRef.current.find((candidate) => candidate.businessDate === businessDate);
-      if (!day) return true;
-      if (inFlight.current.has(businessDate)) return false;
-
-      const actualLiveMinutes = parseDurationMinutes(day.actualLiveDuration);
-      const overtimeMinutes = parseDurationMinutes(day.overtimeDuration);
-      if (actualLiveMinutes === null || overtimeMinutes === null) {
-        replaceDay(businessDate, (current) => ({
-          ...current,
-          saveState: "error",
-          message:
-            actualLiveMinutes === null
-              ? "Live thực tế phải có dạng HH:mm, tối đa 48:00."
-              : "Tăng ca phải có dạng HH:mm, tối đa 48:00.",
-        }));
-        return false;
-      }
-
-      inFlight.current.add(businessDate);
-      replaceDay(businessDate, (current) => ({
-        ...current,
-        saveState: "saving",
-        message: null,
-      }));
-
-      const spansNextDay = isNextDayCheckout(day.checkInTime, day.checkOutTime);
-      const hasWorkedValues =
-        day.checkInTime !== "" ||
-        day.checkOutTime !== "" ||
-        Number(day.workUnits || "0") > 0 ||
-        actualLiveMinutes > 0 ||
-        overtimeMinutes > 0 ||
-        Number(day.revenueAmount || "0") > 0;
-      const values = {
-        checkInAt: timestampFor(businessDate, day.checkInTime),
-        checkOutAt: timestampFor(businessDate, day.checkOutTime, spansNextDay),
-        spansNextDay,
-        workUnits: day.workUnits || "0",
-        overtimeMinutes,
-        note: day.note || null,
-        status: hasWorkedValues ? ("PRESENT" as const) : ("DRAFT" as const),
-        actualLiveMinutes,
-        revenueAmount: day.revenueAmount || "0",
-      };
-
-      try {
-        const response = await fetch(
-          day.record ? `/api/attendance/${day.record.id}` : "/api/attendance",
-          {
-            method: day.record ? "PATCH" : "POST",
-            cache: "no-store",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(
-              day.record
-                ? { ...values, version: day.record.version }
-                : { ...values, staffId, businessDate },
-            ),
-          },
-        );
-        const payload = (await response.json()) as ApiPayload;
-
-        if (!response.ok) {
-          const current = response.status === 409 ? conflictRecord(payload) : null;
-          replaceDay(businessDate, (latest) => ({
-            ...latest,
-            saveState: response.status === 409 ? "conflict" : "error",
-            message: errorMessage(payload, "Không thể lưu attendance."),
-            conflictRecord: current,
-          }));
-          return false;
-        }
-
-        const record = payload.data as AttendanceRecordDto;
-        const summary = record.automaticViolationSummary;
-        const addedCount = (summary?.createdCount ?? 0) + (summary?.reactivatedCount ?? 0);
-        const automaticMessage =
-          addedCount > 0
-            ? `Đã tự động thêm ${addedCount} lỗi.`
-            : (summary?.cancelledCount ?? 0) > 0
-              ? `Đã tự động hủy ${summary!.cancelledCount} lỗi do dữ liệu đã đạt.`
-              : "Đã lưu";
-        replaceDay(businessDate, (latest) => ({
-          ...rowFromRecord(latest, record),
-          saveState: "saved",
-          message: automaticMessage,
-          violations: record.violations ?? latest.violations,
-          activePenaltyTotal: record.activePenaltyTotal ?? latest.activePenaltyTotal,
-        }));
-        if (summary) {
-          setAutomaticWarnings((current) => [
-            ...current.filter((warning) => warning.businessDate !== businessDate),
-            ...summary.warnings,
-          ]);
-          setDataset((current) =>
-            current
-              ? {
-                  ...current,
-                  activePenaltyTotal: summary.staffMonthActivePenaltyTotal,
-                }
-              : current,
-          );
-          if (addedCount > 0 || summary.cancelledCount > 0) {
-            setBatchMessage(automaticMessage);
-          }
-        }
-        return true;
-      } catch (error) {
-        replaceDay(businessDate, (latest) => ({
-          ...latest,
-          saveState: "error",
-          message: error instanceof Error ? error.message : "Không thể lưu attendance.",
-        }));
-        return false;
-      } finally {
-        inFlight.current.delete(businessDate);
-      }
-    },
-    [replaceDay, staffId],
-  );
-
   const saveAll = useCallback(async (): Promise<boolean> => {
-    if (batchSaving.current || inFlight.current.size > 0) {
+    if (batchSaving.current) {
       setBatchSaveState("error");
-      setBatchMessage("Đang có dòng được lưu. Vui lòng chờ hoàn tất.");
+      setBatchMessage("Dữ liệu đang được lưu. Vui lòng chờ hoàn tất.");
       return false;
     }
     const targets = daysRef.current.filter(
@@ -451,24 +352,141 @@ export function AttendanceWorkspace({
       return true;
     }
 
+    const invalidDates = new Map<string, string>();
+    const rows = targets.flatMap((day) => {
+      const actualLiveMinutes = parseDurationMinutes(day.actualLiveDuration);
+      const overtimeMinutes = parseDurationMinutes(day.overtimeDuration);
+      if (actualLiveMinutes === null || overtimeMinutes === null) {
+        invalidDates.set(
+          day.businessDate,
+          actualLiveMinutes === null
+            ? "Live thực tế phải có dạng HH:mm, tối đa 48:00."
+            : "Tăng ca phải có dạng HH:mm, tối đa 48:00.",
+        );
+        return [];
+      }
+      const spansNextDay = isNextDayCheckout(day.checkInTime, day.checkOutTime);
+      const hasWorkedValues =
+        day.checkInTime !== "" ||
+        day.checkOutTime !== "" ||
+        Number(day.workUnits || "0") > 0 ||
+        actualLiveMinutes > 0 ||
+        overtimeMinutes > 0 ||
+        Number(day.revenueAmount || "0") > 0;
+      return [
+        {
+          businessDate: day.businessDate,
+          attendanceId: day.record?.id ?? null,
+          version: day.record?.version ?? null,
+          checkInAt: timestampFor(day.businessDate, day.checkInTime),
+          checkOutAt: timestampFor(day.businessDate, day.checkOutTime, spansNextDay),
+          spansNextDay,
+          workUnits: day.workUnits || "0",
+          overtimeMinutes,
+          note: day.note || null,
+          status: hasWorkedValues ? ("PRESENT" as const) : ("DRAFT" as const),
+          actualLiveMinutes,
+          revenueAmount: day.revenueAmount || "0",
+        },
+      ];
+    });
+    if (invalidDates.size > 0) {
+      setDays((current) => {
+        const next = current.map((day) =>
+          invalidDates.has(day.businessDate)
+            ? {
+                ...day,
+                saveState: "error" as const,
+                message: invalidDates.get(day.businessDate)!,
+              }
+            : day,
+        );
+        daysRef.current = next;
+        return next;
+      });
+      setBatchSaveState("error");
+      setBatchMessage(`Có ${invalidDates.size} dòng chưa đúng định dạng thời lượng.`);
+      return false;
+    }
+
     batchSaving.current = true;
     setBatchSaveState("saving");
     setBatchMessage(`Đang lưu ${targets.length} dòng…`);
-    try {
-      const results = await Promise.all(targets.map((day) => saveDay(day.businessDate, day)));
-      const succeeded = results.filter(Boolean).length;
-      const allSucceeded = succeeded === results.length;
-      setBatchSaveState(allSucceeded ? "saved" : "error");
-      setBatchMessage(
-        allSucceeded
-          ? `Đã lưu ${succeeded} dòng.`
-          : `Đã lưu ${succeeded}/${results.length} dòng. Kiểm tra các dòng báo lỗi.`,
+    setDays((current) => {
+      const targetDates = new Set(targets.map((day) => day.businessDate));
+      const next = current.map((day) =>
+        targetDates.has(day.businessDate)
+          ? { ...day, saveState: "saving" as const, message: null }
+          : day,
       );
-      return allSucceeded;
+      daysRef.current = next;
+      return next;
+    });
+    try {
+      const response = await postAttendanceBatch({ staffId, month, rows });
+      const payload = (await response.json()) as ApiPayload;
+      if (!response.ok) {
+        const message = errorMessage(payload, "Không thể lưu bảng chấm công.");
+        const conflicts = response.status === 409 ? batchConflictRecords(payload) : new Map();
+        const targetDates = new Set(targets.map((day) => day.businessDate));
+        setDays((current) => {
+          const next = current.map((day) => {
+            if (!targetDates.has(day.businessDate)) return day;
+            if (response.status === 409 && conflicts.has(day.businessDate)) {
+              return {
+                ...day,
+                saveState: "conflict" as const,
+                message,
+                conflictRecord: conflicts.get(day.businessDate) ?? null,
+              };
+            }
+            return {
+              ...day,
+              saveState: response.status === 409 ? ("dirty" as const) : ("error" as const),
+              message:
+                response.status === 409 ? "Batch đã hoàn tác; dòng này chưa được lưu." : message,
+            };
+          });
+          daysRef.current = next;
+          return next;
+        });
+        setBatchSaveState("error");
+        setBatchMessage(
+          response.status === 409
+            ? `Có ${Math.max(conflicts.size, 1)} dòng conflict. Chưa có thay đổi nào được lưu.`
+            : message,
+        );
+        return false;
+      }
+
+      const result = payload.data as AttendanceBatchSaveResultDto;
+      const nextDays = result.dataset.days.map(editableDay);
+      setDataset(result.dataset);
+      setDays(nextDays);
+      daysRef.current = nextDays;
+      setAutomaticWarnings(result.automaticViolationSummary.warnings);
+      setBatchSaveState("saved");
+      setBatchMessage(`Đã lưu ${result.savedCount} dòng.`);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể lưu bảng chấm công.";
+      const targetDates = new Set(targets.map((day) => day.businessDate));
+      setDays((current) => {
+        const next = current.map((day) =>
+          targetDates.has(day.businessDate)
+            ? { ...day, saveState: "error" as const, message }
+            : day,
+        );
+        daysRef.current = next;
+        return next;
+      });
+      setBatchSaveState("error");
+      setBatchMessage(message);
+      return false;
     } finally {
       batchSaving.current = false;
     }
-  }, [saveDay]);
+  }, [month, staffId]);
 
   const loadOptions = useCallback(
     async (nextMonth: string, requestedBranchId?: string): Promise<boolean> => {
@@ -521,13 +539,7 @@ export function AttendanceWorkspace({
   );
 
   useEffect(() => {
-    if (!staffId) {
-      setDataset(null);
-      setDays([]);
-      daysRef.current = [];
-      setLoading(false);
-      return;
-    }
+    if (!staffId) return;
 
     const controller = new AbortController();
     const parameters = new URLSearchParams({ staffId, month });
@@ -619,7 +631,7 @@ export function AttendanceWorkspace({
   }
 
   function allowContextChange(): boolean {
-    if (inFlight.current.size > 0 || batchSaving.current) {
+    if (batchSaving.current) {
       window.alert("Dữ liệu đang được lưu. Vui lòng chờ hoàn tất rồi chuyển bộ lọc.");
       return false;
     }
@@ -682,6 +694,23 @@ export function AttendanceWorkspace({
     setBatchSaveState("saved");
     setBatchMessage("Đã import Giờ vào/Giờ ra và cập nhật bảng chấm công.");
     refreshAttendance();
+  }
+
+  function printAttendance() {
+    if (pendingCount > 0 || conflictCount > 0) {
+      setBatchSaveState("error");
+      setBatchMessage("Hãy lưu toàn bộ thay đổi trước khi in.");
+      return;
+    }
+    if (!dataset || !staffId || isAnySaving) return;
+    const parameters = new URLSearchParams({ staffId, month });
+    const opened = window.open(`/api/attendance/print?${parameters.toString()}`, "_blank");
+    if (!opened) {
+      setBatchSaveState("error");
+      setBatchMessage("Trình duyệt đã chặn tab in. Hãy cho phép pop-up rồi thử lại.");
+      return;
+    }
+    opened.opener = null;
   }
 
   async function reconcileAutomaticViolations(dryRun: boolean) {
@@ -834,6 +863,20 @@ export function AttendanceWorkspace({
             type="button"
           >
             {isAnySaving ? "Đang lưu…" : "Lưu thay đổi"}
+          </Button>
+          <Button
+            className="w-full whitespace-nowrap xl:w-auto"
+            disabled={!dataset || loading || optionsLoading || isAnySaving || reconcilePending}
+            onClick={printAttendance}
+            title={
+              pendingCount > 0 || conflictCount > 0
+                ? "Hãy lưu toàn bộ thay đổi trước khi in"
+                : "Mở phiếu chấm công đã lưu trong tab mới"
+            }
+            type="button"
+            variant="secondary"
+          >
+            In phiếu chấm công
           </Button>
         </div>
       </div>
@@ -996,7 +1039,7 @@ export function AttendanceWorkspace({
           className="attendance-grid-scroll mt-4 min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain rounded-xl border border-slate-200"
           data-testid="attendance-grid-scroll"
         >
-          <table className="attendance-table min-w-[1280px] text-sm">
+          <table className="attendance-table min-w-[1400px] text-sm">
             <thead>
               <tr>
                 <th className="sticky left-0 top-0 z-50 w-28 min-w-28 max-w-28 bg-slate-100">
@@ -1013,6 +1056,7 @@ export function AttendanceWorkspace({
                 <th className="min-w-32">{revenueLabel}</th>
                 <th className="min-w-32">Thưởng ngày</th>
                 <th className="w-48 min-w-40 max-w-56">Lỗi & evidence</th>
+                <th className="min-w-28">Tiền phạt</th>
                 <th>Lưu</th>
                 <th className="min-w-64">Ghi chú</th>
               </tr>
@@ -1189,6 +1233,19 @@ export function AttendanceWorkspace({
                         onChanged={refreshAttendance}
                         violations={day.violations}
                       />
+                    </td>
+                    <td className="min-w-28 text-right align-top">
+                      <span
+                        aria-label={`Tiền phạt ngày ${displayDate(day.businessDate)}: ${displayMoney(day.activePenaltyTotal)}`}
+                        className={
+                          day.activePenaltyTotal === "0"
+                            ? "font-medium text-slate-500"
+                            : "font-semibold text-rose-700"
+                        }
+                        title={`Tiền phạt hiện hành ngày ${displayDate(day.businessDate)}: ${displayMoney(day.activePenaltyTotal)}`}
+                      >
+                        {displayMoney(day.activePenaltyTotal)}
+                      </span>
                     </td>
                     <td className="min-w-36">
                       <span

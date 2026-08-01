@@ -18,7 +18,7 @@ import {
   getSimpleRules,
 } from "./simple-rule-service";
 import { listActiveSimplePenaltyVersions } from "./penalty-rule-service";
-import { createViolation, previewViolation } from "./violation-service";
+import { cancelViolation, createViolation, previewViolation } from "./violation-service";
 
 const runId = randomUUID().slice(0, 8);
 const metadata = {
@@ -863,6 +863,68 @@ describe("quy định thưởng/phạt đơn giản", () => {
         where: { companyId, attendanceId: created.id, origin: "AUTOMATIC" },
       }),
     ).toBe(2);
+
+    await applySimplePenaltyRules(
+      gm,
+      {
+        effectiveFrom: "2026-06-30",
+        items: applied.items.map((item) =>
+          item.name === "Đi muộn cơ sở A"
+            ? {
+                ...item,
+                defaultAmount: "55000",
+              }
+            : item,
+        ),
+      },
+      metadata,
+      new Date("2026-07-30T03:00:00.000Z"),
+    );
+    await reconcileAutomaticViolationsForMonth(
+      manager,
+      {
+        staffId: liveStaffId,
+        month: "2026-07",
+        dryRun: false,
+      },
+      metadata,
+    );
+    const refreshedLateViolation = await prisma.violation.findFirstOrThrow({
+      where: {
+        companyId,
+        attendanceId: created.id,
+        origin: "AUTOMATIC",
+        penaltyItemCode: applied.items.find((item) => item.name === "Đi muộn cơ sở A")!.code,
+      },
+    });
+    expect(refreshedLateViolation.amount.toString()).toBe("55000");
+    expect(refreshedLateViolation.computedAmount.toString()).toBe("55000");
+    expect(refreshedLateViolation.snapshottedDefaultAmount.toString()).toBe("55000");
+
+    await cancelViolation(
+      manager,
+      refreshedLateViolation.id,
+      { version: refreshedLateViolation.version },
+      metadata,
+    );
+    await reconcileAutomaticViolationsForMonth(
+      manager,
+      {
+        staffId: liveStaffId,
+        month: "2026-07",
+        dryRun: false,
+      },
+      metadata,
+    );
+    expect(
+      await prisma.violation.findUniqueOrThrow({
+        where: { id: refreshedLateViolation.id },
+        select: { status: true, cancellationReason: true },
+      }),
+    ).toEqual({
+      status: "CANCELLED",
+      cancellationReason: "SYSTEM:VIOLATION_CANCELLED",
+    });
 
     const concurrentAttendance = await createAttendance(
       manager,

@@ -9,6 +9,7 @@ import {
   createAttendance,
   createEmployeeErrorReport,
   getAttendanceMonth,
+  getAttendancePrintData,
 } from "./attendance-service";
 import {
   createPenaltyRuleDraft,
@@ -234,11 +235,7 @@ beforeAll(async () => {
   attendanceAId = attendanceA.id;
   attendanceBId = attendanceB.id;
 
-  const ruleSet = await createPenaltyRuleSet(
-    gm,
-    { name: `Quy định Live ${runId}` },
-    metadata,
-  );
+  const ruleSet = await createPenaltyRuleSet(gm, { name: `Quy định Live ${runId}` }, metadata);
   const draft = ruleSet.versions[0]!;
   const saved = await updatePenaltyRuleDraft(
     gm,
@@ -551,6 +548,19 @@ describe("violation snapshot, totals và branch scope", () => {
     const day = august.days.find((candidate) => candidate.businessDate === "2026-08-15");
     expect(day?.activePenaltyTotal).toBe("50000");
     expect(august.activePenaltyTotal).toBe("50000");
+
+    const printed = await getAttendancePrintData(
+      managerA,
+      liveAId,
+      "2026-08",
+      metadata,
+      new Date("2026-08-31T17:00:00.000Z"),
+    );
+    expect(printed.rows.find((row) => row.businessDate === "2026-08-15")).toMatchObject({
+      violationNames: [oldViolation.itemName],
+      penaltyAmount: "50000",
+    });
+    expect(printed.totals.penaltyAmount).toBe("50000");
 
     const report = await createEmployeeErrorReport(
       gm,

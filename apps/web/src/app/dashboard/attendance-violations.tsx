@@ -447,16 +447,14 @@ export function AttendanceViolations({
                               type="file"
                             />
                           </label>
-                          {violation.origin === "MANUAL" ? (
-                            <button
-                              className="text-rose-700 underline"
-                              disabled={pending}
-                              onClick={() => void cancel(violation)}
-                              type="button"
-                            >
-                              Hủy lỗi
-                            </button>
-                          ) : null}
+                          <button
+                            className="text-rose-700 underline"
+                            disabled={pending}
+                            onClick={() => void cancel(violation)}
+                            type="button"
+                          >
+                            Hủy lỗi
+                          </button>
                         </div>
                       ) : null}
                     </div>

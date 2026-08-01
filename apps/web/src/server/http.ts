@@ -40,6 +40,8 @@ export function toErrorResponse(error: unknown): Response {
       ACCOUNT_DISABLED: 403,
       RATE_LIMITED: 429,
       DEPENDENCY_UNAVAILABLE: 503,
+      ATTENDANCE_BATCH_BUSY: 503,
+      ATTENDANCE_BATCH_CONFLICT: 409,
       FORBIDDEN: 403,
       NOT_FOUND: 404,
       CONFLICT: 409,

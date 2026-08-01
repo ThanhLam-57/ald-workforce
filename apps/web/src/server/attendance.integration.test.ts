@@ -9,7 +9,9 @@ import {
   createEmployeeErrorReport,
   getAttendanceFilterOptions,
   getAttendanceMonth,
+  getAttendancePrintData,
   reconcileAutomaticViolationsForMonth,
+  saveAttendanceBatch,
   updateAttendance,
 } from "./attendance-service";
 
@@ -419,6 +421,301 @@ describe("unique và optimistic concurrency", () => {
       code: "CONFLICT",
       details: { current: { version: updated.version, workUnits: "1.5" } },
     });
+  });
+});
+
+describe("attendance batch save", () => {
+  it("saves all 31 days through one atomic service call", async () => {
+    const rows = Array.from({ length: 31 }, (_, index) => ({
+      businessDate: `2026-08-${String(index + 1).padStart(2, "0")}`,
+      attendanceId: null,
+      version: null,
+      checkInAt: null,
+      checkOutAt: null,
+      spansNextDay: false,
+      workUnits: "0",
+      overtimeMinutes: 0,
+      note: null,
+      actualLiveMinutes: 0,
+      revenueAmount: "0",
+    }));
+
+    const saved = await saveAttendanceBatch(
+      gm,
+      { staffId: futureLiveId, month: "2026-08", rows },
+      metadata,
+    );
+
+    expect(saved.savedCount).toBe(31);
+    expect(saved.createdCount).toBe(31);
+    expect(saved.dataset.days.filter((day) => day.attendance !== null)).toHaveLength(31);
+  });
+
+  it("creates and updates multiple days atomically in one batch", async () => {
+    const created = await saveAttendanceBatch(
+      gm,
+      {
+        staffId: liveAId,
+        month: "2026-07",
+        rows: [
+          {
+            businessDate: "2026-07-26",
+            attendanceId: null,
+            version: null,
+            checkInAt: "2026-07-26T09:00:00+07:00",
+            checkOutAt: "2026-07-26T16:00:00+07:00",
+            spansNextDay: false,
+            workUnits: "1",
+            overtimeMinutes: 30,
+            note: "Ngày batch thứ nhất",
+            actualLiveMinutes: 360,
+            revenueAmount: "100000",
+          },
+          {
+            businessDate: "2026-07-27",
+            attendanceId: null,
+            version: null,
+            checkInAt: "2026-07-27T09:05:00+07:00",
+            checkOutAt: "2026-07-27T16:05:00+07:00",
+            spansNextDay: false,
+            workUnits: "0.5",
+            overtimeMinutes: 0,
+            note: "Ngày batch thứ hai",
+            actualLiveMinutes: 300,
+            revenueAmount: "50000",
+          },
+        ],
+      },
+      metadata,
+    );
+
+    expect(created.savedCount).toBe(2);
+    expect(created.createdCount).toBe(2);
+    expect(created.updatedCount).toBe(0);
+    const first = created.dataset.days.find(
+      (day) => day.businessDate === "2026-07-26",
+    )!.attendance!;
+    const second = created.dataset.days.find(
+      (day) => day.businessDate === "2026-07-27",
+    )!.attendance!;
+    expect(first.revenueAmount).toBe("100000");
+    expect(second.workUnits).toBe("0.5");
+
+    const updated = await saveAttendanceBatch(
+      gm,
+      {
+        staffId: liveAId,
+        month: "2026-07",
+        rows: [
+          {
+            businessDate: "2026-07-26",
+            attendanceId: first.id,
+            version: first.version,
+            checkInAt: first.checkInAt,
+            checkOutAt: first.checkOutAt,
+            spansNextDay: first.spansNextDay,
+            workUnits: "1.25",
+            overtimeMinutes: first.overtimeMinutes,
+            note: "Đã cập nhật bằng batch",
+            actualLiveMinutes: first.actualLiveMinutes,
+            revenueAmount: "125000",
+          },
+          {
+            businessDate: "2026-07-27",
+            attendanceId: second.id,
+            version: second.version,
+            checkInAt: second.checkInAt,
+            checkOutAt: second.checkOutAt,
+            spansNextDay: second.spansNextDay,
+            workUnits: second.workUnits,
+            overtimeMinutes: second.overtimeMinutes,
+            note: second.note,
+            actualLiveMinutes: 330,
+            revenueAmount: second.revenueAmount,
+          },
+        ],
+      },
+      metadata,
+    );
+
+    expect(updated.createdCount).toBe(0);
+    expect(updated.updatedCount).toBe(2);
+    expect(
+      updated.dataset.days.find((day) => day.businessDate === "2026-07-26")?.attendance,
+    ).toMatchObject({ workUnits: "1.25", revenueAmount: "125000" });
+    expect(
+      updated.dataset.days.find((day) => day.businessDate === "2026-07-27")?.attendance,
+    ).toMatchObject({ actualLiveMinutes: 330 });
+  });
+
+  it("rolls back the entire batch when one row has a stale version", async () => {
+    const month = await getAttendanceMonth(gm, liveAId, "2026-07");
+    const first = month.days.find((day) => day.businessDate === "2026-07-26")!.attendance!;
+    const second = month.days.find((day) => day.businessDate === "2026-07-27")!.attendance!;
+    await updateAttendance(
+      gm,
+      first.id,
+      { version: first.version, note: "Người khác đã sửa" },
+      metadata,
+    );
+
+    await expect(
+      saveAttendanceBatch(
+        gm,
+        {
+          staffId: liveAId,
+          month: "2026-07",
+          rows: [
+            {
+              businessDate: "2026-07-26",
+              attendanceId: first.id,
+              version: first.version,
+              checkInAt: first.checkInAt,
+              checkOutAt: first.checkOutAt,
+              spansNextDay: first.spansNextDay,
+              workUnits: "2",
+              overtimeMinutes: first.overtimeMinutes,
+              note: "Không được lưu",
+              actualLiveMinutes: first.actualLiveMinutes,
+              revenueAmount: first.revenueAmount,
+            },
+            {
+              businessDate: "2026-07-27",
+              attendanceId: second.id,
+              version: second.version,
+              checkInAt: second.checkInAt,
+              checkOutAt: second.checkOutAt,
+              spansNextDay: second.spansNextDay,
+              workUnits: "2",
+              overtimeMinutes: second.overtimeMinutes,
+              note: "Cũng không được lưu",
+              actualLiveMinutes: second.actualLiveMinutes,
+              revenueAmount: second.revenueAmount,
+            },
+          ],
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "ATTENDANCE_BATCH_CONFLICT",
+      details: {
+        conflicts: [expect.objectContaining({ businessDate: "2026-07-26" })],
+      },
+    });
+
+    const unchanged = await prisma.attendanceDay.findUniqueOrThrow({
+      where: { id: second.id },
+      select: { version: true, workUnits: true, note: true },
+    });
+    expect(unchanged.version).toBe(second.version);
+    expect(unchanged.workUnits.toString()).toBe(second.workUnits);
+    expect(unchanged.note).toBe(second.note);
+  });
+
+  it("allows exactly one of two concurrent edits with the same version", async () => {
+    const month = await getAttendanceMonth(gm, liveAId, "2026-07");
+    const current = month.days.find((day) => day.businessDate === "2026-07-27")!.attendance!;
+    const baseRow = {
+      businessDate: "2026-07-27",
+      attendanceId: current.id,
+      version: current.version,
+      checkInAt: current.checkInAt,
+      checkOutAt: current.checkOutAt,
+      spansNextDay: current.spansNextDay,
+      workUnits: current.workUnits,
+      overtimeMinutes: current.overtimeMinutes,
+      actualLiveMinutes: current.actualLiveMinutes,
+      revenueAmount: current.revenueAmount,
+    } as const;
+
+    const results = await Promise.allSettled([
+      saveAttendanceBatch(
+        gm,
+        {
+          staffId: liveAId,
+          month: "2026-07",
+          rows: [{ ...baseRow, note: "Người sửa A" }],
+        },
+        metadata,
+      ),
+      saveAttendanceBatch(
+        gm,
+        {
+          staffId: liveAId,
+          month: "2026-07",
+          rows: [{ ...baseRow, note: "Người sửa B" }],
+        },
+        metadata,
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      status: "rejected",
+      reason: { code: "ATTENDANCE_BATCH_CONFLICT" },
+    });
+    const persisted = await prisma.attendanceDay.findUniqueOrThrow({
+      where: { id: current.id },
+      select: { version: true, note: true },
+    });
+    expect(persisted.version).toBe(current.version + 1);
+    expect(["Người sửa A", "Người sửa B"]).toContain(persisted.note);
+  });
+
+  it("enforces manager branch scope and prevents manager self-edit", async () => {
+    const row = {
+      businessDate: "2026-07-28",
+      attendanceId: null,
+      version: null,
+      checkInAt: null,
+      checkOutAt: null,
+      spansNextDay: false,
+      workUnits: "1",
+      overtimeMinutes: 0,
+      note: null,
+      actualLiveMinutes: 360,
+      revenueAmount: "100000",
+    } as const;
+
+    await expect(
+      saveAttendanceBatch(manager, { staffId: liveBId, month: "2026-07", rows: [row] }, metadata),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      saveAttendanceBatch(
+        manager,
+        { staffId: managerStaffId, month: "2026-07", rows: [row] },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("attendance print data", () => {
+  it("uses the same monthly source and calculates totals without private staff fields", async () => {
+    const printed = await getAttendancePrintData(
+      manager,
+      liveAId,
+      "2026-07",
+      metadata,
+      new Date("2026-07-31T17:00:00.000Z"),
+    );
+
+    expect(printed.rows).toHaveLength(31);
+    expect(printed.rows.find((row) => row.businessDate === "2026-07-26")).toMatchObject({
+      workUnits: "1.25",
+      revenueAmount: "125000",
+      penaltyAmount: "0",
+    });
+    expect(printed.totals.revenueAmount).not.toBe("0");
+    expect(printed.totals.workUnits).not.toBe("0");
+    expect(JSON.stringify(printed)).not.toMatch(/citizen|identity|bankAccount|password/i);
+  });
+
+  it("does not allow a manager to print another branch", async () => {
+    await expect(
+      getAttendancePrintData(manager, liveBId, "2026-07", metadata),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
 

@@ -139,6 +139,8 @@ export class DomainError extends Error {
       | "ACCOUNT_DISABLED"
       | "RATE_LIMITED"
       | "DEPENDENCY_UNAVAILABLE"
+      | "ATTENDANCE_BATCH_BUSY"
+      | "ATTENDANCE_BATCH_CONFLICT"
       | "FORBIDDEN"
       | "NOT_FOUND"
       | "CONFLICT"

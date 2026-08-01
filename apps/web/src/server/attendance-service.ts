@@ -1,7 +1,10 @@
 import type {
+  AttendanceBatchSaveInput,
+  AttendanceBatchSaveResultDto,
   AttendanceCreateInput,
   AttendanceFilterOptionsDto,
   AttendanceMonthDto,
+  AttendancePrintDataDto,
   AttendanceRecordDto,
   AutomaticViolationReconcileInput,
   AutomaticViolationReconcileSummaryDto,
@@ -26,6 +29,7 @@ import { createEvidenceViewUrl } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
 import { activateDueSimpleRules } from "./simple-rule-service";
 import {
+  reconcileAutomaticViolationsBatchInTransaction,
   reconcileAutomaticViolationsInTransaction,
   toViolationDto,
   violationSelect,
@@ -402,9 +406,12 @@ async function resolveMonthTarget(
       staffCode: true,
       fullName: true,
       jobTitle: true,
+      streamingAlias: true,
       user: { select: { role: true } },
       company: {
         select: {
+          name: true,
+          timezone: true,
           revenueUnit: true,
           revenueScale: true,
         },
@@ -421,6 +428,14 @@ async function resolveMonthTarget(
           assignmentType: true,
           attendanceMachineCode: true,
           effectiveFrom: true,
+          effectiveTo: true,
+          branch: {
+            select: {
+              id: true,
+              code: true,
+              name: true,
+            },
+          },
         },
         orderBy: { effectiveFrom: "desc" },
       },
@@ -445,8 +460,78 @@ async function resolveMonthTarget(
   return staff;
 }
 
+type ResolvedMonthTarget = Awaited<ReturnType<typeof resolveMonthTarget>>;
+type ResolvedMonthAssignment = ResolvedMonthTarget["assignments"][number];
+
+function assignmentForBusinessDate(
+  actor: ActorContext,
+  target: ResolvedMonthTarget,
+  businessDate: string,
+): ResolvedMonthAssignment | null {
+  const date = parseBusinessDate(businessDate);
+  const matches = target.assignments.filter(
+    (assignment) =>
+      assignment.effectiveFrom <= date &&
+      (assignment.effectiveTo === null || assignment.effectiveTo > date) &&
+      (actor.role !== "TRAINING_MANAGER" ||
+        (assignment.assignmentType === "MEMBER" &&
+          actor.activeBranchIds.includes(assignment.branchId))),
+  );
+  return (
+    [...matches].sort((left, right) => {
+      const priority =
+        assignmentPriority[left.assignmentType] - assignmentPriority[right.assignmentType];
+      return priority !== 0
+        ? priority
+        : right.effectiveFrom.getTime() - left.effectiveFrom.getTime();
+    })[0] ?? null
+  );
+}
+
 function isUniqueConstraintError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "P2002";
+}
+
+function prismaErrorCode(error: unknown): string | null {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : null;
+}
+
+function isTransactionBusyError(error: unknown): boolean {
+  const code = prismaErrorCode(error);
+  if (code === "P2028" || code === "P2034") return true;
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    message.includes("unable to start a transaction") ||
+    message.includes("expired transaction") ||
+    message.includes("transaction api error") ||
+    message.includes("deadlock") ||
+    message.includes("write conflict")
+  );
+}
+
+function attendanceBatchBusyError(): DomainError {
+  return new DomainError(
+    "ATTENDANCE_BATCH_BUSY",
+    "Hệ thống đang bận và chưa lưu thay đổi nào. Vui lòng thử lại.",
+  );
+}
+
+function decimalHundredths(value: string): bigint {
+  const [whole = "0", fraction = ""] = value.split(".");
+  return BigInt(whole) * 100n + BigInt(`${fraction}00`.slice(0, 2));
+}
+
+function hundredthsDecimal(value: bigint): string {
+  const whole = value / 100n;
+  const fraction = value % 100n;
+  return fraction === 0n
+    ? whole.toString()
+    : `${whole}.${fraction.toString().padStart(2, "0").replace(/0$/, "")}`;
 }
 
 function monthBounds(month: string) {
@@ -713,61 +798,65 @@ export async function createAttendance(
   validateAttendanceValues(values, target.company.timezone);
 
   try {
-    const created = await prisma.$transaction(async (tx) => {
-      const attendance = await tx.attendanceDay.create({
-        data: {
-          companyId: actor.companyId,
-          branchId: target.branchId,
-          staffId: input.staffId,
-          businessDate: parseBusinessDate(input.businessDate),
-          checkInAt: input.checkInAt ? new Date(input.checkInAt) : null,
-          checkOutAt: input.checkOutAt ? new Date(input.checkOutAt) : null,
-          spansNextDay: values.spansNextDay,
-          workUnits: values.workUnits,
-          overtimeMinutes: values.overtimeMinutes,
-          note: input.note ?? null,
-          status: input.status ?? "DRAFT",
-          createdByUserId: actor.userId,
-          updatedByUserId: actor.userId,
-        },
-      });
-      await tx.liveDailyMetric.create({
-        data: {
-          companyId: actor.companyId,
-          branchId: target.branchId,
-          attendanceId: attendance.id,
-          actualLiveMinutes: values.actualLiveMinutes,
-          revenueAmount: BigInt(values.revenueAmount),
-          revenueUnit: target.company.revenueUnit,
-          revenueScale: target.company.revenueScale,
-        },
-      });
-      const created = await tx.attendanceDay.findUniqueOrThrow({
-        where: { id: attendance.id },
-        select: attendanceSelect,
-      });
-      await appendAudit(tx, {
-        actor,
-        action: "attendance.create",
-        entityId: created.id,
-        reason: systemAuditReason("ATTENDANCE_CREATED_FROM_MONTH_GRID"),
-        after: attendanceAuditShape(created),
-        metadata,
-      });
-      const automaticViolationSummary = await reconcileAutomaticViolationsInTransaction(
-        tx,
-        actor,
-        created.id,
-        systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_CREATE"),
-        metadata,
-      );
-      return { record: created, automaticViolationSummary };
-    });
+    const created = await prisma.$transaction(
+      async (tx) => {
+        const attendance = await tx.attendanceDay.create({
+          data: {
+            companyId: actor.companyId,
+            branchId: target.branchId,
+            staffId: input.staffId,
+            businessDate: parseBusinessDate(input.businessDate),
+            checkInAt: input.checkInAt ? new Date(input.checkInAt) : null,
+            checkOutAt: input.checkOutAt ? new Date(input.checkOutAt) : null,
+            spansNextDay: values.spansNextDay,
+            workUnits: values.workUnits,
+            overtimeMinutes: values.overtimeMinutes,
+            note: input.note ?? null,
+            status: input.status ?? "DRAFT",
+            createdByUserId: actor.userId,
+            updatedByUserId: actor.userId,
+          },
+        });
+        await tx.liveDailyMetric.create({
+          data: {
+            companyId: actor.companyId,
+            branchId: target.branchId,
+            attendanceId: attendance.id,
+            actualLiveMinutes: values.actualLiveMinutes,
+            revenueAmount: BigInt(values.revenueAmount),
+            revenueUnit: target.company.revenueUnit,
+            revenueScale: target.company.revenueScale,
+          },
+        });
+        const created = await tx.attendanceDay.findUniqueOrThrow({
+          where: { id: attendance.id },
+          select: attendanceSelect,
+        });
+        await appendAudit(tx, {
+          actor,
+          action: "attendance.create",
+          entityId: created.id,
+          reason: systemAuditReason("ATTENDANCE_CREATED_FROM_MONTH_GRID"),
+          after: attendanceAuditShape(created),
+          metadata,
+        });
+        const automaticViolationSummary = await reconcileAutomaticViolationsInTransaction(
+          tx,
+          actor,
+          created.id,
+          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_CREATE"),
+          metadata,
+        );
+        return { record: created, automaticViolationSummary };
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
     return await toMutationDto(created.record, created.automaticViolationSummary);
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       throw new DomainError("CONFLICT", "Nhân viên đã có attendance tại ngày nghiệp vụ này.");
     }
+    if (isTransactionBusyError(error)) throw attendanceBatchBusyError();
     throw error;
   }
 }
@@ -807,95 +896,416 @@ export async function updateAttendance(
   };
   validateAttendanceValues(values, target.company.timezone);
 
-  const saved = await prisma.$transaction(async (tx) => {
-    const result = await tx.attendanceDay.updateMany({
-      where: {
-        id,
-        companyId: actor.companyId,
-        version: input.version,
-      },
-      data: {
-        ...(input.checkInAt !== undefined
-          ? { checkInAt: input.checkInAt ? new Date(input.checkInAt) : null }
-          : {}),
-        ...(input.checkOutAt !== undefined
-          ? { checkOutAt: input.checkOutAt ? new Date(input.checkOutAt) : null }
-          : {}),
-        ...(input.spansNextDay !== undefined ? { spansNextDay: input.spansNextDay } : {}),
-        ...(input.workUnits !== undefined ? { workUnits: input.workUnits } : {}),
-        ...(input.overtimeMinutes !== undefined ? { overtimeMinutes: input.overtimeMinutes } : {}),
-        ...(input.note !== undefined ? { note: input.note } : {}),
-        ...(input.status !== undefined ? { status: input.status } : {}),
-        archivedAt: null,
-        updatedByUserId: actor.userId,
-        version: { increment: 1 },
-      },
-    });
-    if (result.count !== 1) {
-      const current = await tx.attendanceDay.findFirst({
-        where: { id, companyId: actor.companyId },
-        select: attendanceSelect,
-      });
-      throw new DomainError("CONFLICT", "Attendance đã được cập nhật bởi người khác.", {
-        ...(current ? { current: toDto(current) } : {}),
-      });
-    }
+  try {
+    const saved = await prisma.$transaction(
+      async (tx) => {
+        const result = await tx.attendanceDay.updateMany({
+          where: {
+            id,
+            companyId: actor.companyId,
+            version: input.version,
+          },
+          data: {
+            ...(input.checkInAt !== undefined
+              ? { checkInAt: input.checkInAt ? new Date(input.checkInAt) : null }
+              : {}),
+            ...(input.checkOutAt !== undefined
+              ? { checkOutAt: input.checkOutAt ? new Date(input.checkOutAt) : null }
+              : {}),
+            ...(input.spansNextDay !== undefined ? { spansNextDay: input.spansNextDay } : {}),
+            ...(input.workUnits !== undefined ? { workUnits: input.workUnits } : {}),
+            ...(input.overtimeMinutes !== undefined
+              ? { overtimeMinutes: input.overtimeMinutes }
+              : {}),
+            ...(input.note !== undefined ? { note: input.note } : {}),
+            ...(input.status !== undefined ? { status: input.status } : {}),
+            archivedAt: null,
+            updatedByUserId: actor.userId,
+            version: { increment: 1 },
+          },
+        });
+        if (result.count !== 1) {
+          const current = await tx.attendanceDay.findFirst({
+            where: { id, companyId: actor.companyId },
+            select: attendanceSelect,
+          });
+          throw new DomainError("CONFLICT", "Attendance đã được cập nhật bởi người khác.", {
+            ...(current ? { current: toDto(current) } : {}),
+          });
+        }
 
-    if (input.actualLiveMinutes !== undefined || input.revenueAmount !== undefined) {
-      await tx.liveDailyMetric.update({
-        where: { attendanceId: id },
-        data: {
-          ...(input.actualLiveMinutes !== undefined
-            ? { actualLiveMinutes: input.actualLiveMinutes }
-            : {}),
-          ...(input.revenueAmount !== undefined
-            ? { revenueAmount: BigInt(input.revenueAmount) }
-            : {}),
-        },
-      });
-    }
+        if (input.actualLiveMinutes !== undefined || input.revenueAmount !== undefined) {
+          await tx.liveDailyMetric.update({
+            where: { attendanceId: id },
+            data: {
+              ...(input.actualLiveMinutes !== undefined
+                ? { actualLiveMinutes: input.actualLiveMinutes }
+                : {}),
+              ...(input.revenueAmount !== undefined
+                ? { revenueAmount: BigInt(input.revenueAmount) }
+                : {}),
+            },
+          });
+        }
 
-    const after = await tx.attendanceDay.findUniqueOrThrow({
-      where: { id },
-      select: attendanceSelect,
-    });
-    await appendAudit(tx, {
-      actor,
-      action: existing.archivedAt ? "attendance.restore-and-update" : "attendance.update",
-      entityId: id,
-      reason: systemAuditReason("ATTENDANCE_UPDATED_FROM_MONTH_GRID"),
-      before: attendanceAuditShape(existing),
-      after: attendanceAuditShape(after),
-      metadata,
-    });
-    const automaticViolationSummary = await reconcileAutomaticViolationsInTransaction(
-      tx,
-      actor,
-      after.id,
-      systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_UPDATE"),
-      metadata,
+        const after = await tx.attendanceDay.findUniqueOrThrow({
+          where: { id },
+          select: attendanceSelect,
+        });
+        await appendAudit(tx, {
+          actor,
+          action: existing.archivedAt ? "attendance.restore-and-update" : "attendance.update",
+          entityId: id,
+          reason: systemAuditReason("ATTENDANCE_UPDATED_FROM_MONTH_GRID"),
+          before: attendanceAuditShape(existing),
+          after: attendanceAuditShape(after),
+          metadata,
+        });
+        const automaticViolationSummary = await reconcileAutomaticViolationsInTransaction(
+          tx,
+          actor,
+          after.id,
+          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_UPDATE"),
+          metadata,
+        );
+        return { record: after, automaticViolationSummary };
+      },
+      { maxWait: 10_000, timeout: 30_000 },
     );
-    return { record: after, automaticViolationSummary };
-  });
-  return toMutationDto(saved.record, saved.automaticViolationSummary);
+    return toMutationDto(saved.record, saved.automaticViolationSummary);
+  } catch (error) {
+    if (isTransactionBusyError(error)) throw attendanceBatchBusyError();
+    throw error;
+  }
 }
 
-function mergeAutomaticViolationSummaries(
-  summaries: readonly AutomaticViolationReconcileSummaryDto[],
-): AutomaticViolationReconcileSummaryDto {
-  const last = summaries.at(-1);
+type AttendanceBatchConflict = Readonly<{
+  businessDate: string;
+  current: AttendanceRecordDto | null;
+}>;
+
+function scopedConflictRecord(
+  actor: ActorContext,
+  record: AttendanceRecord | null,
+): AttendanceRecordDto | null {
+  if (!record) return null;
+  if (actor.role === "TRAINING_MANAGER" && !actor.activeBranchIds.includes(record.branchId)) {
+    return null;
+  }
+  return toDto(record);
+}
+
+function throwAttendanceBatchConflict(conflicts: readonly AttendanceBatchConflict[]): never {
+  throw new DomainError(
+    "ATTENDANCE_BATCH_CONFLICT",
+    `Có ${conflicts.length} dòng chấm công đã thay đổi. Chưa có dữ liệu nào được lưu.`,
+    { conflicts },
+  );
+}
+
+export async function saveAttendanceBatch(
+  actor: ActorContext,
+  input: AttendanceBatchSaveInput,
+  metadata: RequestMetadata,
+): Promise<AttendanceBatchSaveResultDto> {
+  const startedAt = Date.now();
+  requirePermission(actor, "attendance:write");
+  if (actor.role === "TRAINING_MANAGER" && actor.staffId === input.staffId) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
+  }
+
+  const { start, end } = monthBounds(input.month);
+  const target = await resolveMonthTarget(actor, input.staffId, start, end);
+  const preparedRows = [...input.rows]
+    .sort((left, right) => left.businessDate.localeCompare(right.businessDate))
+    .map((row) => {
+      const assignment = assignmentForBusinessDate(actor, target, row.businessDate);
+      if (!assignment) {
+        throw new DomainError(
+          actor.role === "GENERAL_MANAGER" ? "VALIDATION_ERROR" : "NOT_FOUND",
+          actor.role === "GENERAL_MANAGER"
+            ? `Nhân viên chưa có phân công cơ sở tại ngày ${row.businessDate}.`
+            : "Không tìm thấy nhân viên trong phạm vi.",
+        );
+      }
+      validateAttendanceValues(row, target.company.timezone);
+      return { row, assignment };
+    });
+  const branchIds = [...new Set(preparedRows.map(({ assignment }) => assignment.branchId))];
+  const logFailure = (errorCode: string) => {
+    console.error(
+      JSON.stringify({
+        event: "attendance.batch.failed",
+        requestId: metadata.requestId,
+        companyId: actor.companyId,
+        branchId: branchIds.length === 1 ? branchIds[0] : null,
+        staffId: input.staffId,
+        month: input.month,
+        rowCount: input.rows.length,
+        createdCount: 0,
+        updatedCount: 0,
+        automaticViolationCreatedCount: 0,
+        automaticViolationCancelledCount: 0,
+        durationMs: Date.now() - startedAt,
+        errorCode,
+      }),
+    );
+  };
+  const businessDates = preparedRows.map(({ row }) => parseBusinessDate(row.businessDate));
+  const existingRecords = await prisma.attendanceDay.findMany({
+    where: {
+      companyId: actor.companyId,
+      staffId: input.staffId,
+      businessDate: { gte: start, lt: end },
+    },
+    select: attendanceSelect,
+  });
+  const existingByDate = new Map(
+    existingRecords.map((record) => [record.businessDate.toISOString().slice(0, 10), record]),
+  );
+  const initialConflicts: AttendanceBatchConflict[] = [];
+  for (const { row, assignment } of preparedRows) {
+    const current = existingByDate.get(row.businessDate) ?? null;
+    const mismatchedExisting =
+      row.attendanceId === null
+        ? current !== null
+        : current === null ||
+          current.id !== row.attendanceId ||
+          current.version !== row.version ||
+          current.branchId !== assignment.branchId;
+    if (mismatchedExisting) {
+      initialConflicts.push({
+        businessDate: row.businessDate,
+        current: scopedConflictRecord(actor, current),
+      });
+    }
+  }
+  if (initialConflicts.length > 0) {
+    logFailure("ATTENDANCE_BATCH_CONFLICT");
+    throwAttendanceBatchConflict(initialConflicts);
+  }
+
+  let transactionResult: Readonly<{
+    createdCount: number;
+    updatedCount: number;
+    automaticViolationSummary: AutomaticViolationReconcileSummaryDto;
+  }>;
+  try {
+    transactionResult = await prisma.$transaction(
+      async (tx) => {
+        const savedIds: string[] = [];
+        let createdCount = 0;
+        let updatedCount = 0;
+
+        for (const { row, assignment } of preparedRows) {
+          if (row.attendanceId === null) {
+            const attendance = await tx.attendanceDay.create({
+              data: {
+                companyId: actor.companyId,
+                branchId: assignment.branchId,
+                staffId: input.staffId,
+                businessDate: parseBusinessDate(row.businessDate),
+                checkInAt: row.checkInAt ? new Date(row.checkInAt) : null,
+                checkOutAt: row.checkOutAt ? new Date(row.checkOutAt) : null,
+                spansNextDay: row.spansNextDay,
+                workUnits: row.workUnits,
+                overtimeMinutes: row.overtimeMinutes,
+                note: row.note,
+                status: row.status ?? "DRAFT",
+                createdByUserId: actor.userId,
+                updatedByUserId: actor.userId,
+              },
+              select: { id: true },
+            });
+            await tx.liveDailyMetric.create({
+              data: {
+                companyId: actor.companyId,
+                branchId: assignment.branchId,
+                attendanceId: attendance.id,
+                actualLiveMinutes: row.actualLiveMinutes,
+                revenueAmount: BigInt(row.revenueAmount),
+                revenueUnit: target.company.revenueUnit,
+                revenueScale: target.company.revenueScale,
+              },
+            });
+            savedIds.push(attendance.id);
+            createdCount += 1;
+            continue;
+          }
+
+          const updated = await tx.attendanceDay.updateMany({
+            where: {
+              id: row.attendanceId,
+              companyId: actor.companyId,
+              branchId: assignment.branchId,
+              staffId: input.staffId,
+              businessDate: parseBusinessDate(row.businessDate),
+              version: row.version!,
+            },
+            data: {
+              checkInAt: row.checkInAt ? new Date(row.checkInAt) : null,
+              checkOutAt: row.checkOutAt ? new Date(row.checkOutAt) : null,
+              spansNextDay: row.spansNextDay,
+              workUnits: row.workUnits,
+              overtimeMinutes: row.overtimeMinutes,
+              note: row.note,
+              status: row.status ?? "DRAFT",
+              archivedAt: null,
+              updatedByUserId: actor.userId,
+              version: { increment: 1 },
+            },
+          });
+          if (updated.count !== 1) {
+            const current = await tx.attendanceDay.findFirst({
+              where: {
+                companyId: actor.companyId,
+                staffId: input.staffId,
+                businessDate: parseBusinessDate(row.businessDate),
+              },
+              select: attendanceSelect,
+            });
+            throwAttendanceBatchConflict([
+              { businessDate: row.businessDate, current: scopedConflictRecord(actor, current) },
+            ]);
+          }
+          const metric = await tx.liveDailyMetric.updateMany({
+            where: {
+              companyId: actor.companyId,
+              branchId: assignment.branchId,
+              attendanceId: row.attendanceId,
+            },
+            data: {
+              actualLiveMinutes: row.actualLiveMinutes,
+              revenueAmount: BigInt(row.revenueAmount),
+            },
+          });
+          if (metric.count !== 1) {
+            throw new Error(`Attendance ${row.attendanceId} thiếu live metric 1-1.`);
+          }
+          savedIds.push(row.attendanceId);
+          updatedCount += 1;
+        }
+
+        const afterRecords = await tx.attendanceDay.findMany({
+          where: { id: { in: savedIds }, companyId: actor.companyId },
+          select: attendanceSelect,
+        });
+        const afterByDate = new Map(
+          afterRecords.map((record) => [record.businessDate.toISOString().slice(0, 10), record]),
+        );
+        if (afterRecords.length !== savedIds.length) {
+          throw new Error("Không thể đọc lại đầy đủ dữ liệu attendance sau khi lưu batch.");
+        }
+        const auditRows: Prisma.AuditLogCreateManyInput[] = preparedRows.map(({ row }) => {
+          const before = existingByDate.get(row.businessDate) ?? null;
+          const after = afterByDate.get(row.businessDate)!;
+          return {
+            companyId: actor.companyId,
+            branchId: after.branchId,
+            actorUserId: actor.userId,
+            action: before
+              ? before.archivedAt
+                ? "attendance.restore-and-update"
+                : "attendance.update"
+              : "attendance.create",
+            entityType: "AttendanceDay",
+            entityId: after.id,
+            reason: systemAuditReason(
+              before ? "ATTENDANCE_UPDATED_FROM_MONTH_GRID" : "ATTENDANCE_CREATED_FROM_MONTH_GRID",
+            ),
+            ...(before ? { before: auditJson(attendanceAuditShape(before)) } : {}),
+            after: auditJson(attendanceAuditShape(after)),
+            requestId: metadata.requestId,
+            ipAddress: metadata.ipAddress,
+            userAgent: metadata.userAgent,
+          };
+        });
+        await tx.auditLog.createMany({ data: auditRows });
+        const automaticViolationSummary = await reconcileAutomaticViolationsBatchInTransaction(
+          tx,
+          actor,
+          savedIds,
+          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_AFTER_ATTENDANCE_BATCH"),
+          metadata,
+        );
+        return { createdCount, updatedCount, automaticViolationSummary };
+      },
+      { maxWait: 15_000, timeout: 60_000 },
+    );
+  } catch (error) {
+    if (error instanceof DomainError) {
+      logFailure(error.code);
+      throw error;
+    }
+    if (isUniqueConstraintError(error)) {
+      const currentRecords = await prisma.attendanceDay.findMany({
+        where: {
+          companyId: actor.companyId,
+          staffId: input.staffId,
+          businessDate: { in: businessDates },
+        },
+        select: attendanceSelect,
+      });
+      const currentByDate = new Map(
+        currentRecords.map((record) => [record.businessDate.toISOString().slice(0, 10), record]),
+      );
+      logFailure("ATTENDANCE_BATCH_CONFLICT");
+      throwAttendanceBatchConflict(
+        preparedRows
+          .filter(({ row }) => {
+            const current = currentByDate.get(row.businessDate);
+            if (!current) return false;
+            return (
+              row.attendanceId === null ||
+              current.id !== row.attendanceId ||
+              current.version !== row.version
+            );
+          })
+          .map(({ row }) => ({
+            businessDate: row.businessDate,
+            current: scopedConflictRecord(actor, currentByDate.get(row.businessDate)!),
+          })),
+      );
+    }
+    const errorCode = prismaErrorCode(error);
+    logFailure(errorCode ?? (error instanceof Error ? error.name : "UNKNOWN"));
+    if (isTransactionBusyError(error)) throw attendanceBatchBusyError();
+    throw error;
+  }
+
+  const dataset = await getAttendanceMonth(actor, input.staffId, input.month);
+  const lastSavedDate = preparedRows.at(-1)!.row.businessDate;
+  const lastSavedPenalty =
+    dataset.days.find((day) => day.businessDate === lastSavedDate)?.activePenaltyTotal ?? "0";
+  const automaticViolationSummary = {
+    ...transactionResult.automaticViolationSummary,
+    attendanceActivePenaltyTotal: lastSavedPenalty,
+    staffMonthActivePenaltyTotal: dataset.activePenaltyTotal,
+  };
+  console.info(
+    JSON.stringify({
+      event: "attendance.batch.saved",
+      requestId: metadata.requestId,
+      companyId: actor.companyId,
+      branchId: branchIds.length === 1 ? branchIds[0] : null,
+      staffId: input.staffId,
+      month: input.month,
+      rowCount: input.rows.length,
+      createdCount: transactionResult.createdCount,
+      updatedCount: transactionResult.updatedCount,
+      automaticViolationCreatedCount:
+        automaticViolationSummary.createdCount + automaticViolationSummary.reactivatedCount,
+      automaticViolationCancelledCount: automaticViolationSummary.cancelledCount,
+      durationMs: Date.now() - startedAt,
+      errorCode: null,
+    }),
+  );
   return {
-    createdCount: summaries.reduce((total, summary) => total + summary.createdCount, 0),
-    reactivatedCount: summaries.reduce((total, summary) => total + summary.reactivatedCount, 0),
-    cancelledCount: summaries.reduce((total, summary) => total + summary.cancelledCount, 0),
-    unchangedCount: summaries.reduce((total, summary) => total + summary.unchangedCount, 0),
-    missingScheduleCount: summaries.reduce(
-      (total, summary) => total + summary.missingScheduleCount,
-      0,
-    ),
-    warnings: summaries.flatMap((summary) => summary.warnings),
-    attendanceActivePenaltyTotal: last?.attendanceActivePenaltyTotal ?? "0",
-    staffMonthActivePenaltyTotal: last?.staffMonthActivePenaltyTotal ?? "0",
+    dataset,
+    savedCount: input.rows.length,
+    createdCount: transactionResult.createdCount,
+    updatedCount: transactionResult.updatedCount,
+    automaticViolationSummary,
   };
 }
 
@@ -930,42 +1340,61 @@ export async function reconcileAutomaticViolationsForMonth(
   });
 
   const execute = async (tx: Transaction) => {
-    const summaries: AutomaticViolationReconcileSummaryDto[] = [];
-    for (const record of attendance) {
-      summaries.push(
-        await reconcileAutomaticViolationsInTransaction(
-          tx,
-          actor,
-          record.id,
-          systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_FOR_MONTH"),
-          metadata,
-        ),
-      );
-    }
-    if (summaries.length > 0) return mergeAutomaticViolationSummaries(summaries);
-    const existingTotal = await tx.violation.aggregate({
-      where: {
-        companyId: actor.companyId,
-        staffId: input.staffId,
-        businessDate: { gte: start, lt: end },
-        status: "ACTIVE",
-      },
-      _sum: { amount: true },
-    });
+    const attendanceIds = attendance.map((record) => record.id);
+    const summary =
+      attendanceIds.length > 0
+        ? await reconcileAutomaticViolationsBatchInTransaction(
+            tx,
+            actor,
+            attendanceIds,
+            systemAuditReason("AUTOMATIC_VIOLATIONS_RECONCILED_FOR_MONTH"),
+            metadata,
+          )
+        : {
+            createdCount: 0,
+            reactivatedCount: 0,
+            cancelledCount: 0,
+            unchangedCount: 0,
+            missingScheduleCount: 0,
+            warnings: [],
+            attendanceActivePenaltyTotal: "0",
+            staffMonthActivePenaltyTotal: "0",
+          };
+    const lastAttendanceId = attendanceIds.at(-1) ?? null;
+    const [dailyTotals, staffMonthTotal] = await Promise.all([
+      attendanceIds.length > 0
+        ? tx.violation.groupBy({
+            by: ["attendanceId"],
+            where: {
+              companyId: actor.companyId,
+              attendanceId: { in: attendanceIds },
+              status: "ACTIVE",
+            },
+            _sum: { amount: true },
+          })
+        : Promise.resolve([]),
+      tx.violation.aggregate({
+        where: {
+          companyId: actor.companyId,
+          staffId: input.staffId,
+          businessDate: { gte: start, lt: end },
+          status: "ACTIVE",
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+    const lastAttendanceTotal = lastAttendanceId
+      ? (dailyTotals.find((total) => total.attendanceId === lastAttendanceId)?._sum.amount ?? 0n)
+      : 0n;
     return {
-      createdCount: 0,
-      reactivatedCount: 0,
-      cancelledCount: 0,
-      unchangedCount: 0,
-      missingScheduleCount: 0,
-      warnings: [],
-      attendanceActivePenaltyTotal: "0",
-      staffMonthActivePenaltyTotal: (existingTotal._sum.amount ?? 0n).toString(),
+      ...summary,
+      attendanceActivePenaltyTotal: lastAttendanceTotal.toString(),
+      staffMonthActivePenaltyTotal: (staffMonthTotal._sum.amount ?? 0n).toString(),
     };
   };
 
   if (!input.dryRun) {
-    return prisma.$transaction(execute, { maxWait: 5_000, timeout: 30_000 });
+    return prisma.$transaction(execute, { maxWait: 15_000, timeout: 60_000 });
   }
   try {
     await prisma.$transaction(
@@ -973,13 +1402,110 @@ export async function reconcileAutomaticViolationsForMonth(
         const summary = await execute(tx);
         throw new AutomaticViolationDryRunRollback(summary);
       },
-      { maxWait: 5_000, timeout: 30_000 },
+      { maxWait: 15_000, timeout: 60_000 },
     );
   } catch (error) {
     if (error instanceof AutomaticViolationDryRunRollback) return error.summary;
     throw error;
   }
   throw new Error("Không thể hoàn tất dry-run lỗi tự động.");
+}
+
+export async function getAttendancePrintData(
+  actor: ActorContext,
+  staffId: string,
+  month: string,
+  metadata: RequestMetadata,
+  now = new Date(),
+): Promise<AttendancePrintDataDto> {
+  const startedAt = Date.now();
+  requirePermission(actor, "attendance:read");
+  if (actor.role === "LIVE_EMPLOYEE") {
+    throw new DomainError("FORBIDDEN", "Bạn không có quyền in phiếu chấm công.");
+  }
+  const { days, start, end } = monthBounds(month);
+  const target = await resolveMonthTarget(actor, staffId, start, end);
+  const dataset = await getAttendanceMonth(actor, staffId, month);
+  const attendanceBranchId =
+    dataset.days.find((day) => day.attendance)?.attendance?.branchId ?? null;
+  const scopedAssignments = target.assignments.filter(
+    (assignment) =>
+      actor.role !== "TRAINING_MANAGER" ||
+      (assignment.assignmentType === "MEMBER" &&
+        actor.activeBranchIds.includes(assignment.branchId)),
+  );
+  const assignment =
+    (attendanceBranchId
+      ? scopedAssignments.find((candidate) => candidate.branchId === attendanceBranchId)
+      : null) ??
+    [...scopedAssignments].sort(
+      (left, right) => right.effectiveFrom.getTime() - left.effectiveFrom.getTime(),
+    )[0];
+  if (!assignment) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy cơ sở của nhân viên trong phạm vi.");
+  }
+
+  const rows: AttendancePrintDataDto["rows"] = days.map((calendarDay) => {
+    const day = dataset.days.find(
+      (candidate) => candidate.businessDate === calendarDay.businessDate,
+    )!;
+    const attendance = day.attendance;
+    return {
+      businessDate: day.businessDate,
+      dayOfWeek: day.dayOfWeek,
+      checkInAt: attendance?.checkInAt ?? null,
+      checkOutAt: attendance?.checkOutAt ?? null,
+      actualLiveMinutes: attendance?.actualLiveMinutes ?? 0,
+      overtimeMinutes: attendance?.overtimeMinutes ?? 0,
+      workUnits: attendance?.workUnits ?? "0",
+      revenueAmount: attendance?.revenueAmount ?? "0",
+      dailyRewardAmount: attendance?.dailyReward.amount ?? "0",
+      violationNames: day.violations
+        .filter((violation) => violation.status === "ACTIVE")
+        .map((violation) => violation.itemName),
+      penaltyAmount: day.activePenaltyTotal,
+      note: attendance?.note ?? null,
+    };
+  });
+  const result: AttendancePrintDataDto = {
+    company: { name: target.company.name },
+    branch: assignment.branch,
+    staff: {
+      id: target.id,
+      staffCode: target.staffCode,
+      fullName: target.fullName,
+      attendanceMachineCode: assignment.attendanceMachineCode,
+      streamingAlias: target.streamingAlias,
+    },
+    month,
+    generatedAt: now.toISOString(),
+    rows,
+    totals: {
+      workedDayCount: rows.filter((row) => decimalHundredths(row.workUnits) > 0n).length,
+      workUnits: hundredthsDecimal(
+        rows.reduce((total, row) => total + decimalHundredths(row.workUnits), 0n),
+      ),
+      actualLiveMinutes: rows.reduce((total, row) => total + row.actualLiveMinutes, 0),
+      overtimeMinutes: rows.reduce((total, row) => total + row.overtimeMinutes, 0),
+      revenueAmount: rows.reduce((total, row) => total + BigInt(row.revenueAmount), 0n).toString(),
+      dailyRewardAmount: rows
+        .reduce((total, row) => total + BigInt(row.dailyRewardAmount), 0n)
+        .toString(),
+      penaltyAmount: rows.reduce((total, row) => total + BigInt(row.penaltyAmount), 0n).toString(),
+    },
+  };
+  console.info(
+    JSON.stringify({
+      event: "attendance.print",
+      requestId: metadata.requestId,
+      actorUserId: actor.userId,
+      branchId: assignment.branchId,
+      staffId,
+      month,
+      durationMs: Date.now() - startedAt,
+    }),
+  );
+  return result;
 }
 
 export async function createEmployeeErrorReport(

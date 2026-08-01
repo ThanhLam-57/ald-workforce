@@ -657,6 +657,58 @@ export const attendanceUpdateSchema = attendanceValuesSchema.extend({
   version: z.number().int().positive(),
 });
 
+export const attendanceBatchSaveRowSchema = z
+  .object({
+    businessDate: z.iso.date(),
+    attendanceId: idSchema.nullable(),
+    version: z.number().int().positive().nullable(),
+    checkInAt: z.iso.datetime({ offset: true }).nullable(),
+    checkOutAt: z.iso.datetime({ offset: true }).nullable(),
+    spansNextDay: z.boolean(),
+    workUnits: workUnitsSchema,
+    overtimeMinutes: z.number().int().min(0).max(2_880),
+    note: z.string().trim().max(2_000).nullable(),
+    status: z.enum(["DRAFT", "PRESENT", "ABSENT", "LEAVE"]).optional(),
+    actualLiveMinutes: z.number().int().min(0).max(2_880),
+    revenueAmount: revenueAmountSchema,
+  })
+  .superRefine((row, context) => {
+    if ((row.attendanceId === null) !== (row.version === null)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [row.attendanceId === null ? "version" : "attendanceId"],
+        message: "attendanceId và version phải cùng có giá trị hoặc cùng là null.",
+      });
+    }
+  });
+
+export const attendanceBatchSaveSchema = z
+  .object({
+    staffId: idSchema,
+    month: businessMonthSchema,
+    rows: z.array(attendanceBatchSaveRowSchema).min(1).max(31),
+  })
+  .superRefine((input, context) => {
+    const seenDates = new Set<string>();
+    input.rows.forEach((row, index) => {
+      if (seenDates.has(row.businessDate)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["rows", index, "businessDate"],
+          message: "Ngày nghiệp vụ trong batch không được trùng nhau.",
+        });
+      }
+      seenDates.add(row.businessDate);
+      if (row.businessDate.slice(0, 7) !== input.month) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["rows", index, "businessDate"],
+          message: "Ngày nghiệp vụ phải thuộc tháng đang lưu.",
+        });
+      }
+    });
+  });
+
 export const attendanceMonthQuerySchema = z.object({
   staffId: idSchema,
   month: businessMonthSchema,
@@ -2087,6 +2139,51 @@ export type AttendanceMonthDto = Readonly<{
   days: readonly AttendanceMonthDayDto[];
 }>;
 
+export type AttendanceBatchSaveResultDto = Readonly<{
+  dataset: AttendanceMonthDto;
+  savedCount: number;
+  createdCount: number;
+  updatedCount: number;
+  automaticViolationSummary: AutomaticViolationReconcileSummaryDto;
+}>;
+
+export type AttendancePrintDataDto = Readonly<{
+  company: Readonly<{ name: string }>;
+  branch: Readonly<{ id: string; code: string; name: string }>;
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    attendanceMachineCode: string | null;
+    streamingAlias: string | null;
+  }>;
+  month: string;
+  generatedAt: string;
+  rows: readonly Readonly<{
+    businessDate: string;
+    dayOfWeek: number;
+    checkInAt: string | null;
+    checkOutAt: string | null;
+    actualLiveMinutes: number;
+    overtimeMinutes: number;
+    workUnits: string;
+    revenueAmount: string;
+    dailyRewardAmount: string;
+    violationNames: readonly string[];
+    penaltyAmount: string;
+    note: string | null;
+  }>[];
+  totals: Readonly<{
+    workedDayCount: number;
+    workUnits: string;
+    actualLiveMinutes: number;
+    overtimeMinutes: number;
+    revenueAmount: string;
+    dailyRewardAmount: string;
+    penaltyAmount: string;
+  }>;
+}>;
+
 export type BranchOverviewDayDto = Readonly<{
   businessDate: string;
   dayOfWeek: number;
@@ -2621,6 +2718,8 @@ export type AdminAssignmentListQuery = z.infer<typeof adminAssignmentListQuerySc
 export type AdminUserListQuery = z.infer<typeof adminUserListQuerySchema>;
 export type AttendanceCreateInput = z.infer<typeof attendanceCreateSchema>;
 export type AttendanceUpdateInput = z.infer<typeof attendanceUpdateSchema>;
+export type AttendanceBatchSaveRowInput = z.infer<typeof attendanceBatchSaveRowSchema>;
+export type AttendanceBatchSaveInput = z.infer<typeof attendanceBatchSaveSchema>;
 export type AttendanceMonthQuery = z.infer<typeof attendanceMonthQuerySchema>;
 export type AttendanceFilterOptionsQuery = z.infer<typeof attendanceFilterOptionsQuerySchema>;
 export type AttendanceMachineImportPresignInput = z.infer<
