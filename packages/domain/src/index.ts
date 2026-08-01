@@ -7,6 +7,14 @@ export {
   type AutomaticPenaltyEvaluation,
 } from "./automatic-penalties.js";
 
+export {
+  branchAbbreviationFromCode,
+  formatGeneratedStaffCode,
+  nextStaffCodeSequence,
+  suggestStaffCode,
+  type StaffCodeSuggestion,
+} from "./staff-code.js";
+
 export type AuthRole = (typeof AUTH_ROLES)[number];
 
 export type ActorContext = Readonly<{

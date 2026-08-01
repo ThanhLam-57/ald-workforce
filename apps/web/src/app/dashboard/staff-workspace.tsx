@@ -3,6 +3,7 @@
 import type {
   BranchStaffDto,
   StaffBankQrDocumentDto,
+  StaffCodePreviewDto,
   StaffIdentityDocumentDto,
   StaffWorkScheduleDto,
 } from "@ald/contracts";
@@ -18,9 +19,13 @@ import {
   type StaffProfileFieldErrors,
 } from "./staff-profile-fields";
 import { createStaffProfileUpdatePayload } from "./staff-profile-update";
+import {
+  canSubmitStaffOnboarding,
+  isLatestStaffCodePreviewRequest,
+} from "./staff-code-preview-state";
 import type { StaffWorkspaceCapabilities } from "./staff-workspace-capabilities";
 import { Button } from "@ald/ui";
-import { useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 type BranchOption = Readonly<{ id: string; code: string; name: string }>;
 type ApiEnvelope<T> = Readonly<{
@@ -35,6 +40,7 @@ type UploadState = Readonly<{
   phase: "PREPARING" | "UPLOADING" | "VERIFYING" | "SUCCEEDED" | "FAILED";
   message: string;
 }>;
+type StaffCodePreviewStatus = "IDLE" | "LOADING" | "READY" | "ERROR";
 
 function businessToday(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -210,6 +216,73 @@ export function StaffWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [createFieldErrors, setCreateFieldErrors] = useState<StaffProfileFieldErrors>({});
   const [editFieldErrors, setEditFieldErrors] = useState<StaffProfileFieldErrors>({});
+  const [staffCodePreviewStatus, setStaffCodePreviewStatus] =
+    useState<StaffCodePreviewStatus>("IDLE");
+  const [staffCodePreviewReloadKey, setStaffCodePreviewReloadKey] = useState(0);
+  const staffCodePreviewRequestId = useRef(0);
+
+  useEffect(() => {
+    if (!showCreate) {
+      setStaffCodePreviewStatus("IDLE");
+      return;
+    }
+
+    const branchId = form.branchId;
+    const requestId = ++staffCodePreviewRequestId.current;
+    if (!branchId) {
+      setForm((current) => ({ ...current, staffCode: "" }));
+      setStaffCodePreviewStatus("ERROR");
+      setCreateFieldErrors((current) => ({
+        ...current,
+        staffCode: ["Vui lòng chọn cơ sở để tạo mã nhân viên."],
+      }));
+      return;
+    }
+
+    const controller = new AbortController();
+    setStaffCodePreviewStatus("LOADING");
+    setCreateFieldErrors((current) => ({ ...current, staffCode: undefined }));
+    setForm((current) => (current.branchId === branchId ? { ...current, staffCode: "" } : current));
+
+    async function loadPreview(): Promise<void> {
+      try {
+        const response = await fetch(
+          `/api/staff/onboard/code-preview?branchId=${encodeURIComponent(branchId)}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        const payload = (await response.json()) as ApiEnvelope<StaffCodePreviewDto>;
+        if (!response.ok || !payload.data) {
+          throw new Error(messageFrom(payload, "Không thể tạo mã nhân viên đề xuất."));
+        }
+        const preview = payload.data;
+        setForm((current) =>
+          isLatestStaffCodePreviewRequest({
+            currentBranchId: current.branchId,
+            latestRequestId: staffCodePreviewRequestId.current,
+            requestedBranchId: branchId,
+            requestId,
+          }) && preview.branchId === branchId
+            ? { ...current, staffCode: preview.suggestedStaffCode }
+            : current,
+        );
+        if (requestId === staffCodePreviewRequestId.current) {
+          setStaffCodePreviewStatus("READY");
+        }
+      } catch (caught) {
+        if (controller.signal.aborted || requestId !== staffCodePreviewRequestId.current) return;
+        setStaffCodePreviewStatus("ERROR");
+        setCreateFieldErrors((current) => ({
+          ...current,
+          staffCode: [
+            caught instanceof Error ? caught.message : "Không thể tạo mã nhân viên đề xuất.",
+          ],
+        }));
+      }
+    }
+
+    void loadPreview();
+    return () => controller.abort();
+  }, [form.branchId, showCreate, staffCodePreviewReloadKey]);
 
   const filteredStaff = useMemo(() => {
     const keyword = search.trim().toLocaleLowerCase("vi");
@@ -401,6 +474,20 @@ export function StaffWorkspace({
   }
 
   async function createStaff(): Promise<void> {
+    if (
+      !canSubmitStaffOnboarding({
+        branchId: form.branchId,
+        pending,
+        previewStatus: staffCodePreviewStatus,
+        staffCode: form.staffCode,
+      })
+    ) {
+      setCreateFieldErrors((current) => ({
+        ...current,
+        staffCode: ["Vui lòng đợi hệ thống tạo mã nhân viên trước khi lưu."],
+      }));
+      return;
+    }
     setPending(true);
     setError(null);
     setMessage(null);
@@ -421,7 +508,6 @@ export function StaffWorkspace({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          staffCode: form.staffCode,
           attendanceMachineCode: form.attendanceMachineCode,
           fullName: form.fullName,
           streamingAlias: nullable(form.streamingAlias),
@@ -479,7 +565,7 @@ export function StaffWorkspace({
       setCreateFiles({});
       setCreateFieldErrors({});
       setForm({ ...emptyForm, branchId: payload.data.branch.id });
-      setMessage("Đã thêm nhân viên, phân công cơ sở và ca làm ban đầu.");
+      setMessage(`Đã thêm nhân viên ${payload.data.staffCode}, phân công cơ sở và ca làm ban đầu.`);
       if (uploadErrors.length) {
         setError(
           `Hồ sơ đã được tạo và không bị hoàn tác. Các ảnh sau tải thất bại: ${uploadErrors.join(
@@ -745,6 +831,8 @@ export function StaffWorkspace({
             form={form}
             includeBranch
             branches={initialBranches}
+            staffCodePreviewStatus={staffCodePreviewStatus}
+            onRetryStaffCode={() => setStaffCodePreviewReloadKey((current) => current + 1)}
             setForm={setForm}
             onFieldChanged={(field) =>
               setCreateFieldErrors((current) => ({ ...current, [field]: undefined }))
@@ -812,7 +900,18 @@ export function StaffWorkspace({
             </>
           ) : null}
           <div className="mt-4 flex justify-end">
-            <Button disabled={pending} onClick={() => void createStaff()} type="button">
+            <Button
+              disabled={
+                !canSubmitStaffOnboarding({
+                  branchId: form.branchId,
+                  pending,
+                  previewStatus: staffCodePreviewStatus,
+                  staffCode: form.staffCode,
+                })
+              }
+              onClick={() => void createStaff()}
+              type="button"
+            >
               {pending ? "Đang lưu..." : "Lưu nhân viên"}
             </Button>
           </div>
@@ -823,7 +922,7 @@ export function StaffWorkspace({
         <table className="min-w-[1320px] text-sm">
           <thead className="bg-slate-100 text-left">
             <tr>
-              <th className="px-4 py-3">Mã hồ sơ</th>
+              <th className="px-4 py-3">Mã nhân viên</th>
               <th className="px-4 py-3">Mã máy chấm công</th>
               <th className="px-4 py-3">Họ và tên</th>
               <th className="px-4 py-3">Tên kênh TikTok</th>
@@ -1310,8 +1409,10 @@ function FormSections<T extends StaffProfileEditorValues & { branchId?: string }
   form,
   branches = [],
   includeBranch = false,
+  onRetryStaffCode,
   onFieldChanged,
   setForm,
+  staffCodePreviewStatus = "IDLE",
 }: Readonly<{
   capabilities: StaffWorkspaceCapabilities;
   errors: StaffProfileFieldErrors;
@@ -1319,7 +1420,9 @@ function FormSections<T extends StaffProfileEditorValues & { branchId?: string }
   setForm: Dispatch<SetStateAction<T>>;
   branches?: readonly BranchOption[];
   includeBranch?: boolean;
+  onRetryStaffCode?: () => void;
   onFieldChanged: (field: string) => void;
+  staffCodePreviewStatus?: StaffCodePreviewStatus;
 }>) {
   function changeProfileField(field: keyof StaffProfileEditorValues, value: string): void {
     onFieldChanged(field);
@@ -1357,6 +1460,19 @@ function FormSections<T extends StaffProfileEditorValues & { branchId?: string }
         joinedDateRequired={includeBranch}
         onChange={changeProfileField}
         officialDateRequired={includeBranch}
+        staffCodeLoading={includeBranch && staffCodePreviewStatus === "LOADING"}
+        staffCodeReadOnly={includeBranch}
+        {...(includeBranch
+          ? {
+              staffCodeStatus:
+                staffCodePreviewStatus === "LOADING"
+                  ? "Đang tạo mã theo cơ sở đã chọn..."
+                  : "Mã được hệ thống tự động tạo theo cơ sở khi lưu.",
+            }
+          : {})}
+        {...(includeBranch && staffCodePreviewStatus === "ERROR" && onRetryStaffCode
+          ? { onRetryStaffCode }
+          : {})}
         today={businessToday()}
         values={form}
       />
@@ -1370,7 +1486,7 @@ function ProfileReadOnly({
 }: Readonly<{ canViewSalary: boolean; person: BranchStaffDto }>) {
   return (
     <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      <Info label="Mã hồ sơ" value={person.staffCode} />
+      <Info label="Mã nhân viên" value={person.staffCode} />
       <Info label="Mã máy chấm công" value={person.attendanceMachineCode} />
       <Info label="Họ và tên" value={person.fullName} />
       <Info label="Ngày sinh" value={person.dateOfBirth} />

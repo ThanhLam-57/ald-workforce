@@ -1,5 +1,7 @@
 import type {
   BranchStaffDto,
+  StaffCodePreviewDto,
+  StaffCodePreviewQuery,
   StaffOnboardInput,
   StaffProfileUpdateInput,
   StaffWorkScheduleCreateInput,
@@ -7,7 +9,14 @@ import type {
   StaffWorkScheduleUpdateInput,
 } from "@ald/contracts";
 import { prisma, type Prisma } from "@ald/db";
-import { DomainError, requirePermission, type ActorContext } from "@ald/domain";
+import {
+  branchAbbreviationFromCode,
+  DomainError,
+  requirePermission,
+  suggestStaffCode,
+  type ActorContext,
+  type StaffCodeSuggestion,
+} from "@ald/domain";
 
 import { parseBusinessDate, toBusinessDate } from "./business-date";
 import type { RequestMetadata } from "./request-metadata";
@@ -140,6 +149,68 @@ function assertActorBranch(actor: ActorContext, branchId: string): void {
   }
 }
 
+function staffCodeAbbreviation(branchCode: string): string {
+  try {
+    return branchAbbreviationFromCode(branchCode);
+  } catch (error) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      error instanceof Error ? error.message : "Không thể tạo mã nhân viên từ mã cơ sở.",
+    );
+  }
+}
+
+async function getStaffCodeSuggestion(
+  db: Database,
+  companyId: string,
+  branchCode: string,
+): Promise<StaffCodeSuggestion> {
+  const branchAbbreviation = staffCodeAbbreviation(branchCode);
+  const staff = await db.staffMember.findMany({
+    where: {
+      companyId,
+      OR: [
+        {
+          staffCode: {
+            startsWith: `NV_${branchAbbreviation}_`,
+            mode: "insensitive",
+          },
+        },
+        {
+          staffCode: {
+            startsWith: `VN_${branchAbbreviation}_`,
+            mode: "insensitive",
+          },
+        },
+      ],
+    },
+    select: { staffCode: true },
+  });
+  try {
+    return suggestStaffCode(
+      branchCode,
+      staff.map((record) => record.staffCode),
+    );
+  } catch (error) {
+    throw new DomainError(
+      "VALIDATION_ERROR",
+      error instanceof Error ? error.message : "Không thể tạo mã nhân viên từ mã cơ sở.",
+    );
+  }
+}
+
+async function lockStaffCodeSequence(
+  tx: Transaction,
+  companyId: string,
+  branchAbbreviation: string,
+): Promise<void> {
+  const lockKey = `staff-code:${companyId}:${branchAbbreviation}`;
+  await tx.$queryRaw<Array<{ locked: number }>>`
+    SELECT 1::int AS "locked"
+    FROM (SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))) AS "staff_code_lock"
+  `;
+}
+
 export async function listStaffOnboardingBranches(
   actor: ActorContext,
 ): Promise<readonly Readonly<{ id: string; code: string; name: string }>[]> {
@@ -153,6 +224,31 @@ export async function listStaffOnboardingBranches(
     select: { id: true, code: true, name: true },
     orderBy: [{ code: "asc" }, { name: "asc" }],
   });
+}
+
+export async function getStaffCodePreview(
+  actor: ActorContext,
+  input: StaffCodePreviewQuery,
+): Promise<StaffCodePreviewDto> {
+  requirePermission(actor, "staff:onboard");
+  assertActorBranch(actor, input.branchId);
+  const branch = await prisma.branch.findFirst({
+    where: {
+      id: input.branchId,
+      companyId: actor.companyId,
+      isActive: true,
+    },
+    select: { id: true, code: true },
+  });
+  if (!branch) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy cơ sở đang hoạt động trong phạm vi.");
+  }
+  const suggestion = await getStaffCodeSuggestion(prisma, actor.companyId, branch.code);
+  return {
+    branchId: branch.id,
+    branchCode: branch.code,
+    ...suggestion,
+  };
 }
 
 export async function authorizeBranchStaff(
@@ -433,11 +529,14 @@ export async function onboardStaff(
           companyId: actor.companyId,
           isActive: true,
         },
-        select: { id: true },
+        select: { id: true, code: true },
       });
       if (!branch) {
         throw new DomainError("NOT_FOUND", "Không tìm thấy cơ sở đang hoạt động.");
       }
+      const branchAbbreviation = staffCodeAbbreviation(branch.code);
+      await lockStaffCodeSequence(tx, actor.companyId, branchAbbreviation);
+      const staffCodeSuggestion = await getStaffCodeSuggestion(tx, actor.companyId, branch.code);
       const duplicateMachineCode = await tx.branchAssignment.findFirst({
         where: {
           companyId: actor.companyId,
@@ -455,7 +554,7 @@ export async function onboardStaff(
       const staff = await tx.staffMember.create({
         data: {
           companyId: actor.companyId,
-          staffCode: input.staffCode.toUpperCase(),
+          staffCode: staffCodeSuggestion.suggestedStaffCode,
           fullName: input.fullName,
           streamingAlias: optionalText(input.streamingAlias),
           tiktokChannelId: normalizeTikTokChannelId(input.tiktokChannelId),
@@ -519,6 +618,12 @@ export async function onboardStaff(
         after: {
           ...staffSnapshot,
           changedFields: Object.keys(staffSnapshot),
+          branchCode: branch.code,
+          staffCodeGeneration: {
+            prefix: "NV",
+            branchAbbreviation: staffCodeSuggestion.branchAbbreviation,
+            sequence: staffCodeSuggestion.nextSequence,
+          },
           assignment: safeAssignmentAuditSnapshot(assignment),
           schedule: {
             id: schedule.id,
@@ -541,7 +646,10 @@ export async function onboardStaff(
     return created;
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002") {
-      throw new DomainError("CONFLICT", "Mã nhân viên đã tồn tại trong công ty.");
+      throw new DomainError(
+        "CONFLICT",
+        "Không thể cấp mã nhân viên duy nhất. Vui lòng tải lại mã đề xuất và thử lại.",
+      );
     }
     throw error;
   }

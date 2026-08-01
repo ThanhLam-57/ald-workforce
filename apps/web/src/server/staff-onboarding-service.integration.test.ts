@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { viewStaffIdentityDocument } from "./staff-identity-document-service";
 import {
   createStaffWorkSchedule,
+  getStaffCodePreview,
   listBranchStaff,
   listStaffWorkSchedules,
   onboardStaff,
@@ -27,6 +28,7 @@ let branchBId: string;
 let manager: ActorContext;
 let gm: ActorContext;
 let staffAId: string;
+let staffACode: string;
 let staffBId: string;
 
 beforeAll(async () => {
@@ -138,6 +140,34 @@ afterAll(async () => {
 });
 
 describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
+  it("xem trước mã theo scope và không tái sử dụng số của hồ sơ đã ẩn", async () => {
+    await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: `VN_A${runId}_050`.toUpperCase(),
+        fullName: "Nhân viên cũ đã ẩn",
+        jobTitle: "Nhân viên Live",
+        employmentCategory: "OFFICIAL",
+        employmentStatus: "TERMINATED",
+        archivedAt: new Date(),
+      },
+    });
+
+    await expect(getStaffCodePreview(manager, { branchId: branchAId })).resolves.toMatchObject({
+      branchId: branchAId,
+      branchAbbreviation: `A${runId}`.toUpperCase(),
+      nextSequence: 51,
+      suggestedStaffCode: `NV_A${runId}_051`.toUpperCase(),
+    });
+    await expect(getStaffCodePreview(manager, { branchId: branchBId })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    await expect(getStaffCodePreview(gm, { branchId: branchBId })).resolves.toMatchObject({
+      branchId: branchBId,
+      nextSequence: 1,
+    });
+  });
+
   it("manager thêm nhân viên Live đúng cơ sở mà không được nhập lương hoặc tạo tài khoản", async () => {
     const created = await onboardStaff(
       manager,
@@ -167,6 +197,9 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
       metadata,
     );
     staffAId = created.id;
+    staffACode = created.staffCode;
+    expect(created.staffCode).toBe(`NV_A${runId}_051`.toUpperCase());
+    expect(created.staffCode).not.toBe(`LIVEA${runId}`.toUpperCase());
     expect(created.branch.id).toBe(branchAId);
     expect(created.currentSchedule).toMatchObject({
       scheduledStartMinutes: 540,
@@ -207,7 +240,13 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
     });
     const onboardAfter = onboardAudit.after as Record<string, unknown>;
     expect(onboardAfter).toMatchObject({
-      staffCode: `LIVEA${runId}`.toUpperCase(),
+      staffCode: created.staffCode,
+      branchCode: `A${runId}`,
+      staffCodeGeneration: {
+        prefix: "NV",
+        branchAbbreviation: `A${runId}`.toUpperCase(),
+        sequence: 51,
+      },
       citizenIdNumber: { redacted: true, present: true },
       bankAccountNumber: { redacted: true, present: true },
       assignment: {
@@ -220,6 +259,56 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
     expect(JSON.stringify(onboardAfter)).not.toContain("001111111111");
     expect(JSON.stringify(onboardAfter)).not.toContain("SECRET-ACCOUNT-001");
     expect(JSON.stringify(onboardAfter)).not.toContain("objectKey");
+  });
+
+  it("cấp hai mã khác nhau khi có hai yêu cầu onboarding đồng thời", async () => {
+    const [first, second] = await Promise.all([
+      onboardStaff(
+        manager,
+        {
+          branchId: branchAId,
+          attendanceMachineCode: `CC1${runId}`.toUpperCase(),
+          fullName: "Nhân viên đồng thời 1",
+          jobTitle: "Nhân viên Live",
+          joinedDate: "2026-07-01",
+          officialDate: null,
+          employmentCategory: "PROBATION",
+          initialSchedule: {
+            name: "Ca sáng",
+            scheduledStartMinutes: 540,
+            scheduledEndMinutes: 900,
+            spansNextDay: false,
+            requiredLiveMinutes: 360,
+          },
+        },
+        metadata,
+      ),
+      onboardStaff(
+        manager,
+        {
+          branchId: branchAId,
+          attendanceMachineCode: `CC2${runId}`.toUpperCase(),
+          fullName: "Nhân viên đồng thời 2",
+          jobTitle: "Nhân viên Live",
+          joinedDate: "2026-07-01",
+          officialDate: null,
+          employmentCategory: "PROBATION",
+          initialSchedule: {
+            name: "Ca sáng",
+            scheduledStartMinutes: 540,
+            scheduledEndMinutes: 900,
+            spansNextDay: false,
+            requiredLiveMinutes: 360,
+          },
+        },
+        metadata,
+      ),
+    ]);
+
+    expect(new Set([first.staffCode, second.staffCode]).size).toBe(2);
+    expect([first.staffCode, second.staffCode].sort()).toEqual(
+      [`NV_A${runId}_052`, `NV_A${runId}_053`].map((value) => value.toUpperCase()).sort(),
+    );
   });
 
   it("không cho manager lách UI để nhập lương cơ bản khi onboard", async () => {
@@ -759,7 +848,7 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
     });
 
     expect((await listBranchStaff(gm)).find(({ id }) => id === staffAId)).toMatchObject({
-      staffCode: `LIVEA${runId}`.toUpperCase(),
+      staffCode: staffACode,
       attendanceMachineCode: "TRANSFER-B-001",
       branch: { id: branchBId },
     });

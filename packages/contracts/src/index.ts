@@ -147,6 +147,7 @@ export const staffCreateSchema = staffFieldsSchema.superRefine((value, context) 
 });
 
 export const staffOnboardSchema = staffFieldsSchema
+  .partial({ staffCode: true })
   .extend({
     branchId: idSchema,
     attendanceMachineCode: attendanceMachineCodeSchema,
@@ -168,6 +169,10 @@ export const staffOnboardSchema = staffFieldsSchema
       });
     }
   });
+
+export const staffCodePreviewQuerySchema = z.object({
+  branchId: idSchema,
+});
 
 export const staffWorkScheduleCreateSchema = staffWorkScheduleFieldsSchema
   .and(
@@ -484,6 +489,14 @@ export type AdminStaffDto = Readonly<{
   level: Readonly<{ code: string; name: string }> | null;
   version: number;
   updatedAt: string;
+}>;
+
+export type StaffCodePreviewDto = Readonly<{
+  branchId: string;
+  branchCode: string;
+  branchAbbreviation: string;
+  suggestedStaffCode: string;
+  nextSequence: number;
 }>;
 
 export type StaffWorkScheduleDto = Readonly<{
@@ -2694,6 +2707,7 @@ export type BranchCreateInput = z.infer<typeof branchCreateSchema>;
 export type BranchUpdateInput = z.infer<typeof branchUpdateSchema>;
 export type StaffCreateInput = z.infer<typeof staffCreateSchema>;
 export type StaffOnboardInput = z.infer<typeof staffOnboardSchema>;
+export type StaffCodePreviewQuery = z.infer<typeof staffCodePreviewQuerySchema>;
 export type StaffUpdateInput = z.infer<typeof staffUpdateSchema>;
 export type StaffArchiveInput = z.infer<typeof staffArchiveSchema>;
 export type StaffTerminateInput = z.infer<typeof staffTerminateSchema>;

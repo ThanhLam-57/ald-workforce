@@ -77,6 +77,27 @@ describe("StaffProfileFields", () => {
     expect(html).toContain('name="staffCode"');
   });
 
+  it("hiển thị mã nhân viên tự động ở chế độ chỉ đọc khi onboarding", () => {
+    const html = renderToStaticMarkup(
+      <StaffProfileFields
+        capabilities={staffWorkspaceCapabilitiesFor("GENERAL_MANAGER")}
+        onChange={vi.fn()}
+        onRetryStaffCode={vi.fn()}
+        staffCodeLoading
+        staffCodeReadOnly
+        staffCodeStatus="Đang tạo mã theo cơ sở đã chọn..."
+        today="2026-07-30"
+        values={values}
+      />,
+    );
+
+    expect(html).toContain("Mã nhân viên");
+    expect(html).toContain('name="staffCode"');
+    expect(html).toContain('readOnly=""');
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain("Thử tạo lại mã");
+  });
+
   it("hiển thị lỗi của mọi trường hồ sơ ngay dưới input", () => {
     const errors = Object.fromEntries(
       Object.keys(values).map((field) => [field, [`Lỗi ${field}`]]),

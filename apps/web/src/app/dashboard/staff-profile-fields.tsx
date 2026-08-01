@@ -71,6 +71,10 @@ export function StaffProfileFields({
   officialDateRequired = false,
   showAttendanceMachineCode = true,
   showEmploymentControls = false,
+  staffCodeLoading = false,
+  staffCodeReadOnly = false,
+  staffCodeStatus,
+  onRetryStaffCode,
   today,
   values,
 }: Readonly<{
@@ -81,9 +85,14 @@ export function StaffProfileFields({
   officialDateRequired?: boolean;
   showAttendanceMachineCode?: boolean;
   showEmploymentControls?: boolean;
+  staffCodeLoading?: boolean;
+  staffCodeReadOnly?: boolean;
+  staffCodeStatus?: string;
+  onRetryStaffCode?: () => void;
   today: string;
   values: StaffProfileEditorValues;
 }>) {
+  const staffCodeStatusId = useId();
   function inputProps(field: StaffProfileFieldName) {
     const error = firstError(errors, field);
     return {
@@ -104,9 +113,36 @@ export function StaffProfileFields({
             <input {...inputProps("fullName")} aria-describedby={descriptionId} required />
           )}
         </ProfileField>
-        <ProfileField error={firstError(errors, "staffCode")} label="Mã hồ sơ">
+        <ProfileField error={firstError(errors, "staffCode")} label="Mã nhân viên">
           {(descriptionId) => (
-            <input {...inputProps("staffCode")} aria-describedby={descriptionId} required />
+            <div className="grid gap-1">
+              <input
+                {...inputProps("staffCode")}
+                aria-busy={staffCodeLoading || undefined}
+                aria-describedby={
+                  [descriptionId, staffCodeStatus ? staffCodeStatusId : undefined]
+                    .filter(Boolean)
+                    .join(" ") || undefined
+                }
+                className={staffCodeReadOnly ? "bg-slate-100 text-slate-700" : undefined}
+                readOnly={staffCodeReadOnly}
+                required
+              />
+              {staffCodeStatus ? (
+                <span className="text-xs font-normal text-slate-600" id={staffCodeStatusId}>
+                  {staffCodeStatus}
+                </span>
+              ) : null}
+              {onRetryStaffCode ? (
+                <button
+                  className="w-fit text-xs font-medium text-sky-700 underline"
+                  type="button"
+                  onClick={onRetryStaffCode}
+                >
+                  Thử tạo lại mã
+                </button>
+              ) : null}
+            </div>
           )}
         </ProfileField>
         {showAttendanceMachineCode ? (

@@ -7,6 +7,7 @@ import {
   adminUserListQuerySchema,
   staffCreateSchema,
   staffIdentityDocumentPresignSchema,
+  staffCodePreviewQuerySchema,
   staffOnboardSchema,
   staffProfileUpdateSchema,
   staffUpdateSchema,
@@ -90,7 +91,6 @@ describe("manager staff onboarding", () => {
     const parsed = staffOnboardSchema.parse({
       branchId: "00000000-0000-4000-8000-000000000001",
       attendanceMachineCode: "001",
-      staffCode: "LIVE02",
       fullName: "Nhân viên Live 02",
       jobTitle: "Nhân viên Live",
       joinedDate: "2026-07-01",
@@ -105,7 +105,6 @@ describe("manager staff onboarding", () => {
   it("chuẩn hóa mã máy chấm công và bắt buộc mã khi onboarding", () => {
     const base = {
       branchId: "00000000-0000-4000-8000-000000000001",
-      staffCode: "LIVE03",
       fullName: "Nhân viên Live 03",
       jobTitle: "Nhân viên Live",
       joinedDate: "2026-07-01",
@@ -117,6 +116,26 @@ describe("manager staff onboarding", () => {
       attendanceMachineCode: "NV_001",
     });
     expect(() => staffOnboardSchema.parse(base)).toThrow();
+  });
+
+  it("không bắt buộc staffCode từ client và validate branchId khi xem trước mã", () => {
+    expect(
+      staffOnboardSchema.parse({
+        branchId: "00000000-0000-4000-8000-000000000001",
+        attendanceMachineCode: "001",
+        fullName: "Nhân viên tự sinh mã",
+        jobTitle: "Nhân viên Live",
+        joinedDate: "2026-07-01",
+        officialDate: null,
+        employmentCategory: "PROBATION",
+        initialSchedule: validSchedule,
+      }),
+    ).not.toHaveProperty("staffCode");
+    expect(
+      staffCodePreviewQuerySchema.parse({
+        branchId: "00000000-0000-4000-8000-000000000001",
+      }),
+    ).toEqual({ branchId: "00000000-0000-4000-8000-000000000001" });
   });
 
   it("validate hồ sơ mở rộng và cho phép xóa trường nullable bằng null", () => {
@@ -154,9 +173,10 @@ describe("manager staff onboarding", () => {
       staffProfileUpdateSchema.parse({ ...base, facebookUrl: "ftp://example.com" }),
     ).toThrow();
     expect(() => staffProfileUpdateSchema.parse({ ...base, dateOfBirth: "2999-01-01" })).toThrow();
-    expect(
-      staffProfileUpdateSchema.parse({ ...base, baseSalaryAmount: "9000000" }),
-    ).toHaveProperty("baseSalaryAmount", "9000000");
+    expect(staffProfileUpdateSchema.parse({ ...base, baseSalaryAmount: "9000000" })).toHaveProperty(
+      "baseSalaryAmount",
+      "9000000",
+    );
   });
 
   it("cập nhật được hồ sơ legacy và giữ nguyên số 0 đầu của mã máy", () => {
