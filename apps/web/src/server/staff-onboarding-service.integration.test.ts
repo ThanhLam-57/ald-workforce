@@ -5,7 +5,9 @@ import type { ActorContext } from "@ald/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { viewStaffIdentityDocument } from "./staff-identity-document-service";
+import { getAttendanceFilterOptions } from "./attendance-service";
 import {
+  correctStaffStartDate,
   createStaffWorkSchedule,
   getStaffCodePreview,
   listBranchStaff,
@@ -599,6 +601,95 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
         effectiveTo: null,
       },
     ]);
+  });
+
+  it("GM đồng bộ ngày bắt đầu để nhân viên xuất hiện trong chấm công tháng cũ", async () => {
+    const staff = await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: `BACKDATE${runId}`,
+        fullName: "Nhân viên cần chấm công hồi tố",
+        jobTitle: "Nhân viên Live",
+        joinedDate: new Date("2026-06-30T00:00:00.000Z"),
+        employmentCategory: "PROBATION",
+      },
+    });
+    const assignment = await prisma.branchAssignment.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: staff.id,
+        assignmentType: "MEMBER",
+        attendanceMachineCode: `BD${runId}`.toUpperCase(),
+        effectiveFrom: new Date("2026-08-03T00:00:00.000Z"),
+      },
+    });
+    await prisma.staffEmploymentHistory.create({
+      data: {
+        companyId,
+        staffId: staff.id,
+        employmentStatus: "ACTIVE",
+        employmentCategory: "PROBATION",
+        effectiveFrom: new Date("2026-08-03T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
+    const schedule = await prisma.staffWorkSchedule.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        staffId: staff.id,
+        name: "Ca Live",
+        scheduledStartMinutes: 540,
+        scheduledEndMinutes: 930,
+        requiredLiveMinutes: 360,
+        effectiveFrom: new Date("2026-06-30T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
+
+    expect(
+      (await getAttendanceFilterOptions(gm, "2026-07", branchAId)).staff.map(({ id }) => id),
+    ).not.toContain(staff.id);
+    const input = {
+      targetDate: "2026-06-30",
+      assignmentId: assignment.id,
+      assignmentVersion: assignment.version,
+      staffVersion: staff.version,
+      reason: "Hồ sơ được tạo tháng 8 nhưng nhân viên đã làm việc từ tháng 6.",
+    } as const;
+    await expect(correctStaffStartDate(manager, staff.id, input, metadata)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+
+    await expect(correctStaffStartDate(gm, staff.id, input, metadata)).resolves.toMatchObject({
+      targetDate: "2026-06-30",
+      previousAssignmentEffectiveFrom: "2026-08-03",
+      assignmentEffectiveFrom: "2026-06-30",
+      employmentHistoryAdjusted: true,
+      scheduleAdjusted: false,
+      scheduleEffectiveFrom: "2026-06-30",
+    });
+    expect(
+      (await getAttendanceFilterOptions(gm, "2026-07", branchAId)).staff.map(({ id }) => id),
+    ).toContain(staff.id);
+
+    const [updatedAssignment, updatedHistory, unchangedSchedule, audit] = await Promise.all([
+      prisma.branchAssignment.findUniqueOrThrow({ where: { id: assignment.id } }),
+      prisma.staffEmploymentHistory.findFirstOrThrow({ where: { companyId, staffId: staff.id } }),
+      prisma.staffWorkSchedule.findUniqueOrThrow({ where: { id: schedule.id } }),
+      prisma.auditLog.findFirstOrThrow({
+        where: {
+          companyId,
+          entityId: staff.id,
+          action: "staff.start-date.correct",
+        },
+      }),
+    ]);
+    expect(updatedAssignment.effectiveFrom).toEqual(new Date("2026-06-30T00:00:00.000Z"));
+    expect(updatedHistory.effectiveFrom).toEqual(new Date("2026-06-30T00:00:00.000Z"));
+    expect(unchangedSchedule.effectiveFrom).toEqual(new Date("2026-06-30T00:00:00.000Z"));
+    expect(audit.reason).toBe(input.reason);
   });
 
   it("manager không thể thêm hoặc đọc nhân viên ở cơ sở khác bằng ID trực tiếp", async () => {

@@ -15,6 +15,7 @@ import { configuredRuleSchema } from "@ald/contracts";
 import { prisma, type Prisma } from "@ald/db";
 import {
   DomainError,
+  effectivePenaltyAmount,
   enumerateBusinessMonth,
   matchRevenueBand,
   requirePermission,
@@ -48,6 +49,7 @@ const attendanceSelect = {
   spansNextDay: true,
   workUnits: true,
   overtimeMinutes: true,
+  penaltyOverrideAmount: true,
   note: true,
   status: true,
   version: true,
@@ -125,6 +127,7 @@ function toDto(
     spansNextDay: record.spansNextDay,
     workUnits: record.workUnits.toString(),
     overtimeMinutes: record.overtimeMinutes,
+    penaltyOverrideAmount: record.penaltyOverrideAmount?.toString() ?? null,
     note: record.note,
     status: record.status,
     version: record.version,
@@ -228,7 +231,10 @@ async function toMutationDto(
     ...attendance,
     automaticViolationSummary,
     violations: violations.map(toViolationDto),
-    activePenaltyTotal: automaticViolationSummary.attendanceActivePenaltyTotal,
+    activePenaltyTotal: effectivePenaltyAmount(
+      automaticViolationSummary.attendanceActivePenaltyTotal,
+      record.penaltyOverrideAmount?.toString(),
+    ),
   };
 }
 
@@ -243,6 +249,7 @@ function attendanceAuditShape(record: AttendanceRecord): Record<string, unknown>
     spansNextDay: dto.spansNextDay,
     workUnits: dto.workUnits,
     overtimeMinutes: dto.overtimeMinutes,
+    penaltyOverrideAmount: dto.penaltyOverrideAmount,
     note: dto.note,
     status: dto.status,
     version: dto.version,
@@ -731,11 +738,26 @@ export async function getAttendanceMonth(
     bucket.push(toViolationDto(violation));
     violationsByDate.set(date, bucket);
   }
-  const activePenaltyTotal = sumPenaltyAmounts(
-    violations
-      .filter((violation) => violation.status === "ACTIVE")
-      .map((violation) => violation.amount.toString()),
-  );
+  const monthDays = days.map((day) => {
+    const attendance = byDate.get(day.businessDate) ?? null;
+    const dayViolations = violationsByDate.get(day.businessDate) ?? [];
+    const calculatedPenaltyTotal = sumPenaltyAmounts(
+      dayViolations
+        .filter((violation) => violation.status === "ACTIVE")
+        .map((violation) => violation.amount),
+    );
+    return {
+      ...day,
+      attendance,
+      violations: dayViolations,
+      calculatedPenaltyTotal,
+      activePenaltyTotal: effectivePenaltyAmount(
+        calculatedPenaltyTotal,
+        attendance?.penaltyOverrideAmount,
+      ),
+    };
+  });
+  const activePenaltyTotal = sumPenaltyAmounts(monthDays.map((day) => day.activePenaltyTotal));
 
   return {
     month,
@@ -758,16 +780,7 @@ export async function getAttendanceMonth(
       unit: target.company.revenueUnit,
       scale: target.company.revenueScale,
     },
-    days: days.map((day) => ({
-      ...day,
-      attendance: byDate.get(day.businessDate) ?? null,
-      violations: violationsByDate.get(day.businessDate) ?? [],
-      activePenaltyTotal: sumPenaltyAmounts(
-        (violationsByDate.get(day.businessDate) ?? [])
-          .filter((violation) => violation.status === "ACTIVE")
-          .map((violation) => violation.amount),
-      ),
-    })),
+    days: monthDays,
   };
 }
 
@@ -778,6 +791,9 @@ export async function createAttendance(
   expectedBranchId?: string,
 ): Promise<AttendanceRecordDto> {
   requirePermission(actor, "attendance:write");
+  if (input.penaltyOverrideAmount !== undefined && actor.role !== "GENERAL_MANAGER") {
+    throw new DomainError("FORBIDDEN", "Chỉ Tổng quản lý được sửa tiền phạt.");
+  }
   const target = await resolveTarget(
     actor,
     input.staffId,
@@ -811,6 +827,14 @@ export async function createAttendance(
             spansNextDay: values.spansNextDay,
             workUnits: values.workUnits,
             overtimeMinutes: values.overtimeMinutes,
+            ...(input.penaltyOverrideAmount !== undefined
+              ? {
+                  penaltyOverrideAmount:
+                    input.penaltyOverrideAmount === null
+                      ? null
+                      : BigInt(input.penaltyOverrideAmount),
+                }
+              : {}),
             note: input.note ?? null,
             status: input.status ?? "DRAFT",
             createdByUserId: actor.userId,
@@ -868,6 +892,9 @@ export async function updateAttendance(
   metadata: RequestMetadata,
 ): Promise<AttendanceRecordDto> {
   requirePermission(actor, "attendance:write");
+  if (input.penaltyOverrideAmount !== undefined && actor.role !== "GENERAL_MANAGER") {
+    throw new DomainError("FORBIDDEN", "Chỉ Tổng quản lý được sửa tiền phạt.");
+  }
   const existing = await prisma.attendanceDay.findFirst({
     where: { id, companyId: actor.companyId },
     select: attendanceSelect,
@@ -916,6 +943,14 @@ export async function updateAttendance(
             ...(input.workUnits !== undefined ? { workUnits: input.workUnits } : {}),
             ...(input.overtimeMinutes !== undefined
               ? { overtimeMinutes: input.overtimeMinutes }
+              : {}),
+            ...(input.penaltyOverrideAmount !== undefined
+              ? {
+                  penaltyOverrideAmount:
+                    input.penaltyOverrideAmount === null
+                      ? null
+                      : BigInt(input.penaltyOverrideAmount),
+                }
               : {}),
             ...(input.note !== undefined ? { note: input.note } : {}),
             ...(input.status !== undefined ? { status: input.status } : {}),
@@ -1010,6 +1045,12 @@ export async function saveAttendanceBatch(
 ): Promise<AttendanceBatchSaveResultDto> {
   const startedAt = Date.now();
   requirePermission(actor, "attendance:write");
+  if (
+    actor.role !== "GENERAL_MANAGER" &&
+    input.rows.some((row) => row.penaltyOverrideAmount !== undefined)
+  ) {
+    throw new DomainError("FORBIDDEN", "Chỉ Tổng quản lý được sửa tiền phạt.");
+  }
   if (actor.role === "TRAINING_MANAGER" && actor.staffId === input.staffId) {
     throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên trong phạm vi.");
   }
@@ -1110,6 +1151,14 @@ export async function saveAttendanceBatch(
                 spansNextDay: row.spansNextDay,
                 workUnits: row.workUnits,
                 overtimeMinutes: row.overtimeMinutes,
+                ...(row.penaltyOverrideAmount !== undefined
+                  ? {
+                      penaltyOverrideAmount:
+                        row.penaltyOverrideAmount === null
+                          ? null
+                          : BigInt(row.penaltyOverrideAmount),
+                    }
+                  : {}),
                 note: row.note,
                 status: row.status ?? "DRAFT",
                 createdByUserId: actor.userId,
@@ -1148,6 +1197,12 @@ export async function saveAttendanceBatch(
               spansNextDay: row.spansNextDay,
               workUnits: row.workUnits,
               overtimeMinutes: row.overtimeMinutes,
+              ...(row.penaltyOverrideAmount !== undefined
+                ? {
+                    penaltyOverrideAmount:
+                      row.penaltyOverrideAmount === null ? null : BigInt(row.penaltyOverrideAmount),
+                  }
+                : {}),
               note: row.note,
               status: row.status ?? "DRAFT",
               archivedAt: null,

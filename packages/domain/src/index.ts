@@ -330,6 +330,15 @@ export function sumPenaltyAmounts(amounts: readonly string[]): string {
   return amounts.reduce((total, amount) => total + BigInt(amount), 0n).toString();
 }
 
+export function effectivePenaltyAmount(
+  calculatedAmount: string,
+  overrideAmount: string | null | undefined,
+): string {
+  return overrideAmount === null || overrideAmount === undefined
+    ? BigInt(calculatedAmount).toString()
+    : BigInt(overrideAmount).toString();
+}
+
 export type MonthlyMetricValues = Readonly<{
   revenueAmount: string;
   workUnits: string;

@@ -10,6 +10,7 @@ import {
   createEmployeeErrorReport,
   getAttendanceMonth,
   getAttendancePrintData,
+  updateAttendance,
 } from "./attendance-service";
 import {
   createPenaltyRuleDraft,
@@ -549,6 +550,26 @@ describe("violation snapshot, totals và branch scope", () => {
     expect(day?.activePenaltyTotal).toBe("50000");
     expect(august.activePenaltyTotal).toBe("50000");
 
+    await updateAttendance(
+      gm,
+      day!.attendance!.id,
+      {
+        version: day!.attendance!.version,
+        penaltyOverrideAmount: "20000",
+      },
+      metadata,
+    );
+    const overriddenAugust = await getAttendanceMonth(managerA, liveAId, "2026-08");
+    const overriddenDay = overriddenAugust.days.find(
+      (candidate) => candidate.businessDate === "2026-08-15",
+    );
+    expect(overriddenDay).toMatchObject({
+      calculatedPenaltyTotal: "50000",
+      activePenaltyTotal: "20000",
+      violations: [expect.objectContaining({ itemName: oldViolation.itemName, status: "ACTIVE" })],
+    });
+    expect(overriddenAugust.activePenaltyTotal).toBe("20000");
+
     const printed = await getAttendancePrintData(
       managerA,
       liveAId,
@@ -558,9 +579,9 @@ describe("violation snapshot, totals và branch scope", () => {
     );
     expect(printed.rows.find((row) => row.businessDate === "2026-08-15")).toMatchObject({
       violationNames: [oldViolation.itemName],
-      penaltyAmount: "50000",
+      penaltyAmount: "20000",
     });
-    expect(printed.totals.penaltyAmount).toBe("50000");
+    expect(printed.totals.penaltyAmount).toBe("20000");
 
     const report = await createEmployeeErrorReport(
       gm,

@@ -5,6 +5,7 @@ import type {
   StaffBankQrDocumentDto,
   StaffCodePreviewDto,
   StaffIdentityDocumentDto,
+  StaffStartDateCorrectionDto,
   StaffWorkScheduleDto,
 } from "@ald/contracts";
 
@@ -209,6 +210,10 @@ export function StaffWorkspace({
   const [showTerminationDialog, setShowTerminationDialog] = useState(false);
   const [terminationDate, setTerminationDate] = useState("");
   const [terminationError, setTerminationError] = useState<string | null>(null);
+  const [showStartDateDialog, setShowStartDateDialog] = useState(false);
+  const [startDate, setStartDate] = useState("");
+  const [startDateReason, setStartDateReason] = useState("");
+  const [startDateError, setStartDateError] = useState<string | null>(null);
   const [createFiles, setCreateFiles] = useState<Partial<Record<UploadKind, File>>>({});
   const [uploadStates, setUploadStates] = useState<Readonly<Record<string, UploadState>>>({});
   const [pending, setPending] = useState(false);
@@ -679,6 +684,75 @@ export function StaffWorkspace({
     }
   }
 
+  function openStartDateDialog(): void {
+    if (!selected || !capabilities.canCorrectStartDate) return;
+    const defaultDate =
+      selected.joinedDate && selected.joinedDate < selected.assignmentEffectiveFrom
+        ? selected.joinedDate
+        : selected.assignmentEffectiveFrom;
+    setStartDate(defaultDate);
+    setStartDateReason("");
+    setStartDateError(null);
+    setShowStartDateDialog(true);
+  }
+
+  function closeStartDateDialog(): void {
+    if (pending) return;
+    setShowStartDateDialog(false);
+    setStartDate("");
+    setStartDateReason("");
+    setStartDateError(null);
+  }
+
+  async function correctStartDate(): Promise<void> {
+    if (!selected || !capabilities.canCorrectStartDate) return;
+    if (!startDate) {
+      setStartDateError("Vui lòng chọn ngày bắt đầu cần đồng bộ.");
+      return;
+    }
+    if (!startDateReason.trim()) {
+      setStartDateError("Vui lòng nhập lý do điều chỉnh hồi tố.");
+      return;
+    }
+
+    setPending(true);
+    setStartDateError(null);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/staff/${encodeURIComponent(selected.id)}/start-date`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetDate: startDate,
+          reason: startDateReason.trim(),
+          staffVersion: selected.version,
+          assignmentId: selected.assignmentId,
+          assignmentVersion: selected.assignmentVersion,
+        }),
+      });
+      const payload = (await response.json()) as ApiEnvelope<StaffStartDateCorrectionDto>;
+      if (!response.ok || !payload.data) {
+        throw new Error(messageFrom(payload, "Không thể đồng bộ ngày bắt đầu."));
+      }
+      await Promise.all([reloadStaff(selected.id), loadScheduleHistory(selected.id)]);
+      setShowStartDateDialog(false);
+      setStartDate("");
+      setStartDateReason("");
+      setMessage(
+        payload.data.scheduleAdjusted
+          ? "Đã đồng bộ ngày gia nhập, phân công, lịch sử việc làm và ca làm."
+          : "Đã đồng bộ ngày gia nhập, phân công và lịch sử việc làm; ca hiện có đã bao phủ ngày này.",
+      );
+    } catch (caught) {
+      setStartDateError(
+        caught instanceof Error ? caught.message : "Không thể đồng bộ ngày bắt đầu.",
+      );
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function uploadInEdit(kind: UploadKind, file: File): Promise<void> {
     if (!selected || !capabilities.canUploadPrivateDocuments) return;
     setPending(true);
@@ -725,6 +799,10 @@ export function StaffWorkspace({
     setEditing(false);
     setEditForm(profileForm(person));
     setShowTerminationDialog(false);
+    setShowStartDateDialog(false);
+    setStartDate("");
+    setStartDateReason("");
+    setStartDateError(null);
     setTerminationDate("");
     setTerminationError(null);
     setUploadStates({});
@@ -749,6 +827,10 @@ export function StaffWorkspace({
     setEditing(false);
     setEditForm(null);
     setShowTerminationDialog(false);
+    setShowStartDateDialog(false);
+    setStartDate("");
+    setStartDateReason("");
+    setStartDateError(null);
     setTerminationDate("");
     setTerminationError(null);
     setError(null);
@@ -1060,6 +1142,42 @@ export function StaffWorkspace({
                 <ProfileReadOnly canViewSalary={capabilities.canViewSalary} person={selected} />
               )}
 
+              {!editing &&
+              capabilities.canCorrectStartDate &&
+              selected.employmentStatus !== "TERMINATED" ? (
+                <section className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="font-semibold text-amber-950">Ngày bắt đầu dữ liệu lịch sử</h3>
+                      <p className="mt-1 text-sm text-amber-900">
+                        Ngày gia nhập: {displayBusinessDate(selected.joinedDate) ?? "chưa có"} ·
+                        Phân công tại {selected.branch.code}: từ{" "}
+                        {displayBusinessDate(selected.assignmentEffectiveFrom)}
+                      </p>
+                      {selected.joinedDate &&
+                      selected.joinedDate < selected.assignmentEffectiveFrom ? (
+                        <p className="mt-2 text-sm font-medium text-rose-700" role="status">
+                          Phân công bắt đầu sau ngày gia nhập nên nhân viên có thể bị ẩn khỏi chấm
+                          công tháng cũ.
+                        </p>
+                      ) : (
+                        <p className="mt-2 text-sm text-amber-800">
+                          Chỉ dùng thao tác hồi tố khi hồ sơ được tạo nhầm ngày bắt đầu.
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      className="shrink-0 rounded-lg bg-amber-900 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+                      disabled={pending}
+                      type="button"
+                      onClick={openStartDateDialog}
+                    >
+                      Đồng bộ ngày bắt đầu
+                    </button>
+                  </div>
+                </section>
+              ) : null}
+
               <div className="mt-5 grid gap-5 lg:grid-cols-2">
                 <section className="rounded-xl border border-slate-200 p-4">
                   <h3 className="font-semibold">Ca làm</h3>
@@ -1310,6 +1428,132 @@ export function StaffWorkspace({
         </div>
       ) : null}
 
+      {showStartDateDialog &&
+      selected &&
+      capabilities.canCorrectStartDate &&
+      selected.employmentStatus !== "TERMINATED" ? (
+        <div
+          aria-describedby="correct-start-date-description"
+          aria-labelledby="correct-start-date-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4"
+          role="dialog"
+        >
+          <div className="w-full max-w-xl rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="break-words text-xl font-semibold" id="correct-start-date-title">
+                  Đồng bộ ngày bắt đầu
+                </h2>
+                <p className="mt-1 break-words text-sm text-slate-600">
+                  {selected.fullName} · {selected.staffCode} · {selected.branch.code}
+                </p>
+              </div>
+              <button
+                aria-label="Đóng điều chỉnh ngày bắt đầu"
+                className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                disabled={pending}
+                type="button"
+                onClick={closeStartDateDialog}
+              >
+                Đóng
+              </button>
+            </div>
+
+            <div
+              className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"
+              id="correct-start-date-description"
+            >
+              <p>
+                Hệ thống sẽ đồng bộ ngày gia nhập, phân công cơ sở đầu tiên và lịch sử việc làm. Ca
+                làm chỉ được kéo lùi khi chưa có ca nào bao phủ ngày mới.
+              </p>
+              <dl className="mt-3 grid gap-2 sm:grid-cols-2">
+                <div>
+                  <dt className="text-xs font-medium uppercase text-amber-700">
+                    Ngày gia nhập hiện tại
+                  </dt>
+                  <dd>{displayBusinessDate(selected.joinedDate) ?? "Chưa có"}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium uppercase text-amber-700">
+                    Phân công hiện tại từ
+                  </dt>
+                  <dd>{displayBusinessDate(selected.assignmentEffectiveFrom)}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs font-medium uppercase text-amber-700">Ca sớm nhất từ</dt>
+                  <dd>
+                    {displayBusinessDate(
+                      scheduleHistory[scheduleHistory.length - 1]?.effectiveFrom ??
+                        selected.currentSchedule?.effectiveFrom ??
+                        null,
+                    ) ?? "Chưa có"}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="mt-4 grid gap-4">
+              <Field label="Ngày bắt đầu cần đồng bộ">
+                <input
+                  autoFocus
+                  max={
+                    selected.joinedDate && selected.joinedDate < selected.assignmentEffectiveFrom
+                      ? selected.joinedDate
+                      : selected.assignmentEffectiveFrom
+                  }
+                  required
+                  type="date"
+                  value={startDate}
+                  onChange={(event) => {
+                    setStartDate(event.target.value);
+                    setStartDateError(null);
+                  }}
+                />
+              </Field>
+              <Field label="Lý do điều chỉnh hồi tố">
+                <textarea
+                  className="min-h-24"
+                  maxLength={500}
+                  placeholder="Ví dụ: Hồ sơ được tạo tháng 8 nhưng nhân viên đã làm việc từ tháng 6."
+                  required
+                  value={startDateReason}
+                  onChange={(event) => {
+                    setStartDateReason(event.target.value);
+                    setStartDateError(null);
+                  }}
+                />
+              </Field>
+              {startDateError ? (
+                <p className="text-sm text-rose-700" role="alert">
+                  {startDateError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                className="rounded-lg border border-slate-300 px-4 py-2 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                disabled={pending}
+                type="button"
+                onClick={closeStartDateDialog}
+              >
+                Hủy
+              </button>
+              <button
+                className="rounded-lg bg-slate-950 px-4 py-2 font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                disabled={pending}
+                type="button"
+                onClick={() => void correctStartDate()}
+              >
+                {pending ? "Đang đồng bộ…" : "Xác nhận đồng bộ"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {showTerminationDialog &&
       selected &&
       capabilities.canTerminateStaff &&
@@ -1493,6 +1737,10 @@ function ProfileReadOnly({
       <Info label="Vị trí công việc" value={person.jobTitle} />
       <Info label="Loại nhân sự" value={person.employmentCategory} />
       <Info label="Ngày gia nhập" value={displayBusinessDate(person.joinedDate)} />
+      <Info
+        label={`Phân công tại ${person.branch.code} từ`}
+        value={displayBusinessDate(person.assignmentEffectiveFrom)}
+      />
       <Info label="Ngày chính thức" value={displayBusinessDate(person.officialDate)} />
       {person.employmentStatus === "TERMINATED" ? (
         <Info label="Ngày nghỉ việc" value={displayBusinessDate(person.terminationDate)} />

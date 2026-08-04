@@ -10,6 +10,7 @@ import { prisma } from "@ald/db";
 import {
   businessWeekOfMonth,
   DomainError,
+  effectivePenaltyAmount,
   enumerateBusinessMonth,
   enumerateBusinessWeeks,
   requirePermission,
@@ -214,6 +215,7 @@ export async function getCompanyMonthlyReport(
             staffId: true,
             businessDate: true,
             workUnits: true,
+            penaltyOverrideAmount: true,
             liveMetric: { select: { revenueAmount: true } },
             violations: {
               where: { status: "ACTIVE" },
@@ -281,9 +283,12 @@ export async function getCompanyMonthlyReport(
               workUnits: record.workUnits.toString(),
               actualLiveMinutes: 0,
               overtimeMinutes: 0,
-              penaltyAmount: record.violations
-                .reduce((total, violation) => total + violation.amount, 0n)
-                .toString(),
+              penaltyAmount: effectivePenaltyAmount(
+                record.violations
+                  .reduce((total, violation) => total + violation.amount, 0n)
+                  .toString(),
+                record.penaltyOverrideAmount?.toString(),
+              ),
             })),
           );
           workUnits = metrics.workUnits;
@@ -301,7 +306,7 @@ export async function getCompanyMonthlyReport(
         const totals: CompanyReportTotalsDto = {
           revenueAmount: revenueAmount.toString(),
           workUnits,
-          // Penalty is an operational metric and must follow currently ACTIVE violations.
+          // Penalty follows ACTIVE violations unless the GM has set a daily override.
           // Payroll remains a historical snapshot and may still contain a cancelled old penalty.
           penalties: penalties.toString(),
           revenueBonus: (payroll?.dailyRevenueBonus ?? 0n).toString(),
@@ -564,6 +569,7 @@ export async function getManagerCompanyReport(
             businessDate: true,
             workUnits: true,
             overtimeMinutes: true,
+            penaltyOverrideAmount: true,
             liveMetric: {
               select: { revenueAmount: true, actualLiveMinutes: true },
             },
@@ -625,9 +631,12 @@ export async function getManagerCompanyReport(
                   workUnits: record.workUnits.toString(),
                   actualLiveMinutes: record.liveMetric?.actualLiveMinutes ?? 0,
                   overtimeMinutes: record.overtimeMinutes,
-                  penaltyAmount: record.violations
-                    .reduce((total, violation) => total + violation.amount, 0n)
-                    .toString(),
+                  penaltyAmount: effectivePenaltyAmount(
+                    record.violations
+                      .reduce((total, violation) => total + violation.amount, 0n)
+                      .toString(),
+                    record.penaltyOverrideAmount?.toString(),
+                  ),
                 })),
               );
         const missingAttendance = missingDays.filter((day) => {

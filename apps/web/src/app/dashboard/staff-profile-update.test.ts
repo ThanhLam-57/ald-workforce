@@ -14,6 +14,8 @@ const staff = {
   assignmentId: "00000000-0000-4000-8000-000000000003",
   attendanceMachineCode: null,
   assignmentVersion: 2,
+  assignmentEffectiveFrom: "2026-07-01",
+  assignmentEffectiveTo: null,
   fullName: "Nhân viên A",
   streamingAlias: null,
   tiktokChannelId: null,
@@ -113,14 +115,10 @@ describe("createStaffProfileUpdatePayload", () => {
 
   it("không gửi thay đổi mã máy khi capability phân công bị tắt", () => {
     expect(
-      createStaffProfileUpdatePayload(
-        staff,
-        form({ attendanceMachineCode: "00033" }),
-        {
-          canEditAssignment: false,
-          canEditSalary: false,
-        },
-      ),
+      createStaffProfileUpdatePayload(staff, form({ attendanceMachineCode: "00033" }), {
+        canEditAssignment: false,
+        canEditSalary: false,
+      }),
     ).not.toHaveProperty("attendanceMachineCode");
   });
 });

@@ -451,6 +451,77 @@ describe("attendance batch save", () => {
     expect(saved.dataset.days.filter((day) => day.attendance !== null)).toHaveLength(31);
   });
 
+  it("lets only the GM override a daily penalty without removing violations", async () => {
+    const month = await getAttendanceMonth(gm, futureLiveId, "2026-08");
+    const current = month.days[0]!.attendance!;
+    const baseRow = {
+      businessDate: "2026-08-01",
+      attendanceId: current.id,
+      version: current.version,
+      checkInAt: current.checkInAt,
+      checkOutAt: current.checkOutAt,
+      spansNextDay: current.spansNextDay,
+      workUnits: current.workUnits,
+      overtimeMinutes: current.overtimeMinutes,
+      note: current.note,
+      actualLiveMinutes: current.actualLiveMinutes,
+      revenueAmount: current.revenueAmount,
+    } as const;
+
+    await expect(
+      saveAttendanceBatch(
+        manager,
+        {
+          staffId: futureLiveId,
+          month: "2026-08",
+          rows: [{ ...baseRow, penaltyOverrideAmount: "1" }],
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    const overridden = await saveAttendanceBatch(
+      gm,
+      {
+        staffId: futureLiveId,
+        month: "2026-08",
+        rows: [{ ...baseRow, penaltyOverrideAmount: "25000" }],
+      },
+      metadata,
+    );
+    const overriddenDay = overridden.dataset.days[0]!;
+    expect(overriddenDay).toMatchObject({
+      calculatedPenaltyTotal: "0",
+      activePenaltyTotal: "25000",
+      violations: [],
+    });
+    expect(overriddenDay.attendance?.penaltyOverrideAmount).toBe("25000");
+
+    const printed = await getAttendancePrintData(gm, futureLiveId, "2026-08", metadata);
+    expect(printed.rows[0]).toMatchObject({ penaltyAmount: "25000", violationNames: [] });
+
+    const cleared = await saveAttendanceBatch(
+      gm,
+      {
+        staffId: futureLiveId,
+        month: "2026-08",
+        rows: [
+          {
+            ...baseRow,
+            version: overriddenDay.attendance!.version,
+            penaltyOverrideAmount: null,
+          },
+        ],
+      },
+      metadata,
+    );
+    expect(cleared.dataset.days[0]).toMatchObject({
+      calculatedPenaltyTotal: "0",
+      activePenaltyTotal: "0",
+      attendance: { penaltyOverrideAmount: null },
+    });
+  });
+
   it("creates and updates multiple days atomically in one batch", async () => {
     const created = await saveAttendanceBatch(
       gm,

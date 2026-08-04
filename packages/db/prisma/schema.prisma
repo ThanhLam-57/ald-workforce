@@ -573,6 +573,7 @@ model AttendanceDay {
   spansNextDay    Boolean          @default(false)
   workUnits       Decimal          @default(0) @db.Decimal(6, 2)
   overtimeMinutes Int              @default(0)
+  penaltyOverrideAmount BigInt?
   note            String?
   status          AttendanceStatus @default(DRAFT)
   version         Int              @default(1)

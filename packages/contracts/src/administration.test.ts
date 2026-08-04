@@ -10,6 +10,7 @@ import {
   staffCodePreviewQuerySchema,
   staffOnboardSchema,
   staffProfileUpdateSchema,
+  staffStartDateCorrectionSchema,
   staffUpdateSchema,
   staffWorkScheduleCreateSchema,
 } from "./index";
@@ -192,6 +193,21 @@ describe("manager staff onboarding", () => {
       attendanceMachineCode: "00033",
     });
     expect(parsed).not.toHaveProperty("reason");
+  });
+
+  it("bắt buộc lý do và optimistic lock khi đồng bộ ngày bắt đầu hồi tố", () => {
+    const valid = {
+      targetDate: "2026-06-30",
+      assignmentId: "00000000-0000-4000-8000-000000000002",
+      assignmentVersion: 2,
+      staffVersion: 3,
+      reason: "Hồ sơ được nhập muộn hơn ngày nhân viên bắt đầu làm việc.",
+    };
+    expect(staffStartDateCorrectionSchema.parse(valid)).toEqual(valid);
+    expect(() => staffStartDateCorrectionSchema.parse({ ...valid, reason: " " })).toThrow();
+    expect(() =>
+      staffStartDateCorrectionSchema.parse({ ...valid, assignmentVersion: 0 }),
+    ).toThrow();
   });
 
   it("chỉ nhận ảnh CCCD đúng MIME, dung lượng và checksum base64", () => {

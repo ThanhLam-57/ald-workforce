@@ -42,7 +42,9 @@ type EditableDay = Readonly<{
   message: string | null;
   conflictRecord: AttendanceRecordDto | null;
   violations: readonly ViolationDto[];
-  activePenaltyTotal: string;
+  calculatedPenaltyTotal: string;
+  penaltyAmount: string;
+  penaltyOverridden: boolean;
 }>;
 
 type ApiPayload = Readonly<{
@@ -94,6 +96,10 @@ function displayMoney(value: string): string {
   return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} ₫`;
 }
 
+function penaltyDraftValue(value: string): bigint {
+  return /^\d+$/.test(value.trim()) ? BigInt(value) : 0n;
+}
+
 function nextDate(value: string): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + 1);
@@ -123,7 +129,10 @@ function editableDay(day: AttendanceMonthDayDto): EditableDay {
     message: null,
     conflictRecord: null,
     violations: day.violations,
-    activePenaltyTotal: day.activePenaltyTotal,
+    calculatedPenaltyTotal: day.calculatedPenaltyTotal,
+    penaltyAmount: record?.penaltyOverrideAmount ?? day.calculatedPenaltyTotal,
+    penaltyOverridden:
+      record?.penaltyOverrideAmount !== null && record?.penaltyOverrideAmount !== undefined,
   };
 }
 
@@ -172,7 +181,8 @@ function rowFromRecord(day: EditableDay, record: AttendanceRecordDto): EditableD
     dayOfWeek: day.dayOfWeek,
     attendance: record,
     violations: day.violations,
-    activePenaltyTotal: day.activePenaltyTotal,
+    calculatedPenaltyTotal: day.calculatedPenaltyTotal,
+    activePenaltyTotal: record.penaltyOverrideAmount ?? day.calculatedPenaltyTotal,
   });
 }
 
@@ -245,6 +255,10 @@ export function AttendanceWorkspace({
   );
   const dailyRewardTotal = useMemo(
     () => days.reduce((total, day) => total + BigInt(day.record?.dailyReward.amount ?? "0"), 0n),
+    [days],
+  );
+  const penaltyTotal = useMemo(
+    () => days.reduce((total, day) => total + penaltyDraftValue(day.penaltyAmount), 0n),
     [days],
   );
   const selectedBranch = useMemo(
@@ -365,6 +379,10 @@ export function AttendanceWorkspace({
         );
         return [];
       }
+      if (canOverridePenalty && day.penaltyOverridden && !/^\d+$/.test(day.penaltyAmount.trim())) {
+        invalidDates.set(day.businessDate, "Tiền phạt phải là số nguyên không âm.");
+        return [];
+      }
       const spansNextDay = isNextDayCheckout(day.checkInTime, day.checkOutTime);
       const hasWorkedValues =
         day.checkInTime !== "" ||
@@ -387,6 +405,11 @@ export function AttendanceWorkspace({
           status: hasWorkedValues ? ("PRESENT" as const) : ("DRAFT" as const),
           actualLiveMinutes,
           revenueAmount: day.revenueAmount || "0",
+          ...(canOverridePenalty
+            ? {
+                penaltyOverrideAmount: day.penaltyOverridden ? day.penaltyAmount.trim() : null,
+              }
+            : {}),
         },
       ];
     });
@@ -486,7 +509,7 @@ export function AttendanceWorkspace({
     } finally {
       batchSaving.current = false;
     }
-  }, [month, staffId]);
+  }, [canOverridePenalty, month, staffId]);
 
   const loadOptions = useCallback(
     async (nextMonth: string, requestedBranchId?: string): Promise<boolean> => {
@@ -588,6 +611,32 @@ export function AttendanceWorkspace({
     replaceDay(businessDate, (day) => ({
       ...day,
       [field]: value,
+      saveState: "dirty",
+      message: null,
+      conflictRecord: null,
+    }));
+    setBatchSaveState("idle");
+    setBatchMessage(null);
+  }
+
+  function updatePenaltyAmount(businessDate: string, value: string) {
+    replaceDay(businessDate, (day) => ({
+      ...day,
+      penaltyAmount: value,
+      penaltyOverridden: true,
+      saveState: "dirty",
+      message: null,
+      conflictRecord: null,
+    }));
+    setBatchSaveState("idle");
+    setBatchMessage(null);
+  }
+
+  function resetPenaltyToCalculated(businessDate: string) {
+    replaceDay(businessDate, (day) => ({
+      ...day,
+      penaltyAmount: day.calculatedPenaltyTotal,
+      penaltyOverridden: false,
       saveState: "dirty",
       message: null,
       conflictRecord: null,
@@ -885,7 +934,7 @@ export function AttendanceWorkspace({
         <div>
           <p className="text-slate-600">
             {dataset
-              ? `${dataset.staff.staffCode} — ${dataset.staff.fullName} · tổng thưởng ngày ${new Intl.NumberFormat("vi-VN").format(dailyRewardTotal)} ₫ · tổng phạt tháng ${new Intl.NumberFormat("vi-VN").format(BigInt(dataset.activePenaltyTotal))} ₫`
+              ? `${dataset.staff.staffCode} — ${dataset.staff.fullName} · tổng thưởng ngày ${new Intl.NumberFormat("vi-VN").format(dailyRewardTotal)} ₫ · tổng phạt tháng ${new Intl.NumberFormat("vi-VN").format(penaltyTotal)} ₫`
               : staffId
                 ? "Đang chuẩn bị dữ liệu…"
                 : "Cơ sở này chưa có nhân viên Live trong tháng đã chọn."}
@@ -1015,9 +1064,12 @@ export function AttendanceWorkspace({
                     title={day.message ?? undefined}
                   >
                     <span className="block font-medium">{day.workUnits}</span>
-                    {day.activePenaltyTotal !== "0" ? (
+                    {day.penaltyAmount !== "0" ? (
                       <span className="block text-xs font-medium text-rose-700">
-                        Phạt {new Intl.NumberFormat("vi-VN").format(BigInt(day.activePenaltyTotal))}
+                        Phạt{" "}
+                        {new Intl.NumberFormat("vi-VN").format(
+                          penaltyDraftValue(day.penaltyAmount),
+                        )}
                       </span>
                     ) : null}
                     {day.record && day.record.dailyReward.amount !== "0" ? (
@@ -1225,7 +1277,7 @@ export function AttendanceWorkspace({
                     </td>
                     <td className="w-48 min-w-40 max-w-56 align-top">
                       <AttendanceViolations
-                        activePenaltyTotal={day.activePenaltyTotal}
+                        activePenaltyTotal={day.calculatedPenaltyTotal}
                         attendanceId={day.record?.id ?? null}
                         businessDate={day.businessDate}
                         canOverrideAmount={canOverridePenalty}
@@ -1234,18 +1286,51 @@ export function AttendanceWorkspace({
                         violations={day.violations}
                       />
                     </td>
-                    <td className="min-w-28 text-right align-top">
-                      <span
-                        aria-label={`Tiền phạt ngày ${displayDate(day.businessDate)}: ${displayMoney(day.activePenaltyTotal)}`}
-                        className={
-                          day.activePenaltyTotal === "0"
-                            ? "font-medium text-slate-500"
-                            : "font-semibold text-rose-700"
-                        }
-                        title={`Tiền phạt hiện hành ngày ${displayDate(day.businessDate)}: ${displayMoney(day.activePenaltyTotal)}`}
-                      >
-                        {displayMoney(day.activePenaltyTotal)}
-                      </span>
+                    <td className="min-w-36 text-right align-top">
+                      {canOverridePenalty ? (
+                        <div className="flex min-w-32 flex-col items-end gap-1">
+                          <input
+                            {...grid(6)}
+                            aria-label={`Tiền phạt ngày ${displayDate(day.businessDate)}`}
+                            className="w-32 text-right font-semibold text-rose-700"
+                            disabled={disabled}
+                            inputMode="numeric"
+                            min="0"
+                            onChange={(event) =>
+                              updatePenaltyAmount(day.businessDate, event.target.value)
+                            }
+                            step="1"
+                            title={`Tiền phạt dùng để tính tổng và in phiếu ngày ${displayDate(day.businessDate)}`}
+                            type="number"
+                            value={day.penaltyAmount}
+                          />
+                          {day.penaltyOverridden ? (
+                            <button
+                              className="text-xs font-medium text-sky-700 underline"
+                              disabled={disabled}
+                              onClick={() => resetPenaltyToCalculated(day.businessDate)}
+                              title={`Khôi phục mức tự tính từ lỗi: ${displayMoney(day.calculatedPenaltyTotal)}`}
+                              type="button"
+                            >
+                              Dùng tổng lỗi ({displayMoney(day.calculatedPenaltyTotal)})
+                            </button>
+                          ) : (
+                            <span className="text-xs text-slate-500">Tự tính từ lỗi</span>
+                          )}
+                        </div>
+                      ) : (
+                        <span
+                          aria-label={`Tiền phạt ngày ${displayDate(day.businessDate)}: ${displayMoney(day.penaltyAmount)}`}
+                          className={
+                            day.penaltyAmount === "0"
+                              ? "font-medium text-slate-500"
+                              : "font-semibold text-rose-700"
+                          }
+                          title={`Tiền phạt hiện hành ngày ${displayDate(day.businessDate)}: ${displayMoney(day.penaltyAmount)}`}
+                        >
+                          {displayMoney(day.penaltyAmount)}
+                        </span>
+                      )}
                     </td>
                     <td className="min-w-36">
                       <span
@@ -1284,7 +1369,7 @@ export function AttendanceWorkspace({
                     </td>
                     <td>
                       <input
-                        {...grid(6)}
+                        {...grid(7)}
                         aria-label={`Ghi chú ${day.businessDate}`}
                         disabled={disabled}
                         onChange={(event) =>

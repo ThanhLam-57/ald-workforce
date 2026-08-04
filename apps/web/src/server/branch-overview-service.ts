@@ -7,6 +7,7 @@ import type {
 import { prisma, type Prisma } from "@ald/db";
 import {
   DomainError,
+  effectivePenaltyAmount,
   enumerateBusinessMonth,
   enumerateBusinessWeeks,
   requirePermission,
@@ -226,6 +227,7 @@ export async function getBranchMonthlyOverview(
             archivedAt: true,
             workUnits: true,
             overtimeMinutes: true,
+            penaltyOverrideAmount: true,
             liveMetric: {
               select: {
                 actualLiveMinutes: true,
@@ -263,10 +265,14 @@ export async function getBranchMonthlyOverview(
         actualLiveMinutes: record?.liveMetric?.actualLiveMinutes ?? 0,
         workUnits: record?.workUnits.toString() ?? "0",
         overtimeMinutes: record?.overtimeMinutes ?? 0,
-        penaltyAmount:
-          record?.violations
-            .reduce((total, violation) => total + violation.amount, 0n)
-            .toString() ?? "0",
+        penaltyAmount: record
+          ? effectivePenaltyAmount(
+              record.violations
+                .reduce((total, violation) => total + violation.amount, 0n)
+                .toString(),
+              record.penaltyOverrideAmount?.toString(),
+            )
+          : "0",
       };
     });
     return {

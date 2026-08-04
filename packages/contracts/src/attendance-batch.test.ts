@@ -64,4 +64,28 @@ describe("attendance batch save contract", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("accepts a nullable non-negative daily penalty override", () => {
+    expect(
+      attendanceBatchSaveSchema.safeParse({
+        staffId,
+        month: "2026-07",
+        rows: [{ ...row("2026-07-01"), penaltyOverrideAmount: "0" }],
+      }).success,
+    ).toBe(true);
+    expect(
+      attendanceBatchSaveSchema.safeParse({
+        staffId,
+        month: "2026-07",
+        rows: [{ ...row("2026-07-01"), penaltyOverrideAmount: null }],
+      }).success,
+    ).toBe(true);
+    expect(
+      attendanceBatchSaveSchema.safeParse({
+        staffId,
+        month: "2026-07",
+        rows: [{ ...row("2026-07-01"), penaltyOverrideAmount: "-1" }],
+      }).success,
+    ).toBe(false);
+  });
 });

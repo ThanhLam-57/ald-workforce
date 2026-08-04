@@ -8,6 +8,7 @@ export type StaffWorkspaceCapabilities = Readonly<{
   canUploadPrivateDocuments: boolean;
   canViewPrivateDocuments: boolean;
   canTerminateStaff: boolean;
+  canCorrectStartDate: boolean;
 }>;
 
 const GENERAL_MANAGER_CAPABILITIES = {
@@ -18,6 +19,7 @@ const GENERAL_MANAGER_CAPABILITIES = {
   canUploadPrivateDocuments: true,
   canViewPrivateDocuments: true,
   canTerminateStaff: true,
+  canCorrectStartDate: true,
 } as const satisfies StaffWorkspaceCapabilities;
 
 const TRAINING_MANAGER_CAPABILITIES = {
@@ -28,6 +30,7 @@ const TRAINING_MANAGER_CAPABILITIES = {
   canUploadPrivateDocuments: true,
   canViewPrivateDocuments: true,
   canTerminateStaff: false,
+  canCorrectStartDate: false,
 } as const satisfies StaffWorkspaceCapabilities;
 
 const NO_STAFF_WORKSPACE_CAPABILITIES = {
@@ -38,6 +41,7 @@ const NO_STAFF_WORKSPACE_CAPABILITIES = {
   canUploadPrivateDocuments: false,
   canViewPrivateDocuments: false,
   canTerminateStaff: false,
+  canCorrectStartDate: false,
 } as const satisfies StaffWorkspaceCapabilities;
 
 export function staffWorkspaceCapabilitiesFor(role: AuthRole): StaffWorkspaceCapabilities {

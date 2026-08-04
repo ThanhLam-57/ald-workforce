@@ -4,6 +4,8 @@ import type {
   StaffCodePreviewQuery,
   StaffOnboardInput,
   StaffProfileUpdateInput,
+  StaffStartDateCorrectionDto,
+  StaffStartDateCorrectionInput,
   StaffWorkScheduleCreateInput,
   StaffWorkScheduleDto,
   StaffWorkScheduleUpdateInput,
@@ -459,6 +461,8 @@ export async function listBranchStaff(
         assignmentId: assignment.id,
         attendanceMachineCode: assignment.attendanceMachineCode,
         assignmentVersion: assignment.version,
+        assignmentEffectiveFrom: assignment.effectiveFrom.toISOString().slice(0, 10),
+        assignmentEffectiveTo: assignment.effectiveTo?.toISOString().slice(0, 10) ?? null,
         fullName: record.fullName,
         streamingAlias: record.streamingAlias,
         tiktokChannelId: record.tiktokChannelId,
@@ -992,6 +996,314 @@ export async function updateStaffProfile(
     }
     throw error;
   }
+}
+
+export async function correctStaffStartDate(
+  actor: ActorContext,
+  staffId: string,
+  input: StaffStartDateCorrectionInput,
+  metadata: RequestMetadata,
+): Promise<StaffStartDateCorrectionDto> {
+  requirePermission(actor, "staff-profile:update");
+  if (actor.role !== "GENERAL_MANAGER") {
+    throw new DomainError(
+      "FORBIDDEN",
+      "Chỉ Tổng quản lý được điều chỉnh ngày bắt đầu có hiệu lực trong quá khứ.",
+    );
+  }
+
+  const targetDate = parseBusinessDate(input.targetDate);
+  const dateText = (value: Date | null): string | null => value?.toISOString().slice(0, 10) ?? null;
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT 1::integer
+      FROM pg_advisory_xact_lock(
+        hashtextextended(${`staff-start-date:${actor.companyId}:${staffId}`}, 0)
+      )
+    `;
+
+    const staff = await tx.staffMember.findFirst({
+      where: {
+        id: staffId,
+        companyId: actor.companyId,
+        archivedAt: null,
+        employmentStatus: { in: ["ACTIVE", "ON_LEAVE"] },
+      },
+      select: staffAuditSelect,
+    });
+    if (!staff) {
+      throw new DomainError("NOT_FOUND", "Không tìm thấy nhân viên đang làm việc.");
+    }
+    if (staff.version !== input.staffVersion) {
+      throw new DomainError("CONFLICT", "Hồ sơ đã thay đổi. Hãy tải lại trước khi điều chỉnh.");
+    }
+    if (staff.joinedDate && targetDate > staff.joinedDate) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Chức năng này chỉ dùng để lùi ngày bắt đầu về quá khứ.",
+      );
+    }
+    if (staff.officialDate && targetDate > staff.officialDate) {
+      throw new DomainError("VALIDATION_ERROR", "Ngày bắt đầu không được sau ngày lên chính thức.");
+    }
+    if (staff.terminationDate && targetDate > staff.terminationDate) {
+      throw new DomainError("VALIDATION_ERROR", "Ngày bắt đầu không được sau ngày nghỉ việc.");
+    }
+
+    const assignment = await tx.branchAssignment.findFirst({
+      where: {
+        id: input.assignmentId,
+        companyId: actor.companyId,
+        staffId,
+        assignmentType: "MEMBER",
+        archivedAt: null,
+      },
+    });
+    if (!assignment) {
+      throw new DomainError("NOT_FOUND", "Không tìm thấy phân công nhân viên cần điều chỉnh.");
+    }
+    if (assignment.version !== input.assignmentVersion) {
+      throw new DomainError("CONFLICT", "Phân công đã thay đổi. Hãy tải lại hồ sơ.");
+    }
+    if (targetDate > assignment.effectiveFrom) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Ngày mới phải bằng hoặc trước ngày bắt đầu phân công hiện tại.",
+      );
+    }
+
+    const firstAssignment = await tx.branchAssignment.findFirst({
+      where: {
+        companyId: actor.companyId,
+        staffId,
+        assignmentType: "MEMBER",
+        archivedAt: null,
+      },
+      orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }],
+      select: { id: true },
+    });
+    if (firstAssignment?.id !== assignment.id) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Chỉ được điều chỉnh hồi tố phân công cơ sở đầu tiên của nhân viên.",
+      );
+    }
+
+    const assignmentOverlap = await tx.branchAssignment.findFirst({
+      where: {
+        id: { not: assignment.id },
+        companyId: actor.companyId,
+        staffId,
+        assignmentType: "MEMBER",
+        archivedAt: null,
+        ...(assignment.effectiveTo ? { effectiveFrom: { lt: assignment.effectiveTo } } : {}),
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: targetDate } }],
+      },
+      select: { id: true },
+    });
+    if (assignmentOverlap) {
+      throw new DomainError(
+        "CONFLICT",
+        "Không thể lùi ngày vì khoảng phân công sẽ trùng với lịch sử cơ sở khác.",
+      );
+    }
+
+    if (assignment.attendanceMachineCode) {
+      const duplicateMachineCode = await tx.branchAssignment.findFirst({
+        where: {
+          id: { not: assignment.id },
+          companyId: actor.companyId,
+          branchId: assignment.branchId,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: assignment.attendanceMachineCode,
+          archivedAt: null,
+          ...(assignment.effectiveTo ? { effectiveFrom: { lt: assignment.effectiveTo } } : {}),
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: targetDate } }],
+        },
+        select: { id: true },
+      });
+      if (duplicateMachineCode) throw machineCodeConflictError();
+    }
+
+    const firstEmploymentHistory = await tx.staffEmploymentHistory.findFirst({
+      where: { companyId: actor.companyId, staffId },
+      orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }],
+    });
+    if (firstEmploymentHistory && firstEmploymentHistory.effectiveFrom < targetDate) {
+      throw new DomainError(
+        "CONFLICT",
+        "Lịch sử việc làm đã bắt đầu trước ngày được chọn; không thể tự động ghi đè.",
+      );
+    }
+
+    const schedules = await tx.staffWorkSchedule.findMany({
+      where: {
+        companyId: actor.companyId,
+        staffId,
+        branchId: assignment.branchId,
+        archivedAt: null,
+      },
+      orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }],
+      select: scheduleSelect,
+    });
+    const scheduleCoveringTarget = schedules.find(
+      (schedule) =>
+        schedule.effectiveFrom <= targetDate &&
+        (!schedule.effectiveTo || schedule.effectiveTo > targetDate),
+    );
+    const scheduleToBackdate = scheduleCoveringTarget
+      ? null
+      : (schedules.find((schedule) => schedule.effectiveFrom > targetDate) ?? null);
+    if (!scheduleCoveringTarget && !scheduleToBackdate) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Nhân viên chưa có ca làm để đồng bộ về ngày bắt đầu đã chọn.",
+      );
+    }
+    if (scheduleToBackdate) {
+      const scheduleOverlap = await tx.staffWorkSchedule.findFirst({
+        where: {
+          id: { not: scheduleToBackdate.id },
+          companyId: actor.companyId,
+          staffId,
+          archivedAt: null,
+          ...(scheduleToBackdate.effectiveTo
+            ? { effectiveFrom: { lt: scheduleToBackdate.effectiveTo } }
+            : {}),
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: targetDate } }],
+        },
+        select: { id: true },
+      });
+      if (scheduleOverlap) {
+        throw new DomainError(
+          "CONFLICT",
+          "Không thể tự động lùi ca làm vì sẽ trùng với một ca khác.",
+        );
+      }
+    }
+
+    const previousJoinedDate = staff.joinedDate;
+    const previousAssignmentEffectiveFrom = assignment.effectiveFrom;
+    const updatedStaff = await tx.staffMember.updateMany({
+      where: {
+        id: staffId,
+        companyId: actor.companyId,
+        version: input.staffVersion,
+        archivedAt: null,
+      },
+      data: { joinedDate: targetDate, version: { increment: 1 } },
+    });
+    if (updatedStaff.count !== 1) {
+      throw new DomainError("CONFLICT", "Hồ sơ đã thay đổi. Hãy tải lại trước khi điều chỉnh.");
+    }
+
+    const updatedAssignment = await tx.branchAssignment.updateMany({
+      where: {
+        id: assignment.id,
+        companyId: actor.companyId,
+        version: input.assignmentVersion,
+        archivedAt: null,
+      },
+      data: { effectiveFrom: targetDate, version: { increment: 1 } },
+    });
+    if (updatedAssignment.count !== 1) {
+      throw new DomainError("CONFLICT", "Phân công đã thay đổi. Hãy tải lại hồ sơ.");
+    }
+
+    let employmentHistoryAdjusted = false;
+    if (firstEmploymentHistory && firstEmploymentHistory.effectiveFrom > targetDate) {
+      const updatedHistory = await tx.staffEmploymentHistory.updateMany({
+        where: {
+          id: firstEmploymentHistory.id,
+          companyId: actor.companyId,
+          version: firstEmploymentHistory.version,
+        },
+        data: { effectiveFrom: targetDate, version: { increment: 1 } },
+      });
+      if (updatedHistory.count !== 1) {
+        throw new DomainError("CONFLICT", "Lịch sử việc làm đã thay đổi. Hãy thử lại.");
+      }
+      employmentHistoryAdjusted = true;
+    } else if (!firstEmploymentHistory) {
+      await tx.staffEmploymentHistory.create({
+        data: {
+          companyId: actor.companyId,
+          staffId,
+          employmentStatus: staff.employmentStatus,
+          employmentCategory: staff.employmentCategory,
+          effectiveFrom: targetDate,
+          createdByUserId: actor.userId,
+        },
+      });
+      employmentHistoryAdjusted = true;
+    }
+
+    let scheduleAdjusted = false;
+    if (scheduleToBackdate) {
+      const updatedSchedule = await tx.staffWorkSchedule.updateMany({
+        where: {
+          id: scheduleToBackdate.id,
+          companyId: actor.companyId,
+          version: scheduleToBackdate.version,
+          archivedAt: null,
+        },
+        data: { effectiveFrom: targetDate, version: { increment: 1 } },
+      });
+      if (updatedSchedule.count !== 1) {
+        throw new DomainError("CONFLICT", "Ca làm đã thay đổi. Hãy tải lại hồ sơ.");
+      }
+      scheduleAdjusted = true;
+    }
+
+    const afterStaff = await tx.staffMember.findUniqueOrThrow({
+      where: { id: staffId },
+      select: staffAuditSelect,
+    });
+    const afterAssignment = await tx.branchAssignment.findUniqueOrThrow({
+      where: { id: assignment.id },
+    });
+    await appendAudit(tx, {
+      actor,
+      branchId: assignment.branchId,
+      action: "staff.start-date.correct",
+      entityType: "StaffMember",
+      entityId: staffId,
+      reason: input.reason,
+      before: safeStaffAuditSnapshot(staff),
+      after: {
+        ...safeStaffAuditSnapshot(afterStaff),
+        synchronizedAssignmentId: assignment.id,
+        employmentHistoryAdjusted,
+        scheduleAdjusted,
+      },
+      metadata,
+    });
+    await appendAudit(tx, {
+      actor,
+      branchId: assignment.branchId,
+      action: "assignment.start-date.correct",
+      entityType: "BranchAssignment",
+      entityId: assignment.id,
+      reason: input.reason,
+      before: safeAssignmentAuditSnapshot(assignment),
+      after: safeAssignmentAuditSnapshot(afterAssignment),
+      metadata,
+    });
+
+    return {
+      staffId,
+      targetDate: input.targetDate,
+      previousJoinedDate: dateText(previousJoinedDate),
+      previousAssignmentEffectiveFrom: dateText(previousAssignmentEffectiveFrom)!,
+      assignmentEffectiveFrom: input.targetDate,
+      employmentHistoryAdjusted,
+      scheduleAdjusted,
+      scheduleEffectiveFrom: dateText(
+        scheduleToBackdate ? targetDate : (scheduleCoveringTarget?.effectiveFrom ?? null),
+      ),
+    };
+  });
 }
 
 export async function listStaffWorkSchedules(

@@ -4,6 +4,7 @@ import {
   calculatePenaltyOccurrence,
   comparePenaltyItems,
   effectiveIntervalsOverlap,
+  effectivePenaltyAmount,
   effectiveRuleStatus,
   isDateInEffectiveInterval,
   penaltyCountingPeriod,
@@ -35,6 +36,13 @@ describe("effective interval [from, to)", () => {
 describe("penalty snapshot helpers", () => {
   it("cộng tiền bằng BigInt string", () => {
     expect(sumPenaltyAmounts(["9007199254740993", "7"])).toBe("9007199254741000");
+  });
+
+  it("ưu tiên mức phạt đã được Tổng quản lý điều chỉnh, kể cả bằng 0", () => {
+    expect(effectivePenaltyAmount("50000", undefined)).toBe("50000");
+    expect(effectivePenaltyAmount("50000", null)).toBe("50000");
+    expect(effectivePenaltyAmount("50000", "20000")).toBe("20000");
+    expect(effectivePenaltyAmount("50000", "0")).toBe("0");
   });
 
   it("so sánh version theo code", () => {

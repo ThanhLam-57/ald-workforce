@@ -23,6 +23,7 @@ import {
   calculatePayroll,
   daysInPayrollMonth,
   DomainError,
+  effectivePenaltyAmount,
   matchRevenueBand,
   requirePermission,
   standardPayableDays,
@@ -1206,6 +1207,7 @@ async function buildCalculations(
         status: true,
         workUnits: true,
         overtimeMinutes: true,
+        penaltyOverrideAmount: true,
         note: true,
         liveMetric: { select: { actualLiveMinutes: true, revenueAmount: true } },
         violations: {
@@ -1444,9 +1446,10 @@ async function buildCalculations(
               ? matchRevenueBand(sourceRevenue, daily.configuration.tiers)
               : null;
           const sourceDailyBonus = matchedTier?.rewardAmount ?? "0";
-          const sourcePenalty = row.violations
-            .reduce((total, violation) => total + violation.amount, 0n)
-            .toString();
+          const sourcePenalty = effectivePenaltyAmount(
+            row.violations.reduce((total, violation) => total + violation.amount, 0n).toString(),
+            row.penaltyOverrideAmount?.toString(),
+          );
           const sourceViolationCategory =
             [...new Set(row.violations.map((violation) => violation.itemName))].join(", ") || null;
           const sourceViolationDetail =
@@ -1487,7 +1490,11 @@ async function buildCalculations(
             ...(has("dailyRevenueBonus")
               ? { dailyRevenueBonusOverride: dayOverride!.dailyRevenueBonus! }
               : {}),
-            ...(has("penalties") ? { penaltiesOverride: dayOverride!.penalties! } : {}),
+            ...(has("penalties")
+              ? { penaltiesOverride: dayOverride!.penalties! }
+              : row.penaltyOverrideAmount !== null
+                ? { penaltiesOverride: row.penaltyOverrideAmount.toString() }
+                : {}),
             violationCategory: has("violationCategory")
               ? dayOverride!.violationCategory!
               : source.violationCategory,

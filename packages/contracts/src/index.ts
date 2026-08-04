@@ -248,6 +248,14 @@ export const staffProfileUpdateSchema = staffFieldsSchema
     }
   });
 
+export const staffStartDateCorrectionSchema = z.object({
+  targetDate: z.iso.date(),
+  assignmentId: idSchema,
+  assignmentVersion: z.number().int().positive(),
+  staffVersion: z.number().int().positive(),
+  reason: trimmedText("Lý do điều chỉnh", 500),
+});
+
 export const staffUpdateSchema = staffFieldsSchema
   .partial()
   .extend({
@@ -543,6 +551,8 @@ export type BranchStaffDto = Readonly<{
   assignmentId: string;
   attendanceMachineCode: string | null;
   assignmentVersion: number;
+  assignmentEffectiveFrom: string;
+  assignmentEffectiveTo: string | null;
   fullName: string;
   streamingAlias: string | null;
   tiktokChannelId: string | null;
@@ -571,6 +581,17 @@ export type BranchStaffDto = Readonly<{
   identityDocuments: readonly StaffIdentityDocumentDto[];
   bankQrDocument: StaffBankQrDocumentDto | null;
   version: number;
+}>;
+
+export type StaffStartDateCorrectionDto = Readonly<{
+  staffId: string;
+  targetDate: string;
+  previousJoinedDate: string | null;
+  previousAssignmentEffectiveFrom: string;
+  assignmentEffectiveFrom: string;
+  employmentHistoryAdjusted: boolean;
+  scheduleAdjusted: boolean;
+  scheduleEffectiveFrom: string | null;
 }>;
 
 export type AdminAssignmentDto = Readonly<{
@@ -659,6 +680,7 @@ const attendanceValuesSchema = z.object({
   status: z.enum(["DRAFT", "PRESENT", "ABSENT", "LEAVE"]).optional(),
   actualLiveMinutes: z.number().int().min(0).max(2_880).optional(),
   revenueAmount: revenueAmountSchema.optional(),
+  penaltyOverrideAmount: penaltyAmountSchema.nullable().optional(),
 });
 
 export const attendanceCreateSchema = attendanceValuesSchema.extend({
@@ -684,6 +706,7 @@ export const attendanceBatchSaveRowSchema = z
     status: z.enum(["DRAFT", "PRESENT", "ABSENT", "LEAVE"]).optional(),
     actualLiveMinutes: z.number().int().min(0).max(2_880),
     revenueAmount: revenueAmountSchema,
+    penaltyOverrideAmount: penaltyAmountSchema.nullable().optional(),
   })
   .superRefine((row, context) => {
     if ((row.attendanceId === null) !== (row.version === null)) {
@@ -2092,6 +2115,7 @@ export type AttendanceRecordDto = Readonly<{
   spansNextDay: boolean;
   workUnits: string;
   overtimeMinutes: number;
+  penaltyOverrideAmount: string | null;
   note: string | null;
   status: "DRAFT" | "PRESENT" | "ABSENT" | "LEAVE";
   version: number;
@@ -2131,6 +2155,7 @@ export type AttendanceMonthDayDto = Readonly<{
   dayOfWeek: number;
   attendance: AttendanceRecordDto | null;
   violations: readonly ViolationDto[];
+  calculatedPenaltyTotal: string;
   activePenaltyTotal: string;
 }>;
 
@@ -2720,6 +2745,7 @@ export type StaffIdentityDocumentCompleteInput = z.infer<
 export type StaffBankQrDocumentPresignInput = z.infer<typeof staffBankQrDocumentPresignSchema>;
 export type StaffBankQrDocumentCompleteInput = z.infer<typeof staffBankQrDocumentCompleteSchema>;
 export type StaffProfileUpdateInput = z.infer<typeof staffProfileUpdateSchema>;
+export type StaffStartDateCorrectionInput = z.infer<typeof staffStartDateCorrectionSchema>;
 export type AssignmentCreateInput = z.infer<typeof assignmentCreateSchema>;
 export type AssignmentUpdateInput = z.infer<typeof assignmentUpdateSchema>;
 export type AssignmentTransferInput = z.infer<typeof assignmentTransferSchema>;
