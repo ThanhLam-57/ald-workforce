@@ -16,6 +16,7 @@ import {
   createStaff,
   transferAssignment,
   terminateStaff,
+  updateAssignment,
   updateBranch,
   updateStaff,
   updateUserAccount,
@@ -765,6 +766,121 @@ describe("administration state transitions", () => {
         metadata,
       ),
     ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("hiện phân công đã ẩn và cho GM kích hoạt lại bằng ngày kết thúc mới", async () => {
+    const staff = await prisma.staffMember.create({
+      data: {
+        companyId: gm.companyId,
+        staffCode: `REACT${runId}`,
+        fullName: "Quản lý cần gia hạn",
+        jobTitle: "Quản lý đào tạo",
+        employmentCategory: "OFFICIAL",
+      },
+    });
+    const ended = await prisma.branchAssignment.create({
+      data: {
+        companyId: gm.companyId,
+        branchId: branchCId,
+        staffId: staff.id,
+        assignmentType: "PRIMARY_MANAGER",
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        effectiveTo: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    });
+
+    const defaultList = await listAdminAssignments(
+      gm,
+      adminAssignmentListQuerySchema.parse({ staffId: staff.id }),
+      now,
+    );
+    const hiddenList = await listAdminAssignments(
+      gm,
+      adminAssignmentListQuerySchema.parse({ staffId: staff.id, showHidden: "true" }),
+      now,
+    );
+
+    expect(defaultList.total).toBe(0);
+    expect(hiddenList.items).toEqual([
+      expect.objectContaining({ id: ended.id, status: "ENDED", effectiveTo: "2026-07-01" }),
+    ]);
+
+    const reactivated = await updateAssignment(
+      gm,
+      ended.id,
+      { effectiveTo: "2026-09-01", version: ended.version },
+      metadata,
+      now,
+    );
+    const currentList = await listAdminAssignments(
+      gm,
+      adminAssignmentListQuerySchema.parse({
+        staffId: staff.id,
+        assignmentType: "PRIMARY_MANAGER",
+        status: "CURRENT",
+      }),
+      now,
+    );
+    const audit = await prisma.auditLog.findFirstOrThrow({
+      where: { entityId: ended.id, action: "assignment.reactivate" },
+    });
+
+    expect(reactivated.effectiveTo?.toISOString().slice(0, 10)).toBe("2026-09-01");
+    expect(reactivated.version).toBe(ended.version + 1);
+    expect(currentList.items).toEqual([
+      expect.objectContaining({ id: ended.id, status: "CURRENT", effectiveTo: "2026-09-01" }),
+    ]);
+    expect(audit.reason).toBe("SYSTEM:ASSIGNMENT_REACTIVATED_FROM_UI");
+    await expect(
+      updateAssignment(
+        manager,
+        ended.id,
+        { effectiveTo: null, version: reactivated.version },
+        metadata,
+        now,
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("chặn kích hoạt lại khi khoảng mới trùng phân công quản lý kế tiếp", async () => {
+    const staff = await prisma.staffMember.create({
+      data: {
+        companyId: gm.companyId,
+        staffCode: `OVER${runId}`,
+        fullName: "Quản lý có lịch kế tiếp",
+        jobTitle: "Quản lý đào tạo",
+        employmentCategory: "OFFICIAL",
+      },
+    });
+    const ended = await prisma.branchAssignment.create({
+      data: {
+        companyId: gm.companyId,
+        branchId: branchAId,
+        staffId: staff.id,
+        assignmentType: "PRIMARY_MANAGER",
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        effectiveTo: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    });
+    await prisma.branchAssignment.create({
+      data: {
+        companyId: gm.companyId,
+        branchId: branchCId,
+        staffId: staff.id,
+        assignmentType: "PRIMARY_MANAGER",
+        effectiveFrom: new Date("2026-08-01T00:00:00.000Z"),
+      },
+    });
+
+    await expect(
+      updateAssignment(gm, ended.id, { effectiveTo: null, version: ended.version }, metadata, now),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(
+      prisma.branchAssignment.findUniqueOrThrow({ where: { id: ended.id } }),
+    ).resolves.toMatchObject({
+      version: ended.version,
+      effectiveTo: new Date("2026-07-01T00:00:00.000Z"),
+    });
   });
 
   it("transfer đóng khoảng cũ, tạo khoảng mới và audit cả hai record", async () => {

@@ -41,7 +41,7 @@ type EditorState =
       item: AdminStaffDto;
     }>
   | Readonly<{
-      kind: "assignment-end" | "assignment-transfer" | "assignment-cancel";
+      kind: "assignment-validity" | "assignment-transfer" | "assignment-cancel";
       item: AdminAssignmentDto;
     }>
   | Readonly<{ kind: "user-edit" | "user-toggle"; item: AdminUserDto }>;
@@ -158,6 +158,12 @@ function businessDate(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Ho_Chi_Minh",
   }).format(new Date());
+}
+
+function nextBusinessDate(): string {
+  const date = new Date(`${businessDate()}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
 }
 
 function emptyAdminStaffProfileValues(): StaffProfileEditorValues {
@@ -633,8 +639,8 @@ function editorTitle(editor: EditorState): string {
         : "Cho nhân viên nghỉ việc";
     case "staff-archive":
       return "Lưu trữ hồ sơ nhân viên";
-    case "assignment-end":
-      return "Kết thúc phân công";
+    case "assignment-validity":
+      return editor.item.status === "ENDED" ? "Kích hoạt lại phân công" : "Sửa thời gian hiệu lực";
     case "assignment-transfer":
       return "Chuyển nhân viên sang cơ sở khác";
     case "assignment-cancel":
@@ -757,15 +763,18 @@ function MutationForm({
           success: "Đã lưu trữ hồ sơ nhân viên.",
         };
         break;
-      case "assignment-end":
+      case "assignment-validity":
         request = {
           path: `/api/assignments/${editor.item.id}`,
           method: "PATCH",
           body: {
-            effectiveTo: field(form, "effectiveTo"),
+            effectiveTo: field(form, "effectiveTo") || null,
             version: editor.item.version,
           },
-          success: "Đã kết thúc phân công.",
+          success:
+            editor.item.status === "ENDED"
+              ? "Đã kích hoạt lại phân công."
+              : "Đã cập nhật thời gian hiệu lực.",
         };
         break;
       case "assignment-transfer":
@@ -906,21 +915,24 @@ function MutationForm({
         </p>
       ) : null}
 
-      {editor.kind === "assignment-end" ? (
+      {editor.kind === "assignment-validity" ? (
         <>
-          <p className="rounded-xl bg-slate-50 p-3 text-sm text-slate-600">
-            {editor.item.staff.fullName} tại {editor.item.branch.code}, bắt đầu{" "}
-            {editor.item.effectiveFrom}.
+          <p className="rounded-xl bg-sky-50 p-3 text-sm text-sky-800">
+            {editor.item.status === "ENDED"
+              ? `Phân công của ${editor.item.staff.fullName} tại ${editor.item.branch.code} đã hết hiệu lực. Chọn ngày mới hoặc để trống để kích hoạt lại không thời hạn. Khoảng hiệu lực sẽ được nối liên tục từ ngày bắt đầu cũ.`
+              : `Phân công của ${editor.item.staff.fullName} tại ${editor.item.branch.code}, bắt đầu ${editor.item.effectiveFrom}.`}
           </p>
-          <FormField label="Ngày kết thúc (exclusive)">
+          <FormField label="Ngày kết thúc mới (không bắt buộc)">
             <input
-              defaultValue={editor.item.effectiveTo ?? businessDate()}
-              min={editor.item.effectiveFrom}
+              defaultValue={editor.item.effectiveTo ?? ""}
+              min={editor.item.status === "ENDED" ? nextBusinessDate() : editor.item.effectiveFrom}
               name="effectiveTo"
-              required
               type="date"
             />
           </FormField>
+          <p className="text-xs text-slate-500">
+            Ngày kết thúc là ngày không còn hiệu lực. Để trống nếu phân công không thời hạn.
+          </p>
         </>
       ) : null}
 
@@ -2312,7 +2324,7 @@ function StaffRows({
   );
 }
 
-function AssignmentRows({
+export function AssignmentRows({
   items,
   onAction,
 }: Readonly<{
@@ -2368,8 +2380,8 @@ function AssignmentRows({
                 <div className="flex min-w-max gap-2">
                   {item.status === "CURRENT" ? (
                     <>
-                      <ActionButton onClick={() => onAction({ kind: "assignment-end", item })}>
-                        Kết thúc
+                      <ActionButton onClick={() => onAction({ kind: "assignment-validity", item })}>
+                        Sửa hiệu lực
                       </ActionButton>
                       <ActionButton onClick={() => onAction({ kind: "assignment-transfer", item })}>
                         Chuyển cơ sở
@@ -2377,14 +2389,24 @@ function AssignmentRows({
                     </>
                   ) : null}
                   {item.status === "UPCOMING" ? (
-                    <ActionButton
-                      onClick={() => onAction({ kind: "assignment-cancel", item })}
-                      tone="warning"
-                    >
-                      Hủy
+                    <>
+                      <ActionButton onClick={() => onAction({ kind: "assignment-validity", item })}>
+                        Sửa hiệu lực
+                      </ActionButton>
+                      <ActionButton
+                        onClick={() => onAction({ kind: "assignment-cancel", item })}
+                        tone="warning"
+                      >
+                        Hủy
+                      </ActionButton>
+                    </>
+                  ) : null}
+                  {item.status === "ENDED" ? (
+                    <ActionButton onClick={() => onAction({ kind: "assignment-validity", item })}>
+                      Kích hoạt lại
                     </ActionButton>
                   ) : null}
-                  {item.status === "ENDED" || item.status === "CANCELLED" ? "—" : null}
+                  {item.status === "CANCELLED" ? "—" : null}
                 </div>
               </td>
             </tr>
@@ -2600,7 +2622,13 @@ export function AdministrationWorkspace({
               onClick={() => updateParams({ showHidden: showHidden ? null : "true", page: null })}
               variant="secondary"
             >
-              {showHidden ? "Ẩn dữ liệu ngừng hoạt động" : "Xem dữ liệu đã ẩn"}
+              {tab === "assignments"
+                ? showHidden
+                  ? "Ẩn phân công đã kết thúc/hủy"
+                  : "Xem phân công đã kết thúc/hủy"
+                : showHidden
+                  ? "Ẩn dữ liệu ngừng hoạt động"
+                  : "Xem dữ liệu đã ẩn"}
             </Button>
             <Button onClick={() => setDrawerOpen(true)}>
               Thêm {currentTab.label.toLowerCase()}

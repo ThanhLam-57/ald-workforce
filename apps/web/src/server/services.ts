@@ -962,9 +962,11 @@ export async function updateAssignment(
   id: string,
   input: AssignmentUpdateInput,
   metadata: RequestMetadata,
+  now = new Date(),
 ) {
   requirePermission(actor, "assignment:update");
   const effectiveTo = input.effectiveTo ? parseBusinessDate(input.effectiveTo) : null;
+  const businessDate = toBusinessDate(now);
 
   return prisma.$transaction(async (tx) => {
     const before = await tx.branchAssignment.findFirst({
@@ -977,6 +979,78 @@ export async function updateAssignment(
       throw new DomainError("VALIDATION_ERROR", "Ngày kết thúc phải sau ngày bắt đầu.");
     }
 
+    const wasEnded = Boolean(before.effectiveTo && before.effectiveTo <= businessDate);
+    const willBeCurrent = !effectiveTo || effectiveTo > businessDate;
+    if (wasEnded && !willBeCurrent) {
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Để kích hoạt lại, ngày kết thúc mới phải sau ngày hiện tại hoặc để trống nếu phân công không thời hạn.",
+      );
+    }
+
+    if (wasEnded) {
+      const branch = await tx.branch.findFirst({
+        where: { id: before.branchId, companyId: actor.companyId, isActive: true },
+        select: { id: true },
+      });
+      const staff = await tx.staffMember.findFirst({
+        where: {
+          id: before.staffId,
+          companyId: actor.companyId,
+          archivedAt: null,
+          employmentStatus: { not: "TERMINATED" },
+        },
+        select: { id: true },
+      });
+      if (!branch || !staff) {
+        throw new DomainError(
+          "VALIDATION_ERROR",
+          "Chỉ có thể kích hoạt lại phân công khi cơ sở và nhân sự vẫn đang hoạt động.",
+        );
+      }
+    }
+
+    const overlap = await tx.branchAssignment.findFirst({
+      where: {
+        id: { not: id },
+        companyId: actor.companyId,
+        staffId: before.staffId,
+        assignmentType: before.assignmentType,
+        archivedAt: null,
+        ...(effectiveTo ? { effectiveFrom: { lt: effectiveTo } } : {}),
+        OR: [{ effectiveTo: null }, { effectiveTo: { gt: before.effectiveFrom } }],
+      },
+      select: { id: true },
+    });
+    if (overlap) {
+      throw new DomainError(
+        "CONFLICT",
+        "Khoảng hiệu lực mới bị trùng với một phân công khác của nhân sự.",
+      );
+    }
+
+    if (before.assignmentType === "MEMBER" && before.attendanceMachineCode) {
+      const duplicateMachineCode = await tx.branchAssignment.findFirst({
+        where: {
+          id: { not: id },
+          companyId: actor.companyId,
+          branchId: before.branchId,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: before.attendanceMachineCode,
+          archivedAt: null,
+          ...(effectiveTo ? { effectiveFrom: { lt: effectiveTo } } : {}),
+          OR: [{ effectiveTo: null }, { effectiveTo: { gt: before.effectiveFrom } }],
+        },
+        select: { id: true },
+      });
+      if (duplicateMachineCode) {
+        throw new DomainError(
+          "CONFLICT",
+          "Mã máy chấm công đã được dùng tại cơ sở trong khoảng hiệu lực mới.",
+        );
+      }
+    }
+
     const result = await tx.branchAssignment.updateMany({
       where: { id, companyId: actor.companyId, version: input.version, archivedAt: null },
       data: { effectiveTo, version: { increment: 1 } },
@@ -986,18 +1060,23 @@ export async function updateAssignment(
     }
 
     const after = await tx.branchAssignment.findUniqueOrThrow({ where: { id } });
+    const changedEffectiveTo = before.effectiveTo?.getTime() !== after.effectiveTo?.getTime();
+    const reactivated = wasEnded && (!after.effectiveTo || after.effectiveTo > businessDate);
     await appendAudit(tx, {
       actor,
-      action:
-        before.effectiveTo?.getTime() !== after.effectiveTo?.getTime() && after.effectiveTo
+      action: reactivated
+        ? "assignment.reactivate"
+        : changedEffectiveTo && after.effectiveTo
           ? "assignment.end"
           : "assignment.update",
       entityType: "BranchAssignment",
       entityId: id,
       reason: systemAuditReason(
-        before.effectiveTo?.getTime() !== after.effectiveTo?.getTime() && after.effectiveTo
-          ? "ASSIGNMENT_ENDED_FROM_UI"
-          : "ASSIGNMENT_UPDATED_FROM_UI",
+        reactivated
+          ? "ASSIGNMENT_REACTIVATED_FROM_UI"
+          : changedEffectiveTo && after.effectiveTo
+            ? "ASSIGNMENT_ENDED_FROM_UI"
+            : "ASSIGNMENT_UPDATED_FROM_UI",
       ),
       before: safeAssignmentAuditSnapshot(before),
       after: safeAssignmentAuditSnapshot(after),

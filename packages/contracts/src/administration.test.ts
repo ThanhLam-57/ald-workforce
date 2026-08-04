@@ -5,6 +5,7 @@ import {
   adminBranchListQuerySchema,
   adminStaffListQuerySchema,
   adminUserListQuerySchema,
+  assignmentUpdateSchema,
   staffCreateSchema,
   staffIdentityDocumentPresignSchema,
   staffCodePreviewQuerySchema,
@@ -38,6 +39,17 @@ describe("administration list query", () => {
   it("chỉ nhận sort và filter trong allow-list", () => {
     expect(() => adminBranchListQuerySchema.parse({ sort: "companyId" })).toThrow();
     expect(() => adminAssignmentListQuerySchema.parse({ status: "DELETED" })).toThrow();
+  });
+
+  it("cho phép gia hạn hoặc bỏ ngày kết thúc phân công", () => {
+    expect(assignmentUpdateSchema.parse({ effectiveTo: "2026-09-01", version: 2 })).toEqual({
+      effectiveTo: "2026-09-01",
+      version: 2,
+    });
+    expect(assignmentUpdateSchema.parse({ effectiveTo: null, version: 2 })).toEqual({
+      effectiveTo: null,
+      version: 2,
+    });
   });
 });
 
