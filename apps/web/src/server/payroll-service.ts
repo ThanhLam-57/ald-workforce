@@ -24,6 +24,7 @@ import {
   daysInPayrollMonth,
   DomainError,
   effectivePenaltyAmount,
+  enumerateBusinessMonth,
   matchRevenueBand,
   requirePermission,
   standardPayableDays,
@@ -431,7 +432,7 @@ function dailyRows(
       );
     }
   }
-  return [...input.attendance]
+  const rows = [...input.attendance]
     .sort((left, right) => left.businessDate.localeCompare(right.businessDate))
     .map((row) => {
       const calculatedPenalty = row.violations
@@ -497,6 +498,52 @@ function dailyRows(
         overriddenFields: row.overriddenFields ?? [],
       };
     });
+  const rowsByDate = new Map(rows.map((row) => [row.businessDate, row]));
+  return enumerateBusinessMonth(input.period.month).map(
+    ({ businessDate }): PayrollDailyRowDto =>
+      rowsByDate.get(businessDate) ?? {
+        businessDate,
+        checkInTime: null,
+        checkOutTime: null,
+        status: "DRAFT",
+        workUnits: "0",
+        overtimeMinutes: 0,
+        actualLiveMinutes: 0,
+        ...(revenueVisible
+          ? {
+              revenueAmount: "0",
+              dailyCoins: "0",
+              rewardThresholdAmount: null,
+            }
+          : {}),
+        dailyRevenueBonus: "0",
+        violationCategory: null,
+        violationDetail: null,
+        penalties: "0",
+        note: null,
+        source: {
+          checkInTime: null,
+          checkOutTime: null,
+          status: "DRAFT",
+          workUnits: "0",
+          overtimeMinutes: 0,
+          actualLiveMinutes: 0,
+          ...(revenueVisible
+            ? {
+                revenueAmount: "0",
+                dailyCoins: "0",
+                rewardThresholdAmount: null,
+              }
+            : {}),
+          dailyRevenueBonus: "0",
+          violationCategory: null,
+          violationDetail: null,
+          penalties: "0",
+          note: null,
+        },
+        overriddenFields: [],
+      },
+  );
 }
 
 function lineDto(
@@ -1376,6 +1423,79 @@ async function buildCalculations(
     }
     const { standardDaysOffPerMonth: configuredDaysOff, ...salaryConfiguration } =
       salary.configuration;
+    const appliedStandardDaysOff = period.standardDaysOffOverride ?? configuredDaysOff;
+    const attendanceRequiredDays =
+      appliedStandardDaysOff === undefined
+        ? monthly?.configuration.kind === "MONTHLY_LEVEL_RULES"
+          ? (monthly.configuration.attendanceRequiredDays ?? 26)
+          : 26
+        : standardPayableDays(month, appliedStandardDaysOff);
+    const staffAttendance = attendance.filter((row) => row.staffId === staffId);
+    const attendanceDates = new Set(
+      staffAttendance.map((row) => row.businessDate.toISOString().slice(0, 10)),
+    );
+    const worksheetOnlyAttendance = [...dayOverrides.values()]
+      .filter((dayOverride) => !attendanceDates.has(dayOverride.businessDate))
+      .map((dayOverride): PayrollCalculationInput["attendance"][number] => {
+        const businessDate = dayOverride.businessDate;
+        const has = (key: keyof typeof dayOverride) =>
+          Object.prototype.hasOwnProperty.call(dayOverride, key);
+        const revenueAmount = dayOverride.revenueAmount ?? "0";
+        const daily = has("revenueAmount")
+          ? uniqueRuleAt(rules, "DAILY_REWARD_TIERS", businessDate, false)
+          : null;
+        const matchedTier =
+          daily?.configuration.kind === "DAILY_REWARD_TIERS"
+            ? matchRevenueBand(revenueAmount, daily.configuration.tiers)
+            : null;
+        const source = {
+          checkInTime: null,
+          checkOutTime: null,
+          status: "DRAFT" as const,
+          workUnits: "0",
+          overtimeMinutes: 0,
+          actualLiveMinutes: 0,
+          revenueAmount: "0",
+          rewardThresholdAmount: null,
+          dailyRevenueBonus: "0",
+          violationCategory: null,
+          violationDetail: null,
+          penalties: "0",
+          note: null,
+        };
+        return {
+          attendanceId: `payroll-worksheet:${staffId}:${businessDate}`,
+          businessDate,
+          checkInTime: has("checkInTime") ? dayOverride.checkInTime! : source.checkInTime,
+          checkOutTime: has("checkOutTime") ? dayOverride.checkOutTime! : source.checkOutTime,
+          status: dayOverride.status ?? source.status,
+          workUnits: dayOverride.workUnits ?? source.workUnits,
+          overtimeMinutes: dayOverride.overtimeMinutes ?? source.overtimeMinutes,
+          actualLiveMinutes: dayOverride.actualLiveMinutes ?? source.actualLiveMinutes,
+          revenueAmount,
+          rewardThresholdAmount: has("rewardThresholdAmount")
+            ? dayOverride.rewardThresholdAmount!
+            : (matchedTier?.minRevenue ?? null),
+          ...(has("dailyRevenueBonus")
+            ? { dailyRevenueBonusOverride: dayOverride.dailyRevenueBonus! }
+            : {}),
+          ...(has("penalties") ? { penaltiesOverride: dayOverride.penalties! } : {}),
+          violationCategory: has("violationCategory")
+            ? dayOverride.violationCategory!
+            : source.violationCategory,
+          violationDetail: has("violationDetail")
+            ? dayOverride.violationDetail!
+            : source.violationDetail,
+          note: has("note") ? dayOverride.note! : source.note,
+          overriddenFields: Object.keys(dayOverride).filter((key) => key !== "businessDate"),
+          source,
+          dailyRewardRule:
+            daily?.configuration.kind === "DAILY_REWARD_TIERS"
+              ? { ruleVersionId: daily.id, tiers: daily.configuration.tiers }
+              : null,
+          violations: [],
+        };
+      });
     const componentOverrides = worksheet
       ? (Object.fromEntries(
           Object.entries(worksheet.components).filter(([, value]) => value !== undefined),
@@ -1420,7 +1540,7 @@ async function buildCalculations(
         monthly?.configuration.kind === "MONTHLY_LEVEL_RULES"
           ? {
               ruleVersionId: monthly.id,
-              attendanceRequiredDays: monthly.configuration.attendanceRequiredDays ?? 26,
+              attendanceRequiredDays,
               levels: monthly.configuration.levels,
             }
           : null,
@@ -1434,9 +1554,8 @@ async function buildCalculations(
         currentLevelName: null,
       },
       ...(componentOverrides ? { componentOverrides } : {}),
-      attendance: attendance
-        .filter((row) => row.staffId === staffId)
-        .map((row) => {
+      attendance: [
+        ...staffAttendance.map((row) => {
           const businessDate = row.businessDate.toISOString().slice(0, 10);
           const daily = uniqueRuleAt(rules, "DAILY_REWARD_TIERS", businessDate, false);
           const dayOverride = dayOverrides.get(businessDate);
@@ -1518,6 +1637,8 @@ async function buildCalculations(
             })),
           };
         }),
+        ...worksheetOnlyAttendance,
+      ].sort((left, right) => left.businessDate.localeCompare(right.businessDate)),
       adjustments: adjustments
         .filter((adjustment) => adjustment.staffId === staffId)
         .map((adjustment) => ({

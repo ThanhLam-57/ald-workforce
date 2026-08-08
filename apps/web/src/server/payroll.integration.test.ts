@@ -511,6 +511,25 @@ describe("payroll lifecycle, snapshot và authorization", () => {
       achievementBonus: "300000",
       levelBonus: "400000",
     });
+    expect(calculated.entries[0]!.dailyRows).toHaveLength(31);
+    expect(calculated.entries[0]!.dailyRows[0]).toMatchObject({
+      businessDate: "2026-07-01",
+      checkInTime: null,
+      checkOutTime: null,
+      workUnits: "0",
+      actualLiveMinutes: 0,
+      overtimeMinutes: 0,
+      dailyRevenueBonus: "0",
+      penalties: "0",
+    });
+    expect(calculated.entries[0]!.dailyRows[19]).toMatchObject({
+      businessDate: "2026-07-20",
+      workUnits: "0.5",
+      actualLiveMinutes: 300,
+      revenueAmount: "1000000",
+      penalties: "150000",
+    });
+    expect(calculated.entries[0]!.dailyRows[30]!.businessDate).toBe("2026-07-31");
     const snapshot = await prisma.calculationSnapshot.findFirstOrThrow({
       where: { payrollEntryId: calculated.entries[0]!.id },
       orderBy: { calculationNo: "desc" },
@@ -972,7 +991,7 @@ describe("payroll lifecycle, snapshot và authorization", () => {
         staffId: liveId,
         periodVersion: current.version,
         overrideVersion: null,
-        standardDaysOffOverride: 5,
+        standardDaysOffOverride: 4,
         values: {
           baseSalaryAmount: "7000000",
           days: [
@@ -981,6 +1000,11 @@ describe("payroll lifecycle, snapshot và authorization", () => {
               workUnits: "3.5",
               dailyRevenueBonus: "0",
               penalties: "0",
+            },
+            {
+              businessDate: "2026-07-21",
+              workUnits: "1",
+              note: "Bổ sung trực tiếp trên bảng lương",
             },
           ],
           components: { otherBonus: "-50000" },
@@ -992,22 +1016,37 @@ describe("payroll lifecycle, snapshot và authorization", () => {
     expect(saved.entries[0]).toMatchObject({
       sourceBaseSalary: "26000000",
       baseSalary: "7000000",
-      workUnits: "3.5",
-      proratedSalary: "942308",
+      workUnits: "4.5",
+      proratedSalary: "1166667",
       dailyRevenueBonus: "0",
+      attendanceBonus: "0",
       penalties: "0",
       otherBonus: "-50000",
+      monthlyLevel: expect.objectContaining({
+        attendanceRequiredDays: 27,
+        attendanceEligible: false,
+      }),
     });
     expect(saved.standardDaysOff).toMatchObject({
       ruleValue: null,
-      overrideValue: 5,
-      appliedValue: 5,
+      overrideValue: 4,
+      appliedValue: 4,
       daysInMonth: 31,
-      standardPayableDays: 26,
+      standardPayableDays: 27,
     });
-    expect(saved.entries[0]!.dailyRows[0]!.overriddenFields).toEqual(
+    expect(
+      saved.entries[0]!.dailyRows.find((row) => row.businessDate === "2026-07-20")!
+        .overriddenFields,
+    ).toEqual(
       expect.arrayContaining(["workUnits", "dailyRevenueBonus", "penalties"]),
     );
+    expect(
+      saved.entries[0]!.dailyRows.find((row) => row.businessDate === "2026-07-21"),
+    ).toMatchObject({
+      workUnits: "1",
+      note: "Bổ sung trực tiếp trên bảng lương",
+      overriddenFields: expect.arrayContaining(["workUnits", "note"]),
+    });
     expect(
       await prisma.attendanceDay.findFirstOrThrow({
         where: { companyId, branchId, staffId: liveId },

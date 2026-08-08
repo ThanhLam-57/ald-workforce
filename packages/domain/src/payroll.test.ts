@@ -337,6 +337,56 @@ describe("production payroll calculator", () => {
     expect(notEligible.components.attendanceBonus).toBe("0");
   });
 
+  it("requires all 27 standard payable days before granting the attendance bonus", () => {
+    const source = goldenInput();
+    const attendance = Array.from({ length: 27 }, (_, index) => ({
+      attendanceId: `standard-day-${index + 1}`,
+      businessDate: `2026-07-${String(index + 1).padStart(2, "0")}`,
+      status: "PRESENT" as const,
+      workUnits: "1",
+      overtimeMinutes: 0,
+      actualLiveMinutes: 0,
+      revenueAmount: index === 0 ? "1100000" : "0",
+      dailyRewardRule: null,
+      violations: [],
+    }));
+    const input = {
+      ...source,
+      salaryRule: {
+        ...source.salaryRule,
+        configuration: {
+          ...source.salaryRule.configuration,
+          standardDaysOffPerMonth: 4,
+        },
+      },
+      monthlyLevelRule: source.monthlyLevelRule
+        ? { ...source.monthlyLevelRule, attendanceRequiredDays: 27 }
+        : null,
+      adjustments: [],
+    };
+
+    const twentySixDays = calculatePayroll({ ...input, attendance: attendance.slice(0, 26) });
+    expect(twentySixDays.salaryBasis).toEqual({
+      daysInMonth: 31,
+      standardDaysOffPerMonth: 4,
+      standardPayableDays: 27,
+    });
+    expect(twentySixDays.monthlyLevel).toMatchObject({
+      workedDayCount: 26,
+      attendanceRequiredDays: 27,
+      attendanceEligible: false,
+    });
+    expect(twentySixDays.components.attendanceBonus).toBe("0");
+
+    const twentySevenDays = calculatePayroll({ ...input, attendance });
+    expect(twentySevenDays.monthlyLevel).toMatchObject({
+      workedDayCount: 27,
+      attendanceRequiredDays: 27,
+      attendanceEligible: true,
+    });
+    expect(twentySevenDays.components.attendanceBonus).toBe("200000");
+  });
+
   it("counts each date with positive work units regardless of attendance status", () => {
     const row = (
       attendanceId: string,
