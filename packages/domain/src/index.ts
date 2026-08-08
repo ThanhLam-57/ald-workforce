@@ -873,7 +873,11 @@ export function calculateSalaryProjection(
       ? workedAttendance.reduce((total, row) => total + decimalHundredths(row.workUnits), 0n)
       : BigInt(workedAttendance.length) * 100n;
   const fullThreshold = rule.attendancePolicy.minimumWorkUnitsForFullSalary;
-  if (fullThreshold !== null && worked >= decimalHundredths(fullThreshold)) {
+  if (
+    fullThreshold !== null &&
+    worked >= decimalHundredths(fullThreshold) &&
+    worked < standardDays
+  ) {
     worked = standardDays;
   }
   if (rule.attendancePolicy.capAtStandardWorkdays && worked > standardDays) {

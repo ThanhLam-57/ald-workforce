@@ -91,6 +91,12 @@ weightedWorkUnits =
 proratedSalary = round(baseSalary × weightedWorkUnits / standardPayableDays)
 ```
 
+`weightedWorkUnits` không bị chặn ở `standardPayableDays` đối với rule lương đơn giản.
+Ví dụ lương cơ bản 27.000.000đ, công chuẩn 27 và công thực tế 28 thì lương theo công
+trước các khoản thưởng/phạt là 28.000.000đ. Rule cấu hình nâng cao vẫn có thể chủ động
+bật giới hạn ở công chuẩn. Việc đổi policy chỉ tác động lần tính mới; snapshot payroll đã
+khóa hoặc đã publish không bị sửa.
+
 `standardDaysOffPerMonth` lấy từ `SALARY_RULES`, có thể override theo branch/month.
 Giá trị phải là số nguyên 0–30 và `standardPayableDays` phải lớn hơn 0. Rule cũ
 chưa có trường này tiếp tục dùng `standardWorkdays` đã snapshot để tương thích

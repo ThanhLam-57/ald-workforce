@@ -679,7 +679,7 @@ export async function applySimpleSalaryRules(
       eligibleStatuses: ["PRESENT"] as const,
       prorateMode: "WORK_UNITS" as const,
       minimumWorkUnitsForFullSalary: null,
-      capAtStandardWorkdays: true,
+      capAtStandardWorkdays: false,
     },
     roundingPolicy: {
       unit: input.roundingUnit,

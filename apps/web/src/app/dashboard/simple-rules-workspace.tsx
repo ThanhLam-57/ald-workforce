@@ -981,8 +981,10 @@ export function SimpleRulesWorkspace({
           </div>
 
           <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
-            <strong>Công thức:</strong> công trước ngày chính thức dùng tỷ lệ thử việc; công từ ngày
-            chính thức dùng 100%. Thưởng, phạt và tăng ca không bị nhân tỷ lệ thử việc.
+            <strong>Công thức:</strong> lương theo công = lương cơ bản ÷ công chuẩn × công thực tế.
+            Công vượt chuẩn vẫn được tính thêm nên lương theo công có thể lớn hơn lương cơ bản. Công
+            trước ngày chính thức dùng tỷ lệ thử việc; công từ ngày chính thức dùng 100%. Thưởng,
+            phạt và tăng ca không bị nhân tỷ lệ thử việc.
           </div>
 
           {canEdit ? (

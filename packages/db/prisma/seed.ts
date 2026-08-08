@@ -368,7 +368,7 @@ await ensureDemoRule("SALARY_RULES", `Demo lương ${payrollDemoMonth}`, {
     eligibleStatuses: ["PRESENT"],
     prorateMode: "WORK_UNITS",
     minimumWorkUnitsForFullSalary: null,
-    capAtStandardWorkdays: true,
+    capAtStandardWorkdays: false,
   },
   roundingPolicy: { unit: 1000, mode: "HALF_UP", applyAt: "COMPONENT" },
 });

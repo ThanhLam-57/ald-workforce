@@ -268,3 +268,17 @@
   `overrideReason` khi Tổng quản lý đổi mức tiền phạt và lý do của khoản điều chỉnh lương.
 - Thao tác nhạy cảm vẫn cần xác nhận rõ hậu quả và giữ authorization, optimistic lock,
   soft-delete/versioning; việc bỏ ô nhập tự do không làm yếu các kiểm soát này.
+
+## ADR-023 — Rule lương đơn giản trả đủ công vượt chuẩn
+
+- Trạng thái: Accepted.
+- Lương theo công của rule `SIMPLE_MUTABLE` dùng `baseSalary × weightedWorkUnits /
+  standardPayableDays` và không chặn `weightedWorkUnits` ở số công chuẩn. Vì vậy công
+  thực tế lớn hơn công chuẩn có thể tạo lương theo công lớn hơn lương cơ bản.
+- Rule `VERSIONED` nâng cao tiếp tục tôn trọng `capAtStandardWorkdays` để không thay đổi
+  ngầm các chính sách tùy chỉnh. Default của rule mới là không giới hạn.
+- Migration chỉ cập nhật rule lương `SIMPLE_MUTABLE` hiện hành, tăng `rowVersion` và ghi
+  audit hệ thống; không sửa rule đã supersede, CalculationSnapshot, kỳ đã khóa hoặc kỳ
+  đã publish.
+- Tỷ lệ thử việc 85%/100%, tăng ca, thưởng, phạt và worksheet override giữ nguyên. Kỳ
+  đang làm phải tính lại; ô lương theo công đã sửa tay vẫn ưu tiên cho tới khi được reset.

@@ -434,6 +434,84 @@ describe("production payroll calculator", () => {
     });
   });
 
+  it("pays work units above the standard workdays when the salary rule has no cap", () => {
+    const uncappedRule = {
+      ...salaryRule.configuration,
+      baseSalary: "27000000",
+      standardWorkdays: "27",
+      attendancePolicy: {
+        ...salaryRule.configuration.attendancePolicy,
+        minimumWorkUnitsForFullSalary: "26",
+        capAtStandardWorkdays: false,
+      },
+    };
+    const attendance = [{ status: "PRESENT" as const, workUnits: "28", overtimeMinutes: 0 }];
+
+    expect(calculateSalaryProjection(uncappedRule, attendance).baseSalaryAmount).toBe("28000000");
+    expect(
+      calculateSalaryProjection(
+        {
+          ...uncappedRule,
+          attendancePolicy: {
+            ...uncappedRule.attendancePolicy,
+            capAtStandardWorkdays: true,
+          },
+        },
+        attendance,
+      ).baseSalaryAmount,
+    ).toBe("27000000");
+  });
+
+  it("allows production payroll salary to exceed base salary at 28 of 27 work units", () => {
+    const source = goldenInput();
+    const attendance = Array.from({ length: 28 }, (_, index) => ({
+      attendanceId: `above-standard-${index + 1}`,
+      businessDate: `2026-07-${String(index + 1).padStart(2, "0")}`,
+      status: "PRESENT" as const,
+      workUnits: "1",
+      overtimeMinutes: 0,
+      actualLiveMinutes: 0,
+      revenueAmount: "0",
+      dailyRewardRule: null,
+      violations: [],
+    }));
+    const result = calculatePayroll({
+      ...source,
+      baseSalaryAmount: "27000000",
+      employment: {
+        joinedDate: "2026-07-01",
+        officialDate: "2026-07-01",
+        category: "OFFICIAL",
+      },
+      salaryRule: {
+        ...source.salaryRule,
+        configuration: {
+          ...source.salaryRule.configuration,
+          standardDaysOffPerMonth: 4,
+          attendancePolicy: {
+            ...source.salaryRule.configuration.attendancePolicy,
+            capAtStandardWorkdays: false,
+          },
+        },
+      },
+      monthlyLevelRule: null,
+      attendance,
+      adjustments: [],
+    });
+
+    expect(result.salaryBasis).toEqual({
+      daysInMonth: 31,
+      standardDaysOffPerMonth: 4,
+      standardPayableDays: 27,
+    });
+    expect(result.aggregates.workUnits).toBe("28");
+    expect(result.components.baseSalary).toBe("27000000");
+    expect(result.components.proratedSalary).toBe("28000000");
+    expect(BigInt(result.components.proratedSalary)).toBeGreaterThan(
+      BigInt(result.components.baseSalary),
+    );
+  });
+
   it("is deterministic and independent from source ordering", () => {
     const first = calculatePayroll(goldenInput());
     const reversed = goldenInput();
