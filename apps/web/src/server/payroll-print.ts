@@ -13,11 +13,25 @@ function money(value: string | bigint): string {
   return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} ₫`;
 }
 
-function coins(value: string | undefined): string {
-  return value === undefined
-    ? "Đã ẩn"
-    : `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} xu`;
+function coins(value: string | null | undefined): string {
+  if (value === undefined) return "Đã ẩn";
+  if (value === null) return "Chưa có";
+  return `${new Intl.NumberFormat("vi-VN").format(BigInt(value))} xu`;
 }
+
+const transitionLabels = {
+  NONE: "Chưa xác định",
+  RETAIN: "Giữ bậc",
+  JUMP: "Tăng bậc",
+  DOWN: "Giảm bậc",
+} as const;
+
+const previousCoinSourceLabels = {
+  PUBLISHED_PAYROLL: "Phiếu lương đã gửi tháng trước",
+  ATTENDANCE_LIVE: "Tự động từ Chấm công & Live",
+  MANUAL_BASELINE: "Nhập thủ công",
+  NONE: "Chưa có dữ liệu",
+} as const;
 
 function date(value: string): string {
   return `${value.slice(8, 10)}/${value.slice(5, 7)}/${value.slice(0, 4)}`;
@@ -95,6 +109,7 @@ function summary(period: PayrollPeriodDto): string {
 }
 
 function payslip(period: PayrollPeriodDto, entry: PayrollEntryDto): string {
+  const monthlyLevel = entry.monthlyLevel;
   const components = [
     ["Lương theo công", entry.proratedSalary],
     ["Thưởng xu theo ngày", entry.dailyRevenueBonus],
@@ -145,18 +160,36 @@ function payslip(period: PayrollPeriodDto, entry: PayrollEntryDto): string {
           .join("")}
       </tbody>
     </table>
-    <h3>Tổng hợp thu nhập</h3>
-    <table class="components">
-      <tbody>
-        ${components
-          .map(
-            ([label, amount]) => `
-          <tr><th>${escapeHtml(label)}</th><td class="number">${escapeHtml(money(amount))}</td></tr>`,
-          )
-          .join("")}
-        <tr class="grand-total"><th>TỔNG THU NHẬP</th><td class="number">${escapeHtml(money(entry.totalIncome))}</td></tr>
-      </tbody>
-    </table>`;
+    <div class="summary-grid">
+      <section class="summary-section">
+        <h3 class="section-title level-title">A. TĂNG TRƯỞNG BẬC</h3>
+        <table class="level-growth">
+          <tbody>
+            <tr><th>Tổng xu tháng trước</th><td class="number">${escapeHtml(coins(monthlyLevel.previousMonthCoins))}</td></tr>
+            <tr><th>Nguồn tháng trước</th><td class="number wrap">${escapeHtml(previousCoinSourceLabels[monthlyLevel.previousMonthCoinsSource])}</td></tr>
+            <tr><th>Bậc tháng trước</th><td class="number">${escapeHtml(monthlyLevel.previousLevelName ?? monthlyLevel.previousLevelCode ?? "Chưa có")}</td></tr>
+            <tr><th>Tổng xu tháng này</th><td class="number">${escapeHtml(coins(monthlyLevel.currentMonthCoins))}</td></tr>
+            <tr><th>Bậc tháng này</th><td class="number">${escapeHtml(monthlyLevel.currentLevelName ?? monthlyLevel.currentLevelCode ?? "Chưa đạt bậc")}</td></tr>
+            <tr><th>Ngày làm việc / điều kiện</th><td class="number">${monthlyLevel.workedDayCount}/${escapeHtml(monthlyLevel.attendanceRequiredDays ?? "—")} ngày</td></tr>
+            <tr><th>Trạng thái</th><td class="number">${escapeHtml(transitionLabels[monthlyLevel.transition])}</td></tr>
+          </tbody>
+        </table>
+      </section>
+      <section class="summary-section">
+        <h3 class="section-title income-title">B. CÁC KHOẢN THU NHẬP / KHẤU TRỪ</h3>
+        <table class="components">
+          <tbody>
+            ${components
+              .map(
+                ([label, amount]) => `
+            <tr><th>${escapeHtml(label)}</th><td class="number">${escapeHtml(money(amount))}</td></tr>`,
+              )
+              .join("")}
+            <tr class="grand-total"><th>TỔNG THU NHẬP</th><td class="number">${escapeHtml(money(entry.totalIncome))}</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </div>`;
 }
 
 export function renderPayrollPrintHtml(
@@ -194,14 +227,21 @@ export function renderPayrollPrintHtml(
     .identity > div { border: 1px solid #cbd5e1; border-radius: 8px; padding: 9px; }
     .identity small, .identity strong { display: block; overflow-wrap: anywhere; }
     .identity strong { margin-top: 4px; }
-    .components { margin-left: auto; max-width: 520px; }
-    .components th { text-align: left; }
+    .summary-grid { align-items: start; break-inside: avoid; display: grid; gap: 12px; grid-template-columns: minmax(0, 4fr) minmax(0, 6fr); margin-top: 16px; page-break-inside: avoid; }
+    .summary-section { break-inside: avoid; min-width: 0; }
+    .section-title { border: 1px solid #cbd5e1; border-bottom: 0; margin: 0; padding: 7px; text-align: center; }
+    .level-title { background: #e0f2fe; }
+    .income-title { background: #d1fae5; }
+    .components, .level-growth { max-width: none; }
+    .components th, .level-growth th { text-align: left; }
+    .level-growth .wrap { white-space: normal; }
     @page { size: A4 landscape; margin: 9mm; }
     @media print {
       body { padding: 0; }
       .toolbar { display: none; }
       thead { display: table-header-group; }
       tr { break-inside: avoid; }
+      .summary-grid { break-before: auto; }
     }
   </style>
 </head>

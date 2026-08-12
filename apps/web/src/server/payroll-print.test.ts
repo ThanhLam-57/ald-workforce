@@ -38,6 +38,19 @@ const entry = {
   penalties: "20000",
   advance: "0",
   totalIncome: "309231",
+  monthlyLevel: {
+    workedDayCount: 27,
+    attendanceRequiredDays: 27,
+    attendanceEligible: true,
+    previousMonthCoins: "200000",
+    previousMonthCoinsSource: "PUBLISHED_PAYROLL",
+    previousLevelCode: "L2",
+    previousLevelName: "Kiến Tạo",
+    currentMonthCoins: "250000",
+    currentLevelCode: "L3",
+    currentLevelName: "Tăng Tốc",
+    transition: "JUMP",
+  },
   dailyRows: [
     {
       businessDate: "2026-07-01",
@@ -85,11 +98,61 @@ describe("payroll print HTML", () => {
     expect(html).toContain("00033");
   });
 
-  it("render phiếu cá nhân với dòng ngày và tổng thu nhập", () => {
+  it("render phiếu cá nhân với dòng ngày, tăng trưởng bậc và tổng thu nhập", () => {
     const html = renderPayrollPrintHtml(period, entry);
     expect(html).toContain("Phiếu lương nhân viên");
     expect(html).toContain("01/07/2026");
-    expect(html).toContain("TỔNG THU NHẬP");
+    expect(html).toContain("A. TĂNG TRƯỞNG BẬC");
+    expect(html).toContain("Tổng xu tháng trước");
+    expect(html).toContain("200.000 xu");
+    expect(html).toContain("Phiếu lương đã gửi tháng trước");
+    expect(html).toContain("Kiến Tạo");
+    expect(html).toContain("250.000 xu");
+    expect(html).toContain("Tăng Tốc");
+    expect(html).toContain("27/27 ngày");
+    expect(html).toContain("Tăng bậc");
+    expect(html).toContain("B. CÁC KHOẢN THU NHẬP / KHẤU TRỪ");
+    expect(html).toMatch(
+      /<tr class="grand-total"><th>TỔNG THU NHẬP<\/th><td class="number">309\.231 ₫<\/td><\/tr>/,
+    );
     expect(html).toContain("<small>Mã máy chấm công</small>");
+  });
+
+  it("không làm lộ số xu đã bị DTO ẩn trong phiếu tự phục vụ", () => {
+    const {
+      previousMonthCoins: hiddenPreviousMonthCoins,
+      currentMonthCoins: hiddenCurrentMonthCoins,
+      ...hiddenMonthlyLevel
+    } = entry.monthlyLevel;
+    void hiddenPreviousMonthCoins;
+    void hiddenCurrentMonthCoins;
+    const hiddenRevenueEntry: PayrollEntryDto = {
+      ...entry,
+      monthlyLevel: hiddenMonthlyLevel,
+    };
+
+    const html = renderPayrollPrintHtml(period, hiddenRevenueEntry);
+
+    expect(html.match(/Đã ẩn/g)).toHaveLength(2);
+    expect(html).not.toContain("200.000 xu");
+    expect(html).not.toContain("250.000 xu");
+  });
+
+  it("escape tên bậc trước khi đưa vào HTML in", () => {
+    const unsafeLevelEntry = {
+      ...entry,
+      monthlyLevel: {
+        ...entry.monthlyLevel,
+        previousLevelName: "Bậc <script>alert(2)</script>",
+        currentLevelName: '<img src=x onerror="alert(3)">',
+      },
+    } as PayrollEntryDto;
+
+    const html = renderPayrollPrintHtml(period, unsafeLevelEntry);
+
+    expect(html).not.toContain("<script>alert(2)</script>");
+    expect(html).not.toContain('<img src=x onerror="alert(3)">');
+    expect(html).toContain("Bậc &lt;script&gt;alert(2)&lt;/script&gt;");
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(3)&quot;&gt;");
   });
 });
