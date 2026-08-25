@@ -25,11 +25,15 @@ import {
 } from "@ald/domain";
 
 import { parseBusinessDate } from "./business-date";
+import { EVIDENCE_VERSION_HEADER, readEvidenceVersion } from "./evidence-upload-body";
 import {
-  createEvidenceUploadUrl,
-  createEvidenceViewUrl,
-  verifyEvidenceObject,
-} from "./object-storage";
+  cleanupRejectedEvidenceObjects,
+  EVIDENCE_UPLOAD_TTL_MS,
+  evidenceStorageUnavailable,
+  isEvidenceContentFailure,
+  storeEvidenceUpload,
+} from "./evidence-upload";
+import { createEvidenceViewUrl, verifyEvidenceObject } from "./object-storage";
 import { appendSecureAudit, systemAuditReason } from "./audit-service";
 import type { RequestMetadata } from "./request-metadata";
 import { activateDueSimpleRules } from "./simple-rule-service";
@@ -175,6 +179,126 @@ async function appendAudit(
       userAgent: input.metadata.userAgent,
     },
   });
+}
+
+type RejectedEvidenceRow = Readonly<{
+  id: string;
+  branchId: string;
+  objectKey: string;
+  version: number;
+}>;
+
+async function lockEvidenceMutation(
+  tx: Transaction,
+  companyId: string,
+  violationId: string,
+): Promise<void> {
+  await tx.$queryRaw`
+    SELECT 1::integer
+    FROM pg_advisory_xact_lock(
+      hashtextextended(${`evidence-upload:${companyId}:${violationId}`}, 0)
+    )
+  `;
+}
+
+async function rejectPendingEvidence(
+  tx: Transaction,
+  input: Readonly<{
+    actor: ActorContext;
+    violationId: string;
+    rejectionReason: string;
+    auditReason: string;
+    metadata: RequestMetadata;
+  }>,
+): Promise<readonly RejectedEvidenceRow[]> {
+  const rejected = await tx.$queryRaw<RejectedEvidenceRow[]>`
+    UPDATE "evidence_objects"
+    SET
+      "status" = 'REJECTED'::"EvidenceStatus",
+      "rejectionReason" = ${input.rejectionReason},
+      "version" = "version" + 1,
+      "updatedAt" = CURRENT_TIMESTAMP
+    WHERE
+      "companyId" = ${input.actor.companyId}::uuid
+      AND "violationId" = ${input.violationId}::uuid
+      AND "status" = 'PENDING_UPLOAD'::"EvidenceStatus"
+    RETURNING "id", "branchId", "objectKey", "version"
+  `;
+  if (rejected.length === 0) return rejected;
+
+  await tx.auditLog.createMany({
+    data: rejected.map((evidence) => ({
+      companyId: input.actor.companyId,
+      branchId: evidence.branchId,
+      actorUserId: input.actor.userId,
+      action: "evidence.reject",
+      entityType: "EvidenceObject",
+      entityId: evidence.id,
+      reason: input.auditReason,
+      before: auditJson({
+        branchId: evidence.branchId,
+        status: "PENDING_UPLOAD",
+        version: evidence.version - 1,
+      }),
+      after: auditJson({
+        branchId: evidence.branchId,
+        status: "REJECTED",
+        version: evidence.version,
+        rejectionReason: input.rejectionReason,
+      }),
+      requestId: input.metadata.requestId,
+      ipAddress: input.metadata.ipAddress,
+      userAgent: input.metadata.userAgent,
+    })),
+  });
+  return rejected;
+}
+
+async function rejectEvidenceByVersion(
+  tx: Transaction,
+  input: Readonly<{
+    actor: ActorContext;
+    evidence: Readonly<{ id: string; branchId: string; version: number }>;
+    rejectionReason: string;
+    auditReason: string;
+    metadata: RequestMetadata;
+  }>,
+): Promise<boolean> {
+  const result = await tx.evidenceObject.updateMany({
+    where: {
+      id: input.evidence.id,
+      companyId: input.actor.companyId,
+      status: "PENDING_UPLOAD",
+      version: input.evidence.version,
+    },
+    data: {
+      status: "REJECTED",
+      rejectionReason: input.rejectionReason,
+      version: { increment: 1 },
+    },
+  });
+  if (result.count !== 1) return false;
+
+  await appendAudit(tx, {
+    actor: input.actor,
+    action: "evidence.reject",
+    entityType: "EvidenceObject",
+    entityId: input.evidence.id,
+    reason: input.auditReason,
+    before: {
+      branchId: input.evidence.branchId,
+      status: "PENDING_UPLOAD",
+      version: input.evidence.version,
+    },
+    after: {
+      branchId: input.evidence.branchId,
+      status: "REJECTED",
+      version: input.evidence.version + 1,
+      rejectionReason: input.rejectionReason,
+    },
+    metadata: input.metadata,
+  });
+  return true;
 }
 
 function violationAuditShape(violation: ViolationAuditRecord): Record<string, unknown> {
@@ -1396,54 +1520,71 @@ export async function cancelViolation(
   metadata: RequestMetadata,
 ): Promise<ViolationDto> {
   requirePermission(actor, "violation:cancel");
-  const authorized = await authorizeViolation(actor, id, true);
-  if (authorized.status === "CANCELLED") {
-    const existing = await prisma.violation.findUniqueOrThrow({
-      where: { id },
-      select: violationSelect,
-    });
-    return toViolationDto(existing);
-  }
+  await authorizeViolation(actor, id, true);
 
-  return prisma.$transaction(async (tx) => {
+  const transactionResult = await prisma.$transaction(async (tx) => {
+    await lockEvidenceMutation(tx, actor.companyId, id);
     const before = await tx.violation.findUniqueOrThrow({
       where: { id },
       select: violationSelect,
     });
-    const result = await tx.violation.updateMany({
-      where: {
-        id,
-        companyId: actor.companyId,
-        status: "ACTIVE",
-        version: input.version,
-      },
-      data: {
-        status: "CANCELLED",
-        cancelledByUserId: actor.userId,
-        cancelledAt: new Date(),
-        cancellationReason: systemAuditReason("VIOLATION_CANCELLED"),
-        version: { increment: 1 },
-      },
-    });
-    if (result.count !== 1) {
-      throw new DomainError("CONFLICT", "Vi phạm đã được cập nhật bởi người khác.");
+    if (before.status === "ACTIVE") {
+      const result = await tx.violation.updateMany({
+        where: {
+          id,
+          companyId: actor.companyId,
+          status: "ACTIVE",
+          version: input.version,
+        },
+        data: {
+          status: "CANCELLED",
+          cancelledByUserId: actor.userId,
+          cancelledAt: new Date(),
+          cancellationReason: systemAuditReason("VIOLATION_CANCELLED"),
+          version: { increment: 1 },
+        },
+      });
+      if (result.count !== 1) {
+        throw new DomainError("CONFLICT", "Vi phạm đã được cập nhật bởi người khác.");
+      }
+      const cancelled = await tx.violation.findUniqueOrThrow({
+        where: { id },
+        select: violationSelect,
+      });
+      await appendAudit(tx, {
+        actor,
+        action: "violation.cancel",
+        entityType: "Violation",
+        entityId: id,
+        reason: systemAuditReason("VIOLATION_CANCELLED"),
+        before: violationAuditShape(before),
+        after: violationAuditShape(cancelled),
+        metadata,
+      });
     }
-    const after = await tx.violation.findUniqueOrThrow({
+
+    const rejectedEvidence = await rejectPendingEvidence(tx, {
+      actor,
+      violationId: id,
+      rejectionReason: "Vi phạm đã bị hủy trước khi evidence hoàn tất.",
+      auditReason: systemAuditReason("EVIDENCE_UPLOAD_CANCELLED_WITH_VIOLATION"),
+      metadata,
+    });
+    const finalViolation = await tx.violation.findUniqueOrThrow({
       where: { id },
       select: violationSelect,
     });
-    await appendAudit(tx, {
-      actor,
-      action: "violation.cancel",
-      entityType: "Violation",
-      entityId: id,
-      reason: systemAuditReason("VIOLATION_CANCELLED"),
-      before: violationAuditShape(before),
-      after: violationAuditShape(after),
-      metadata,
-    });
-    return toViolationDto(after);
+    return {
+      violation: toViolationDto(finalViolation),
+      rejectedEvidenceObjectKeys: rejectedEvidence.map((evidence) => evidence.objectKey),
+    };
   });
+  await cleanupRejectedEvidenceObjects({
+    objectKeys: transactionResult.rejectedEvidenceObjectKeys,
+    metadata,
+    event: "evidence.cancelled_violation_object_cleanup_failed",
+  });
+  return transactionResult.violation;
 }
 
 const extensionByMime = {
@@ -1459,24 +1600,30 @@ export async function presignEvidenceUpload(
 ) {
   requirePermission(actor, "evidence:upload");
   const violation = await authorizeViolation(actor, input.violationId, true);
-  if (violation.status !== "ACTIVE") {
-    throw new DomainError("CONFLICT", "Không thể thêm ảnh vào vi phạm đã hủy.");
-  }
   const extension = extensionByMime[input.mimeType];
   const objectKey = `companies/${actor.companyId}/violations/${violation.id}/${randomUUID()}.${extension}`;
-  const upload = await createEvidenceUploadUrl({
-    objectKey,
-    mimeType: input.mimeType,
-    sizeBytes: input.sizeBytes,
-    checksumSha256: input.checksumSha256,
-  });
 
-  const evidence = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
+    await lockEvidenceMutation(tx, actor.companyId, violation.id);
+    const currentViolation = await tx.violation.findFirst({
+      where: { id: violation.id, companyId: actor.companyId },
+      select: { id: true, branchId: true, status: true },
+    });
+    if (!currentViolation || currentViolation.status !== "ACTIVE") {
+      throw new DomainError("CONFLICT", "Không thể thêm ảnh vào vi phạm đã hủy.");
+    }
+    const rejectedEvidence = await rejectPendingEvidence(tx, {
+      actor,
+      violationId: currentViolation.id,
+      rejectionReason: "Được thay thế bởi yêu cầu tải evidence mới.",
+      auditReason: systemAuditReason("EVIDENCE_UPLOAD_REPLACED"),
+      metadata,
+    });
     const created = await tx.evidenceObject.create({
       data: {
         companyId: actor.companyId,
-        branchId: violation.branchId,
-        violationId: violation.id,
+        branchId: currentViolation.branchId,
+        violationId: currentViolation.id,
         objectKey,
         originalFileName: input.originalFileName,
         mimeType: input.mimeType,
@@ -1492,6 +1639,7 @@ export async function presignEvidenceUpload(
       entityId: created.id,
       reason: systemAuditReason("EVIDENCE_UPLOAD_REQUESTED"),
       after: {
+        branchId: created.branchId,
         violationId: created.violationId,
         originalFileName: created.originalFileName,
         mimeType: created.mimeType,
@@ -1501,8 +1649,17 @@ export async function presignEvidenceUpload(
       },
       metadata,
     });
-    return created;
+    return {
+      evidence: created,
+      replacedObjectKeys: rejectedEvidence.map((evidence) => evidence.objectKey),
+    };
   });
+  await cleanupRejectedEvidenceObjects({
+    objectKeys: result.replacedObjectKeys,
+    metadata,
+    event: "evidence.replaced_object_cleanup_failed",
+  });
+  const evidence = result.evidence;
 
   return {
     evidence: {
@@ -1514,8 +1671,75 @@ export async function presignEvidenceUpload(
       status: evidence.status,
       version: evidence.version,
     } satisfies EvidenceDto,
-    upload,
+    upload: {
+      url: `/api/evidence/${encodeURIComponent(evidence.id)}/upload`,
+      expiresInSeconds: EVIDENCE_UPLOAD_TTL_MS / 1_000,
+      headers: {
+        "Content-Type": input.mimeType,
+        [EVIDENCE_VERSION_HEADER]: String(evidence.version),
+      },
+    },
   };
+}
+
+export async function uploadEvidenceObject(
+  actor: ActorContext,
+  id: string,
+  request: Request,
+  metadata: RequestMetadata,
+): Promise<EvidenceDto> {
+  requirePermission(actor, "evidence:upload");
+  const expectedVersion = readEvidenceVersion(request);
+  const existing = await prisma.evidenceObject.findFirst({
+    where: { id, companyId: actor.companyId },
+    include: {
+      violation: {
+        select: { attendanceId: true, status: true },
+      },
+    },
+  });
+  if (!existing) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy evidence.");
+  }
+  await authorizeAttendance(actor, existing.violation.attendanceId, true);
+  if (existing.violation.status !== "ACTIVE") {
+    throw new DomainError("CONFLICT", "Không thể thêm ảnh vào vi phạm đã hủy.");
+  }
+
+  await storeEvidenceUpload({
+    evidence: existing,
+    expectedVersion,
+    request,
+    metadata,
+  });
+  const afterStore = await prisma.evidenceObject.findFirst({
+    where: { id, companyId: actor.companyId },
+    include: {
+      violation: {
+        select: { status: true },
+      },
+    },
+  });
+  if (afterStore?.status === "READY") {
+    return evidenceDto(afterStore);
+  }
+  if (
+    !afterStore ||
+    afterStore.status !== "PENDING_UPLOAD" ||
+    afterStore.version !== expectedVersion ||
+    afterStore.violation.status !== "ACTIVE"
+  ) {
+    await cleanupRejectedEvidenceObjects({
+      objectKeys: [existing.objectKey],
+      metadata,
+      event: "evidence.stale_upload_object_cleanup_failed",
+    });
+    throw new DomainError(
+      "CONFLICT",
+      "Evidence đã bị thay thế hoặc vi phạm đã bị hủy trong lúc tải ảnh.",
+    );
+  }
+  return completeEvidenceUpload(actor, id, { version: expectedVersion }, metadata);
 }
 
 export async function completeEvidenceUpload(
@@ -1529,7 +1753,7 @@ export async function completeEvidenceUpload(
     where: { id, companyId: actor.companyId },
     include: {
       violation: {
-        select: { attendanceId: true },
+        select: { attendanceId: true, status: true },
       },
     },
   });
@@ -1537,11 +1761,38 @@ export async function completeEvidenceUpload(
     throw new DomainError("NOT_FOUND", "Không tìm thấy evidence.");
   }
   await authorizeAttendance(actor, existing.violation.attendanceId, true);
+  if (existing.violation.status !== "ACTIVE") {
+    throw new DomainError("CONFLICT", "Không thể hoàn tất ảnh của vi phạm đã hủy.");
+  }
   if (existing.status !== "PENDING_UPLOAD") {
     throw new DomainError("CONFLICT", "Evidence không còn chờ upload.");
   }
   if (existing.version !== input.version) {
     throw new DomainError("CONFLICT", "Evidence đã được cập nhật bởi người khác.");
+  }
+  if (Date.now() - existing.createdAt.getTime() > EVIDENCE_UPLOAD_TTL_MS) {
+    const rejectionReason = "Yêu cầu tải evidence đã hết hạn trước khi hoàn tất.";
+    const rejected = await prisma.$transaction(async (tx) => {
+      await lockEvidenceMutation(tx, actor.companyId, existing.violationId);
+      return rejectEvidenceByVersion(tx, {
+        actor,
+        evidence: existing,
+        rejectionReason,
+        auditReason: systemAuditReason("EVIDENCE_UPLOAD_EXPIRED"),
+        metadata,
+      });
+    });
+    if (rejected) {
+      await cleanupRejectedEvidenceObjects({
+        objectKeys: [existing.objectKey],
+        metadata,
+        event: "evidence.expired_object_cleanup_failed",
+      });
+    }
+    throw new DomainError(
+      "CONFLICT",
+      "Yêu cầu tải evidence đã hết hạn. Vui lòng chọn lại file để tạo lượt tải mới.",
+    );
   }
 
   try {
@@ -1552,34 +1803,30 @@ export async function completeEvidenceUpload(
       checksumSha256: existing.checksumSha256,
     });
   } catch (error) {
-    const reason = error instanceof Error ? error.message : "Không thể xác minh object upload.";
-    await prisma.$transaction(async (tx) => {
-      const result = await tx.evidenceObject.updateMany({
-        where: {
-          id,
-          companyId: actor.companyId,
-          status: "PENDING_UPLOAD",
-          version: input.version,
-        },
-        data: {
-          status: "REJECTED",
-          rejectionReason: reason,
-          version: { increment: 1 },
-        },
+    if (!isEvidenceContentFailure(error)) {
+      throw evidenceStorageUnavailable(error, {
+        event: "evidence.storage_verify_failed",
+        requestId: metadata.requestId,
+        evidenceId: existing.id,
       });
-      if (result.count !== 1) {
-        throw new DomainError("CONFLICT", "Evidence đã được cập nhật bởi người khác.");
-      }
-      await appendAudit(tx, {
+    }
+    const rejectionReason = "Object evidence không tồn tại hoặc metadata file không khớp yêu cầu.";
+    const rejected = await prisma.$transaction(async (tx) => {
+      return rejectEvidenceByVersion(tx, {
         actor,
-        action: "evidence.reject",
-        entityType: "EvidenceObject",
-        entityId: id,
-        reason: "Object upload không khớp metadata đã ký.",
-        before: { status: existing.status, version: existing.version },
-        after: { status: "REJECTED", rejectionReason: reason },
+        evidence: existing,
+        rejectionReason,
+        auditReason: "Object upload không khớp metadata đã ký.",
         metadata,
       });
+    });
+    if (!rejected) {
+      throw new DomainError("CONFLICT", "Evidence đã được cập nhật bởi người khác.");
+    }
+    await cleanupRejectedEvidenceObjects({
+      objectKeys: [existing.objectKey],
+      metadata,
+      event: "evidence.invalid_object_cleanup_failed",
     });
     throw new DomainError(
       "VALIDATION_ERROR",

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { prisma } from "@ald/db";
 import type { ActorContext } from "@ald/domain";
@@ -15,6 +15,8 @@ const storageMocks = vi.hoisted(() => ({
     url: "https://private-storage.test/view",
     expiresInSeconds: 60,
   })),
+  putPrivateObject: vi.fn(async () => undefined),
+  deletePrivateObject: vi.fn(async () => undefined),
 }));
 
 vi.mock("./object-storage", () => storageMocks);
@@ -22,9 +24,17 @@ vi.mock("./object-storage", () => storageMocks);
 import {
   completeStaffIdentityDocument,
   presignStaffIdentityDocument,
+  uploadStaffIdentityDocument,
   viewStaffIdentityDocument,
 } from "./staff-identity-document-service";
-import { completeStaffBankQr, presignStaffBankQr, viewStaffBankQr } from "./staff-bank-qr-service";
+import {
+  completeStaffBankQr,
+  presignStaffBankQr,
+  uploadStaffBankQr,
+  viewStaffBankQr,
+} from "./staff-bank-qr-service";
+import { STAFF_PRIVATE_DOCUMENT_UPLOAD_TTL_MS } from "./staff-private-document-upload";
+import { STAFF_PRIVATE_DOCUMENT_VERSION_HEADER } from "./staff-private-document-upload-body";
 
 const runId = randomUUID().slice(0, 8);
 const checksumSha256 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -246,6 +256,188 @@ afterAll(async () => {
 });
 
 describe("private staff identity documents", () => {
+  it("tải CCCD qua endpoint cùng origin, kiểm tra version/checksum và thay lượt pending cũ", async () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xdb]);
+    const checksum = createHash("sha256").update(bytes).digest("base64");
+    const abandoned = await presignStaffIdentityDocument(
+      manager,
+      staffAId,
+      {
+        side: "CITIZEN_ID_BACK",
+        originalFileName: "abandoned.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: checksum,
+      },
+      metadata,
+    );
+    const current = await presignStaffIdentityDocument(
+      manager,
+      staffAId,
+      {
+        side: "CITIZEN_ID_BACK",
+        originalFileName: "current.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: checksum,
+      },
+      metadata,
+    );
+
+    expect(current.upload.url).toBe(
+      `/api/staff/${staffAId}/identity-documents/${current.document.id}/upload`,
+    );
+    expect(current.upload.headers).toMatchObject({
+      "Content-Type": "image/jpeg",
+      [STAFF_PRIVATE_DOCUMENT_VERSION_HEADER]: String(current.document.version),
+    });
+    await expect(
+      prisma.staffIdentityDocument.findUniqueOrThrow({
+        where: { id: abandoned.document.id },
+        select: { status: true, version: true, rejectionReason: true },
+      }),
+    ).resolves.toEqual({
+      status: "REJECTED",
+      version: abandoned.document.version + 1,
+      rejectionReason: "Được thay thế bởi yêu cầu tải ảnh mới.",
+    });
+
+    const request = new Request(`http://localhost${current.upload.url}`, {
+      method: "PUT",
+      headers: current.upload.headers,
+      body: bytes,
+    });
+    await expect(
+      uploadStaffIdentityDocument(
+        manager,
+        staffAId,
+        current.document.id,
+        current.document.version,
+        request,
+        metadata,
+      ),
+    ).resolves.toMatchObject({ id: current.document.id, status: "PENDING_UPLOAD" });
+    expect(storageMocks.putPrivateObject).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mimeType: "image/jpeg", body: bytes, checksumSha256: checksum }),
+    );
+  });
+
+  it("xóa object PUT đến muộn và trả conflict khi lượt CCCD đã bị presign mới thay thế", async () => {
+    const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xdb]);
+    const checksum = createHash("sha256").update(bytes).digest("base64");
+    const pending = await presignStaffIdentityDocument(
+      manager,
+      staffAId,
+      {
+        side: "CITIZEN_ID_BACK",
+        originalFileName: "late-upload.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: checksum,
+      },
+      metadata,
+    );
+    const stored = await prisma.staffIdentityDocument.findUniqueOrThrow({
+      where: { id: pending.document.id },
+      select: { objectKey: true },
+    });
+    let markPutStarted: (() => void) | undefined;
+    const putStarted = new Promise<void>((resolve) => {
+      markPutStarted = resolve;
+    });
+    let resumePut: (() => void) | undefined;
+    const putMayFinish = new Promise<void>((resolve) => {
+      resumePut = resolve;
+    });
+    storageMocks.putPrivateObject.mockImplementationOnce(async () => {
+      markPutStarted?.();
+      await putMayFinish;
+    });
+
+    const lateUpload = uploadStaffIdentityDocument(
+      manager,
+      staffAId,
+      pending.document.id,
+      pending.document.version,
+      new Request(`http://localhost${pending.upload.url}`, {
+        method: "PUT",
+        headers: pending.upload.headers,
+        body: bytes,
+      }),
+      metadata,
+    );
+    await putStarted;
+    await presignStaffIdentityDocument(
+      manager,
+      staffAId,
+      {
+        side: "CITIZEN_ID_BACK",
+        originalFileName: "replacement.jpg",
+        mimeType: "image/jpeg",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: checksum,
+      },
+      metadata,
+    );
+    storageMocks.deletePrivateObject.mockClear();
+    const rejectedUpload = expect(lateUpload).rejects.toMatchObject({ code: "CONFLICT" });
+    resumePut?.();
+
+    await rejectedUpload;
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledOnce();
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledWith(stored.objectKey);
+    await expect(
+      prisma.auditLog.count({
+        where: {
+          companyId,
+          entityId: pending.document.id,
+          action: "staff.identity-document.reject",
+        },
+      }),
+    ).resolves.toBe(1);
+  });
+
+  it("map lỗi kho ảnh khi upload thành dependency unavailable mà không log message nhạy cảm", async () => {
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const checksum = createHash("sha256").update(bytes).digest("base64");
+    const pending = await presignStaffBankQr(
+      manager,
+      staffAId,
+      {
+        originalFileName: "qr.png",
+        mimeType: "image/png",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: checksum,
+      },
+      metadata,
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    storageMocks.putPrivateObject.mockRejectedValueOnce(
+      new Error("provider rejected secret-access-key-value"),
+    );
+
+    await expect(
+      uploadStaffBankQr(
+        manager,
+        staffAId,
+        pending.document.id,
+        pending.document.version,
+        new Request(`http://localhost${pending.upload.url}`, {
+          method: "PUT",
+          headers: pending.upload.headers,
+          body: bytes,
+        }),
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "DEPENDENCY_UNAVAILABLE",
+      details: { code: "PRIVATE_DOCUMENT_STORAGE_UNAVAILABLE", retryable: true },
+    });
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(String(consoleError.mock.calls[0]?.[0])).not.toContain("secret-access-key-value");
+    consoleError.mockRestore();
+  });
+
   it("presign, xác minh, thay ảnh và không trả objectKey", async () => {
     const first = await presignStaffIdentityDocument(
       manager,
@@ -392,7 +584,9 @@ describe("private staff identity documents", () => {
   });
 
   it("đánh dấu REJECTED khi HEAD verify không khớp MIME, kích thước hoặc checksum", async () => {
-    storageMocks.verifyPrivateObject.mockRejectedValueOnce(new Error("metadata mismatch"));
+    storageMocks.verifyPrivateObject.mockRejectedValueOnce(
+      new Error("Metadata evidence trên object storage không khớp yêu cầu đã ký."),
+    );
     const pending = await presignStaffIdentityDocument(
       manager,
       staffAId,
@@ -405,6 +599,11 @@ describe("private staff identity documents", () => {
       },
       metadata,
     );
+    const stored = await prisma.staffIdentityDocument.findUniqueOrThrow({
+      where: { id: pending.document.id },
+      select: { objectKey: true },
+    });
+    storageMocks.deletePrivateObject.mockClear();
     await expect(
       completeStaffIdentityDocument(
         manager,
@@ -420,6 +619,8 @@ describe("private staff identity documents", () => {
         select: { status: true },
       }),
     ).toEqual({ status: "REJECTED" });
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledOnce();
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledWith(stored.objectKey);
   });
 
   it("manager cơ sở A không được xem CCCD nhân viên cơ sở B", async () => {
@@ -497,6 +698,356 @@ describe("private staff identity documents", () => {
     const signed = await viewStaffBankQr(manager, staffAId, replacement.document.id, metadata);
     expect(signed.expiresInSeconds).toBeLessThanOrEqual(60);
     expect(signed.url).toBe("https://private-storage.test/view");
+  });
+
+  it("không cleanup lại object khi HEAD mismatch nhưng lượt QR đã bị presign mới reject", async () => {
+    const pending = await presignStaffBankQr(
+      manager,
+      staffAId,
+      {
+        originalFileName: "qr-raced.png",
+        mimeType: "image/png",
+        sizeBytes: 512,
+        checksumSha256,
+      },
+      metadata,
+    );
+    let markVerifyStarted: (() => void) | undefined;
+    const verifyStarted = new Promise<void>((resolve) => {
+      markVerifyStarted = resolve;
+    });
+    let rejectVerify: ((reason: unknown) => void) | undefined;
+    storageMocks.verifyPrivateObject.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((_resolve, reject) => {
+          rejectVerify = reject;
+          markVerifyStarted?.();
+        }),
+    );
+    const completion = completeStaffBankQr(
+      manager,
+      staffAId,
+      pending.document.id,
+      { version: pending.document.version },
+      metadata,
+    );
+    await verifyStarted;
+    await presignStaffBankQr(
+      manager,
+      staffAId,
+      {
+        originalFileName: "qr-replacement.png",
+        mimeType: "image/png",
+        sizeBytes: 512,
+        checksumSha256,
+      },
+      metadata,
+    );
+    storageMocks.deletePrivateObject.mockClear();
+    const rejectedCompletion = expect(completion).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    rejectVerify?.(new Error("Metadata evidence trên object storage không khớp yêu cầu đã ký."));
+
+    await rejectedCompletion;
+    expect(storageMocks.deletePrivateObject).not.toHaveBeenCalled();
+    await expect(
+      prisma.auditLog.count({
+        where: {
+          companyId,
+          entityId: pending.document.id,
+          action: "staff.bank-qr.reject",
+        },
+      }),
+    ).resolves.toBe(1);
+  });
+
+  it("reject, audit và cleanup CCCD lẫn QR hết TTL mà không gọi HEAD", async () => {
+    const [identity, bankQr] = await Promise.all([
+      presignStaffIdentityDocument(
+        manager,
+        staffAId,
+        {
+          side: "CITIZEN_ID_BACK",
+          originalFileName: "expired-identity.png",
+          mimeType: "image/png",
+          sizeBytes: 512,
+          checksumSha256,
+        },
+        metadata,
+      ),
+      presignStaffBankQr(
+        manager,
+        staffAId,
+        {
+          originalFileName: "expired-qr.png",
+          mimeType: "image/png",
+          sizeBytes: 512,
+          checksumSha256,
+        },
+        metadata,
+      ),
+    ]);
+    const expiredAt = new Date(Date.now() - STAFF_PRIVATE_DOCUMENT_UPLOAD_TTL_MS - 1);
+    await Promise.all([
+      prisma.staffIdentityDocument.update({
+        where: { id: identity.document.id },
+        data: { createdAt: expiredAt },
+      }),
+      prisma.staffBankQrDocument.update({
+        where: { id: bankQr.document.id },
+        data: { createdAt: expiredAt },
+      }),
+    ]);
+    const [storedIdentity, storedBankQr] = await Promise.all([
+      prisma.staffIdentityDocument.findUniqueOrThrow({
+        where: { id: identity.document.id },
+        select: { objectKey: true },
+      }),
+      prisma.staffBankQrDocument.findUniqueOrThrow({
+        where: { id: bankQr.document.id },
+        select: { objectKey: true },
+      }),
+    ]);
+    const verifyCalls = storageMocks.verifyPrivateObject.mock.calls.length;
+    storageMocks.deletePrivateObject.mockClear();
+
+    await expect(
+      completeStaffIdentityDocument(
+        manager,
+        staffAId,
+        identity.document.id,
+        { version: identity.document.version },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "Yêu cầu tải ảnh đã hết hạn. Vui lòng chọn lại file để tạo lượt tải mới.",
+    });
+    await expect(
+      completeStaffBankQr(
+        manager,
+        staffAId,
+        bankQr.document.id,
+        { version: bankQr.document.version },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: "Yêu cầu tải ảnh đã hết hạn. Vui lòng chọn lại file để tạo lượt tải mới.",
+    });
+    expect(storageMocks.verifyPrivateObject).toHaveBeenCalledTimes(verifyCalls);
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledTimes(2);
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledWith(storedIdentity.objectKey);
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledWith(storedBankQr.objectKey);
+    await expect(
+      Promise.all([
+        prisma.staffIdentityDocument.findUniqueOrThrow({
+          where: { id: identity.document.id },
+          select: { status: true, version: true, rejectionReason: true },
+        }),
+        prisma.staffBankQrDocument.findUniqueOrThrow({
+          where: { id: bankQr.document.id },
+          select: { status: true, version: true, rejectionReason: true },
+        }),
+      ]),
+    ).resolves.toEqual([
+      {
+        status: "REJECTED",
+        version: identity.document.version + 1,
+        rejectionReason: "Yêu cầu tải ảnh đã hết hạn.",
+      },
+      {
+        status: "REJECTED",
+        version: bankQr.document.version + 1,
+        rejectionReason: "Yêu cầu tải ảnh đã hết hạn.",
+      },
+    ]);
+    const expiryAudits = await prisma.auditLog.findMany({
+      where: { entityId: { in: [identity.document.id, bankQr.document.id] } },
+      select: {
+        entityId: true,
+        reason: true,
+        requestId: true,
+        ipAddress: true,
+        userAgent: true,
+      },
+    });
+    expect(expiryAudits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entityId: identity.document.id,
+          reason: "SYSTEM:STAFF_IDENTITY_DOCUMENT_UPLOAD_EXPIRED",
+          requestId: metadata.requestId,
+          ipAddress: metadata.ipAddress,
+          userAgent: metadata.userAgent,
+        }),
+        expect.objectContaining({
+          entityId: bankQr.document.id,
+          reason: "SYSTEM:STAFF_BANK_QR_UPLOAD_EXPIRED",
+          requestId: metadata.requestId,
+          ipAddress: metadata.ipAddress,
+          userAgent: metadata.userAgent,
+        }),
+      ]),
+    );
+  });
+
+  it("reject và audit đủ nhiều pending CCCD/QR trong một lượt presign", async () => {
+    const identityKeys = [
+      `tests/${runId}/batch-identity-1.png`,
+      `tests/${runId}/batch-identity-2.png`,
+    ] as const;
+    const bankQrKeys = [
+      `tests/${runId}/batch-bank-qr-1.png`,
+      `tests/${runId}/batch-bank-qr-2.png`,
+    ] as const;
+    const [identityOne, identityTwo, bankQrOne, bankQrTwo] = await Promise.all([
+      prisma.staffIdentityDocument.create({
+        data: {
+          companyId,
+          branchId: branchBId,
+          staffId: staffBId,
+          side: "CITIZEN_ID_FRONT",
+          objectKey: identityKeys[0],
+          originalFileName: "batch-identity-1.png",
+          mimeType: "image/png",
+          sizeBytes: 512n,
+          checksumSha256,
+          createdByUserId: gm.userId,
+        },
+      }),
+      prisma.staffIdentityDocument.create({
+        data: {
+          companyId,
+          branchId: branchBId,
+          staffId: staffBId,
+          side: "CITIZEN_ID_FRONT",
+          objectKey: identityKeys[1],
+          originalFileName: "batch-identity-2.png",
+          mimeType: "image/png",
+          sizeBytes: 512n,
+          checksumSha256,
+          createdByUserId: gm.userId,
+        },
+      }),
+      prisma.staffBankQrDocument.create({
+        data: {
+          companyId,
+          branchId: branchBId,
+          staffId: staffBId,
+          objectKey: bankQrKeys[0],
+          originalFileName: "batch-bank-qr-1.png",
+          mimeType: "image/png",
+          sizeBytes: 512n,
+          checksumSha256,
+          createdByUserId: gm.userId,
+        },
+      }),
+      prisma.staffBankQrDocument.create({
+        data: {
+          companyId,
+          branchId: branchBId,
+          staffId: staffBId,
+          objectKey: bankQrKeys[1],
+          originalFileName: "batch-bank-qr-2.png",
+          mimeType: "image/png",
+          sizeBytes: 512n,
+          checksumSha256,
+          createdByUserId: gm.userId,
+        },
+      }),
+    ]);
+    const replacedIds = [identityOne.id, identityTwo.id, bankQrOne.id, bankQrTwo.id];
+    storageMocks.deletePrivateObject.mockClear();
+
+    await Promise.all([
+      presignStaffIdentityDocument(
+        gm,
+        staffBId,
+        {
+          side: "CITIZEN_ID_FRONT",
+          originalFileName: "batch-identity-current.png",
+          mimeType: "image/png",
+          sizeBytes: 512,
+          checksumSha256,
+        },
+        metadata,
+      ),
+      presignStaffBankQr(
+        gm,
+        staffBId,
+        {
+          originalFileName: "batch-bank-qr-current.png",
+          mimeType: "image/png",
+          sizeBytes: 512,
+          checksumSha256,
+        },
+        metadata,
+      ),
+    ]);
+
+    const [identityRows, bankQrRows, audits] = await Promise.all([
+      prisma.staffIdentityDocument.findMany({
+        where: { id: { in: [identityOne.id, identityTwo.id] } },
+        select: { status: true, version: true },
+      }),
+      prisma.staffBankQrDocument.findMany({
+        where: { id: { in: [bankQrOne.id, bankQrTwo.id] } },
+        select: { status: true, version: true },
+      }),
+      prisma.auditLog.findMany({
+        where: { entityId: { in: replacedIds } },
+        select: {
+          companyId: true,
+          branchId: true,
+          actorUserId: true,
+          action: true,
+          reason: true,
+          before: true,
+          after: true,
+          requestId: true,
+          ipAddress: true,
+          userAgent: true,
+        },
+      }),
+    ]);
+    expect([...identityRows, ...bankQrRows]).toHaveLength(4);
+    expect([...identityRows, ...bankQrRows]).toEqual(
+      expect.arrayContaining([
+        { status: "REJECTED", version: 2 },
+        { status: "REJECTED", version: 2 },
+        { status: "REJECTED", version: 2 },
+        { status: "REJECTED", version: 2 },
+      ]),
+    );
+    expect(storageMocks.deletePrivateObject).toHaveBeenCalledTimes(4);
+    for (const objectKey of [...identityKeys, ...bankQrKeys]) {
+      expect(storageMocks.deletePrivateObject).toHaveBeenCalledWith(objectKey);
+    }
+    expect(audits).toHaveLength(4);
+    for (const audit of audits) {
+      expect(audit).toMatchObject({
+        companyId,
+        branchId: branchBId,
+        actorUserId: gm.userId,
+        requestId: metadata.requestId,
+        ipAddress: metadata.ipAddress,
+        userAgent: metadata.userAgent,
+        before: { branchId: branchBId, status: "PENDING_UPLOAD", version: 1 },
+        after: {
+          branchId: branchBId,
+          status: "REJECTED",
+          version: 2,
+          rejectionReason: "Được thay thế bởi yêu cầu tải ảnh mới.",
+        },
+      });
+      expect(audit.reason).toBe(
+        audit.action === "staff.identity-document.reject"
+          ? "SYSTEM:STAFF_IDENTITY_DOCUMENT_UPLOAD_REPLACED"
+          : "SYSTEM:STAFF_BANK_QR_UPLOAD_REPLACED",
+      );
+    }
   });
 
   it("manager cơ sở A không được xem QR nhân viên cơ sở B", async () => {

@@ -12,7 +12,8 @@ Tạo hai environment độc lập `staging` và `production`. Mỗi environment
 | `Storage Bucket` | Private       | Railway Bucket, S3-compatible              |
 
 Không gắn public domain cho worker, PostgreSQL hoặc bucket. Railway Bucket là private
-theo mặc định; ứng dụng chỉ phát signed URL sau authorization.
+theo mặc định. Browser upload ảnh qua API web cùng origin; web ghi server-side vào bucket.
+Ứng dụng chỉ phát signed URL ngắn hạn cho thao tác xem sau authorization.
 
 ## Thiết lập service
 
@@ -60,6 +61,11 @@ S3_FORCE_PATH_STYLE=false
 Use the values shown on the bucket's **Credentials** tab as the source of truth. New Railway
 buckets use virtual-hosted-style S3 addressing, so keep `S3_FORCE_PATH_STYLE=false`; do not copy
 the local MinIO value from `.env.example`.
+
+Không cần cấu hình CORS cho browser trên Railway Bucket đối với ảnh CCCD, QR ngân hàng
+hoặc evidence: các luồng này PUT vào `/api/.../upload` cùng origin. Nếu upload trả 503,
+kiểm tra đủ năm biến endpoint/bucket/region/access key/secret key trên chính service `web`;
+không map các biến Bucket vào PostgreSQL.
 
 `BETTER_AUTH_URL`, `NEXT_PUBLIC_APP_URL` và `TRUSTED_ORIGINS` phải là HTTPS domain chính
 xác định trước khi deploy production. Mỗi environment dùng auth secret, metrics token và

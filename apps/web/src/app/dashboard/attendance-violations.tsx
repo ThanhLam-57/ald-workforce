@@ -15,10 +15,55 @@ type ApiPayload = Readonly<{
   error?: Readonly<{ message?: unknown }>;
 }>;
 
-function errorMessage(payload: ApiPayload): string {
-  return typeof payload.error?.message === "string"
-    ? payload.error.message
-    : "Không thể xử lý vi phạm.";
+type EvidencePresignData = Readonly<{
+  evidence: Readonly<{ id: string; version: number }>;
+  upload: Readonly<{
+    url: string;
+    headers: Readonly<Record<string, string>>;
+  }>;
+}>;
+
+const EVIDENCE_MAX_SIZE_BYTES = 10 * 1024 * 1024;
+const EVIDENCE_UPLOAD_TIMEOUT_MS = 120_000;
+const EVIDENCE_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+
+async function apiPayload(response: Response): Promise<ApiPayload> {
+  const body = await response.text();
+  if (!body.trim()) return {};
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null ? (parsed as ApiPayload) : {};
+  } catch {
+    return {};
+  }
+}
+
+function responseErrorMessage(response: Response, payload: ApiPayload, fallback: string): string {
+  const message = payload.error?.message;
+  return typeof message === "string" && message.trim()
+    ? message.trim()
+    : `${fallback} (HTTP ${response.status}).`;
+}
+
+function validEvidencePresignData(value: unknown): value is EvidencePresignData {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    evidence?: { id?: unknown; version?: unknown };
+    upload?: { url?: unknown; headers?: unknown };
+  };
+  return (
+    typeof candidate.evidence?.id === "string" &&
+    typeof candidate.evidence.version === "number" &&
+    typeof candidate.upload?.url === "string" &&
+    typeof candidate.upload.headers === "object" &&
+    candidate.upload.headers !== null
+  );
+}
+
+function isReadyEvidence(value: unknown): boolean {
+  return (
+    typeof value === "object" && value !== null && "status" in value && value.status === "READY"
+  );
 }
 
 function money(value: string): string {
@@ -47,20 +92,59 @@ async function sha256Base64(file: File): Promise<string> {
   return btoa(binary);
 }
 
+function assertSameOriginEvidenceUploadUrl(url: string): void {
+  if (url.startsWith("/api/evidence/") && !url.startsWith("//")) return;
+  throw new Error("API không trả về đường dẫn tải evidence nội bộ hợp lệ.");
+}
+
+async function putEvidence(url: string, headers: Readonly<Record<string, string>>, file: File) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EVIDENCE_UPLOAD_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      method: "PUT",
+      cache: "no-store",
+      headers,
+      body: file,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (typeof error === "object" && error !== null && "name" in error && error.name === "AbortError")
+  );
+}
+
 function EvidenceThumbnail({ evidenceId, name }: Readonly<{ evidenceId: string; name: string }>) {
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
 
   async function load() {
-    const response = await fetch(`/api/evidence/${evidenceId}/view`, {
-      cache: "no-store",
-    });
-    const payload = (await response.json()) as ApiPayload;
-    if (!response.ok) {
+    try {
+      const response = await fetch(`/api/evidence/${encodeURIComponent(evidenceId)}/view`, {
+        cache: "no-store",
+      });
+      const payload = await apiPayload(response);
+      const data = payload.data;
+      if (
+        !response.ok ||
+        typeof data !== "object" ||
+        data === null ||
+        !("url" in data) ||
+        typeof data.url !== "string"
+      ) {
+        setError(true);
+        return;
+      }
+      setUrl(data.url);
+    } catch {
       setError(true);
-      return;
     }
-    setUrl((payload.data as { url: string }).url);
   }
 
   return url ? (
@@ -144,17 +228,22 @@ export function AttendanceViolations({
       setPreview(null);
       return;
     }
-    const response = await fetch(
-      `/api/violations/preview?attendanceId=${encodeURIComponent(attendanceId)}&penaltyItemId=${encodeURIComponent(penaltyItemId)}`,
-      { cache: "no-store" },
-    );
-    const payload = (await response.json()) as ApiPayload;
-    if (!response.ok) {
+    try {
+      const response = await fetch(
+        `/api/violations/preview?attendanceId=${encodeURIComponent(attendanceId)}&penaltyItemId=${encodeURIComponent(penaltyItemId)}`,
+        { cache: "no-store" },
+      );
+      const payload = await apiPayload(response);
+      if (!response.ok) {
+        setPreview(null);
+        setMessage(responseErrorMessage(response, payload, "Không thể tính trước mức phạt"));
+        return;
+      }
+      setPreview(payload.data as ViolationPreviewDto);
+    } catch {
       setPreview(null);
-      setMessage(errorMessage(payload));
-      return;
+      setMessage("Không thể kết nối máy chủ để tính trước mức phạt. Hãy thử lại.");
     }
-    setPreview(payload.data as ViolationPreviewDto);
   }
 
   async function openEditor() {
@@ -163,27 +252,32 @@ export function AttendanceViolations({
       return;
     }
     setPending(true);
-    const response = await fetch(
-      `/api/rules/penalty/active?date=${encodeURIComponent(businessDate)}`,
-      { cache: "no-store" },
-    );
-    const payload = (await response.json()) as ApiPayload;
-    setPending(false);
-    if (!response.ok) {
-      setMessage(errorMessage(payload));
-      return;
+    try {
+      const response = await fetch(
+        `/api/rules/penalty/active?date=${encodeURIComponent(businessDate)}`,
+        { cache: "no-store" },
+      );
+      const payload = await apiPayload(response);
+      if (!response.ok) {
+        setMessage(responseErrorMessage(response, payload, "Không thể tải danh sách loại lỗi"));
+        return;
+      }
+      const versions = payload.data as readonly PenaltyRuleVersionDto[];
+      const activeItems = versions.flatMap((version) =>
+        version.items.filter((item) => item.isActive && isManualPenaltyItem(item)),
+      );
+      setItems(activeItems);
+      const first = activeItems[0];
+      setSelectedItemId(first?.id ?? "");
+      setDetail(first?.description ?? "");
+      setEditing(true);
+      if (first) void loadPreview(first.id);
+      setMessage(activeItems.length === 0 ? "Không có loại lỗi hiệu lực ngày này." : null);
+    } catch {
+      setMessage("Không thể kết nối máy chủ để tải danh sách loại lỗi. Hãy thử lại.");
+    } finally {
+      setPending(false);
     }
-    const versions = payload.data as readonly PenaltyRuleVersionDto[];
-    const activeItems = versions.flatMap((version) =>
-      version.items.filter((item) => item.isActive && isManualPenaltyItem(item)),
-    );
-    setItems(activeItems);
-    const first = activeItems[0];
-    setSelectedItemId(first?.id ?? "");
-    setDetail(first?.description ?? "");
-    setEditing(true);
-    if (first) void loadPreview(first.id);
-    setMessage(activeItems.length === 0 ? "Không có loại lỗi hiệu lực ngày này." : null);
   }
 
   function selectItem(id: string) {
@@ -199,52 +293,70 @@ export function AttendanceViolations({
     event.preventDefault();
     if (!attendanceId || !selectedItemId) return;
     setPending(true);
-    const response = await fetch("/api/violations", {
-      method: "POST",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        attendanceId,
-        penaltyItemId: selectedItemId,
-        detail,
-        note: note || null,
-        amountOverride: amountOverride || null,
-        overrideReason: overrideReason || null,
-      }),
-    });
-    const payload = (await response.json()) as ApiPayload;
-    setPending(false);
-    if (!response.ok) {
-      setMessage(errorMessage(payload));
-      return;
+    try {
+      const response = await fetch("/api/violations", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attendanceId,
+          penaltyItemId: selectedItemId,
+          detail,
+          note: note || null,
+          amountOverride: amountOverride || null,
+          overrideReason: overrideReason || null,
+        }),
+      });
+      const payload = await apiPayload(response);
+      if (!response.ok) {
+        setMessage(responseErrorMessage(response, payload, "Không thể thêm lỗi"));
+        return;
+      }
+      resetViolationForm();
+      setMessage("Đã thêm lỗi và snapshot mức phạt.");
+      onChanged();
+    } catch {
+      setMessage("Không thể kết nối máy chủ để thêm lỗi. Hãy thử lại.");
+    } finally {
+      setPending(false);
     }
-    resetViolationForm();
-    setMessage("Đã thêm lỗi và snapshot mức phạt.");
-    onChanged();
   }
 
   async function cancel(violation: ViolationDto) {
     setPending(true);
-    const response = await fetch(`/api/violations/${violation.id}`, {
-      method: "DELETE",
-      cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version: violation.version }),
-    });
-    const payload = (await response.json()) as ApiPayload;
-    setPending(false);
-    if (!response.ok) {
-      setMessage(errorMessage(payload));
-      return;
+    try {
+      const response = await fetch(`/api/violations/${violation.id}`, {
+        method: "DELETE",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ version: violation.version }),
+      });
+      const payload = await apiPayload(response);
+      if (!response.ok) {
+        setMessage(responseErrorMessage(response, payload, "Không thể hủy lỗi"));
+        return;
+      }
+      setMessage("Đã hủy lỗi; record và snapshot vẫn được giữ.");
+      onChanged();
+    } catch {
+      setMessage("Không thể kết nối máy chủ để hủy lỗi. Hãy thử lại.");
+    } finally {
+      setPending(false);
     }
-    setMessage("Đã hủy lỗi; record và snapshot vẫn được giữ.");
-    onChanged();
   }
 
   async function uploadEvidence(violation: ViolationDto, event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
+    if (!(EVIDENCE_MIME_TYPES as readonly string[]).includes(file.type)) {
+      setMessage("Chỉ chấp nhận evidence JPEG, PNG hoặc WebP.");
+      return;
+    }
+    if (file.size < 1 || file.size > EVIDENCE_MAX_SIZE_BYTES) {
+      setMessage("Mỗi ảnh evidence phải có dung lượng từ 1 byte đến 10 MB.");
+      return;
+    }
     setPending(true);
     try {
       const checksumSha256 = await sha256Base64(file);
@@ -260,37 +372,42 @@ export function AttendanceViolations({
           checksumSha256,
         }),
       });
-      const presignPayload = (await presignResponse.json()) as ApiPayload;
-      if (!presignResponse.ok) throw new Error(errorMessage(presignPayload));
-      const result = presignPayload.data as {
-        evidence: { id: string; version: number };
-        upload: {
-          url: string;
-          headers: Readonly<Record<string, string>>;
-        };
-      };
-
-      const uploadResponse = await fetch(result.upload.url, {
-        method: "PUT",
-        headers: result.upload.headers,
-        body: file,
-      });
-      if (!uploadResponse.ok) {
-        throw new Error(`Object storage từ chối upload (${uploadResponse.status}).`);
+      const presignPayload = await apiPayload(presignResponse);
+      if (!presignResponse.ok) {
+        throw new Error(
+          responseErrorMessage(
+            presignResponse,
+            presignPayload,
+            "Không thể chuẩn bị upload evidence",
+          ),
+        );
       }
+      if (!validEvidencePresignData(presignPayload.data)) {
+        throw new Error("Phản hồi chuẩn bị upload evidence không hợp lệ. Hãy thử lại.");
+      }
+      const result = presignPayload.data;
+      assertSameOriginEvidenceUploadUrl(result.upload.url);
 
-      const completeResponse = await fetch(`/api/evidence/${result.evidence.id}/complete`, {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ version: result.evidence.version }),
-      });
-      const completePayload = (await completeResponse.json()) as ApiPayload;
-      if (!completeResponse.ok) throw new Error(errorMessage(completePayload));
+      const uploadResponse = await putEvidence(result.upload.url, result.upload.headers, file);
+      const uploadPayload = await apiPayload(uploadResponse);
+      if (!uploadResponse.ok) {
+        throw new Error(
+          responseErrorMessage(uploadResponse, uploadPayload, "Không thể upload evidence"),
+        );
+      }
+      if (!isReadyEvidence(uploadPayload.data)) {
+        throw new Error("Phản hồi upload evidence không hợp lệ. Hãy thử lại.");
+      }
       setMessage("Đã upload và xác minh checksum evidence.");
       onChanged();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Không thể upload evidence.");
+      setMessage(
+        isAbortError(error)
+          ? `Máy chủ không phản hồi sau ${EVIDENCE_UPLOAD_TIMEOUT_MS / 1_000} giây. Hãy thử lại.`
+          : error instanceof Error
+            ? error.message
+            : "Không thể upload evidence.",
+      );
     } finally {
       setPending(false);
     }

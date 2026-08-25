@@ -42,8 +42,10 @@ khi nghi ngờ lộ. Không đặt secret thật trong `.env.example`, CI log ho
 
 ## Upload, download và export
 
-- Bucket private; presigned PUT/GET ngắn hạn chỉ tạo sau authorization.
-- Upload kiểm tra allow-list MIME, kích thước, checksum và xác minh object bằng HEAD.
+- Bucket private. Upload ảnh đi qua API cùng origin và được authorize lại theo company/branch;
+  presigned GET ngắn hạn chỉ tạo khi người dùng có quyền xem.
+- Upload giới hạn stream độc lập với `Content-Length`, kiểm tra allow-list MIME, chữ ký file,
+  kích thước, checksum và xác minh object bằng HEAD trước khi chuyển sang `READY`.
 - Audit sensitive download cho payroll/evidence.
 - CSV/XLSX chống formula injection với các giá trị bắt đầu `=`, `+`, `-`, `@`.
 - Tên file/object key do server tạo; không dùng path do client truyền.

@@ -22,10 +22,12 @@ import {
 } from "./penalty-rule-service";
 import { applySimplePenaltyRules } from "./simple-rule-service";
 import {
+  cancelViolation,
   completeEvidenceUpload,
   createViolation,
   getEvidenceView,
   presignEvidenceUpload,
+  uploadEvidenceObject,
 } from "./violation-service";
 
 const runId = randomUUID().slice(0, 8);
@@ -34,6 +36,18 @@ const metadata = {
   ipAddress: "127.0.0.1",
   userAgent: "vitest",
 } as const;
+
+function evidenceUploadRequest(
+  bytes: Uint8Array,
+  headers: Readonly<Record<string, string>>,
+): Request {
+  return new Request("http://localhost/api/evidence/upload", {
+    method: "PUT",
+    headers,
+    body: bytes,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+}
 
 let companyId: string;
 let branchAId: string;
@@ -640,23 +654,11 @@ describe("evidence authorization", () => {
       },
       metadata,
     );
-    const upload = await fetch(presigned.upload.url, {
-      method: "PUT",
-      headers: presigned.upload.headers,
-      body: bytes,
-    });
-    const uploadError = upload.ok ? "" : await upload.text();
-    expect(
-      upload.ok,
-      `MinIO PUT failed (${upload.status}, signed=${new URL(presigned.upload.url).searchParams.get(
-        "X-Amz-SignedHeaders",
-      )}): ${uploadError}`,
-    ).toBe(true);
-
-    const ready = await completeEvidenceUpload(
+    expect(presigned.upload.url).toBe(`/api/evidence/${presigned.evidence.id}/upload`);
+    const ready = await uploadEvidenceObject(
       gm,
       presigned.evidence.id,
-      { version: presigned.evidence.version },
+      evidenceUploadRequest(bytes, presigned.upload.headers),
       metadata,
     );
     expect(ready.status).toBe("READY");
@@ -670,6 +672,84 @@ describe("evidence authorization", () => {
     expect(report.violations[0]?.evidence[0]?.fileName).toBe("evidence.png");
     expect(report.violations[0]?.evidence[0]?.url).toContain("X-Amz-Signature");
     expect(JSON.stringify(report)).not.toContain("revenue");
+  });
+
+  it("khi tạo lượt mới chỉ reject PENDING và không xóa metadata READY", async () => {
+    const ready = await prisma.evidenceObject.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        violationId: oldViolationId,
+        objectKey: `tests/${runId}/${randomUUID()}-ready.png`,
+        originalFileName: "ready.png",
+        mimeType: "image/png",
+        sizeBytes: 8n,
+        checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        status: "READY",
+        createdByUserId: gm.userId,
+        uploadedAt: new Date(),
+        verifiedAt: new Date(),
+      },
+    });
+    const pending = await prisma.evidenceObject.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        violationId: oldViolationId,
+        objectKey: `tests/${runId}/${randomUUID()}-pending.png`,
+        originalFileName: "pending.png",
+        mimeType: "image/png",
+        sizeBytes: 8n,
+        checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        createdByUserId: gm.userId,
+      },
+    });
+
+    const replacement = await presignEvidenceUpload(
+      gm,
+      {
+        violationId: oldViolationId,
+        originalFileName: "replacement.png",
+        mimeType: "image/png",
+        sizeBytes: 8,
+        checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      },
+      metadata,
+    );
+
+    await expect(
+      prisma.evidenceObject.findUniqueOrThrow({ where: { id: ready.id } }),
+    ).resolves.toMatchObject({ status: "READY", version: ready.version });
+    await expect(
+      prisma.evidenceObject.findUniqueOrThrow({ where: { id: pending.id } }),
+    ).resolves.toMatchObject({
+      status: "REJECTED",
+      version: pending.version + 1,
+      rejectionReason: "Được thay thế bởi yêu cầu tải evidence mới.",
+    });
+    await expect(
+      prisma.evidenceObject.findUniqueOrThrow({ where: { id: replacement.evidence.id } }),
+    ).resolves.toMatchObject({ status: "PENDING_UPLOAD" });
+    await expect(
+      prisma.auditLog.count({
+        where: {
+          companyId,
+          entityType: "EvidenceObject",
+          entityId: pending.id,
+          action: "evidence.reject",
+        },
+      }),
+    ).resolves.toBe(1);
+    await expect(
+      prisma.auditLog.count({
+        where: {
+          companyId,
+          entityType: "EvidenceObject",
+          entityId: ready.id,
+          action: "evidence.reject",
+        },
+      }),
+    ).resolves.toBe(0);
   });
 
   it("không tạo signed GET cho manager khác branch", async () => {
@@ -696,5 +776,143 @@ describe("evidence authorization", () => {
     await expect(getEvidenceView(managerB, evidence.id)).rejects.toMatchObject({
       code: "NOT_FOUND",
     });
+  });
+
+  it("không cho manager khác branch upload vào evidence dù biết ID", async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const presigned = await presignEvidenceUpload(
+      gm,
+      {
+        violationId: oldViolationId,
+        originalFileName: "cross-branch.png",
+        mimeType: "image/png",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+      },
+      metadata,
+    );
+
+    await expect(
+      uploadEvidenceObject(
+        managerB,
+        presigned.evidence.id,
+        evidenceUploadRequest(bytes, presigned.upload.headers),
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      prisma.evidenceObject.findUniqueOrThrow({ where: { id: presigned.evidence.id } }),
+    ).resolves.toMatchObject({ status: "PENDING_UPLOAD", version: presigned.evidence.version });
+  });
+
+  it("reject metadata PENDING khi HEAD không tìm thấy object", async () => {
+    const presigned = await presignEvidenceUpload(
+      gm,
+      {
+        violationId: oldViolationId,
+        originalFileName: "missing-object.png",
+        mimeType: "image/png",
+        sizeBytes: 8,
+        checksumSha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      },
+      metadata,
+    );
+
+    await expect(
+      completeEvidenceUpload(
+        gm,
+        presigned.evidence.id,
+        { version: presigned.evidence.version },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(
+      prisma.evidenceObject.findUniqueOrThrow({ where: { id: presigned.evidence.id } }),
+    ).resolves.toMatchObject({
+      status: "REJECTED",
+      version: presigned.evidence.version + 1,
+      rejectionReason: "Object evidence không tồn tại hoặc metadata file không khớp yêu cầu.",
+    });
+  });
+
+  it("không upload evidence mới sau khi violation đã bị hủy", async () => {
+    const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const presigned = await presignEvidenceUpload(
+      gm,
+      {
+        violationId: oldViolationId,
+        originalFileName: "cancelled-violation.png",
+        mimeType: "image/png",
+        sizeBytes: bytes.byteLength,
+        checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+      },
+      metadata,
+    );
+    const violation = await prisma.violation.findUniqueOrThrow({ where: { id: oldViolationId } });
+    const cancelled = await cancelViolation(
+      gm,
+      violation.id,
+      { version: violation.version },
+      metadata,
+    );
+    expect(
+      cancelled.evidence.find((evidence) => evidence.id === presigned.evidence.id),
+    ).toMatchObject({
+      status: "REJECTED",
+      version: presigned.evidence.version + 1,
+    });
+
+    await expect(
+      uploadEvidenceObject(
+        gm,
+        presigned.evidence.id,
+        evidenceUploadRequest(bytes, presigned.upload.headers),
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(
+      prisma.evidenceObject.findUniqueOrThrow({ where: { id: presigned.evidence.id } }),
+    ).resolves.toMatchObject({
+      status: "REJECTED",
+      version: presigned.evidence.version + 1,
+      rejectionReason: "Vi phạm đã bị hủy trước khi evidence hoàn tất.",
+    });
+
+    const latePending = await prisma.evidenceObject.create({
+      data: {
+        companyId,
+        branchId: branchAId,
+        violationId: oldViolationId,
+        objectKey: `tests/${runId}/${randomUUID()}-late.png`,
+        originalFileName: "late.png",
+        mimeType: "image/png",
+        sizeBytes: BigInt(bytes.byteLength),
+        checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+        createdByUserId: gm.userId,
+      },
+    });
+    const idempotent = await cancelViolation(
+      gm,
+      violation.id,
+      { version: cancelled.version },
+      metadata,
+    );
+    expect(idempotent.evidence.find((evidence) => evidence.id === latePending.id)).toMatchObject({
+      status: "REJECTED",
+      version: latePending.version + 1,
+    });
+    await expect(
+      presignEvidenceUpload(
+        gm,
+        {
+          violationId: oldViolationId,
+          originalFileName: "after-cancel.png",
+          mimeType: "image/png",
+          sizeBytes: bytes.byteLength,
+          checksumSha256: createHash("sha256").update(bytes).digest("base64"),
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

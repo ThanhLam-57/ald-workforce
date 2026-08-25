@@ -50,7 +50,9 @@
 ## ADR-004 — Private S3-compatible object storage
 
 - Trạng thái: Accepted
-- Quyết định: AWS SDK contract, MinIO local, private bucket và signed URL sau authorize.
+- Quyết định: AWS SDK contract, MinIO local và private bucket. Upload ảnh từ UI đi qua
+  API cùng origin; API authorize lại, kiểm tra MIME/kích thước/checksum rồi mới ghi vào
+  bucket. Download/view vẫn dùng signed URL ngắn hạn sau authorize.
 - Lý do: không đưa evidence/file lớn vào database và tránh public object URL.
 
 ## ADR-005 — Tiền BIGINT và công thức domain thuần
@@ -90,13 +92,19 @@
 - Lý do: lưu thủ công giúp người nhập kiểm tra nhiều dòng trước khi ghi; optimistic concurrency
   vẫn ngăn last-write-wins làm mất dữ liệu khi có nhiều người cùng thao tác.
 
-## ADR-010 — Evidence private S3 và presigned URL ngắn hạn
+## ADR-010 — Evidence private S3 và upload qua API cùng origin
 
 - Trạng thái: Accepted
 - Production dependency mới: `@aws-sdk/client-s3` và `@aws-sdk/s3-request-presigner`.
-- Quyết định: database chỉ lưu private object key và metadata; browser upload bằng presigned PUT 5 phút, view bằng presigned GET 60 giây sau khi server authorize lại.
-- Quyết định: allow-list JPEG/PNG/WebP, giới hạn 10 MiB, ký Content-Type + SHA-256 checksum + checksum metadata và HEAD verify size/type/checksum trước trạng thái READY.
-- Lý do: SDK chính thức hỗ trợ S3/MinIO path-style, không đưa file qua Next.js process, không tạo public URL và cho phép kiểm tra toàn vẹn trước khi evidence được sử dụng.
+- Quyết định: database chỉ lưu private object key và metadata. Browser PUT ảnh vào API
+  cùng origin; API authorize lại violation/branch, giới hạn và đọc stream, kiểm tra
+  JPEG/PNG/WebP, chữ ký file, kích thước và SHA-256 rồi ghi server-side vào bucket.
+  View dùng presigned GET 60 giây sau khi server authorize lại.
+- Quyết định: file tối đa 10 MiB; trạng thái chỉ chuyển `READY` sau HEAD verify
+  size/type/checksum. Lượt upload cũ vẫn được giữ bằng status, không hard-delete.
+- Lý do: Railway Bucket không cung cấp một cấu hình CORS ổn định cho PUT trực tiếp từ
+  browser. Proxy cùng origin tránh lỗi CORS/checksum giữa các S3-compatible provider,
+  giữ bucket private và vẫn kiểm tra toàn vẹn trước khi evidence được sử dụng.
 
 ## ADR-011 — Penalty version bất biến và violation snapshot
 
@@ -251,9 +259,9 @@
 - Rule tự động chỉ lưu nguồn ngưỡng và phút du di. Khi dùng `STAFF_SHIFT`, service
   resolve ca theo nhân viên/branch/ngày rồi snapshot ca vào violation; thiếu ca thì
   không phạt và trả cảnh báo có cấu trúc.
-- Hai mặt CCCD dùng bảng riêng, private object storage và signed URL ngắn hạn sau
-  authorization. DTO không trả `objectKey`, checksum hoặc URL lâu dài; lượt xem
-  được ghi audit.
+- Hai mặt CCCD dùng bảng riêng và private object storage. Upload đi qua API cùng origin;
+  signed GET ngắn hạn chỉ được cấp sau authorization. DTO không trả `objectKey`, checksum
+  hoặc URL lâu dài; lượt xem được ghi audit.
 - Không tạo tài khoản đăng nhập khi manager onboard nhân viên và không thêm
   production dependency.
 

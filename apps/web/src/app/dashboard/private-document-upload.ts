@@ -1,19 +1,17 @@
-export const PRIVATE_DOCUMENT_UPLOAD_TIMEOUT_MS = 30_000;
+export const PRIVATE_DOCUMENT_UPLOAD_TIMEOUT_MS = 120_000;
 export const PRIVATE_DOCUMENT_MAX_SIZE_BYTES = 8 * 1024 * 1024;
-export const PRIVATE_DOCUMENT_MIME_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-] as const;
+export const PRIVATE_DOCUMENT_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 
-export type StaffPrivateDocumentKind =
-  | "CITIZEN_ID_FRONT"
-  | "CITIZEN_ID_BACK"
-  | "BANK_QR";
+export type StaffPrivateDocumentKind = "CITIZEN_ID_FRONT" | "CITIZEN_ID_BACK" | "BANK_QR";
 
 type ApiEnvelope<T> = Readonly<{
   data?: T;
   error?: Readonly<{ message?: unknown }>;
+}>;
+
+type PrivateDocumentPresignData = Readonly<{
+  document: Readonly<{ id: string; version: number }>;
+  upload: Readonly<{ url: string; headers: Readonly<Record<string, string>> }>;
 }>;
 
 type UploadPrivateDocumentInput = Readonly<{
@@ -55,7 +53,62 @@ export async function checksumSha256(file: File): Promise<string> {
 }
 
 function apiMessage(payload: ApiEnvelope<unknown>, fallback: string): string {
-  return typeof payload.error?.message === "string" ? payload.error.message : fallback;
+  const message = payload.error?.message;
+  return typeof message === "string" && message.trim() ? message.trim() : fallback;
+}
+
+async function apiEnvelope<T>(response: Response): Promise<ApiEnvelope<T>> {
+  const body = await response.text();
+  if (!body.trim()) return {};
+
+  try {
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null ? (parsed as ApiEnvelope<T>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function responseMessage(
+  response: Response,
+  payload: ApiEnvelope<unknown>,
+  fallback: string,
+): string {
+  return apiMessage(payload, `${fallback} (HTTP ${response.status}).`);
+}
+
+function validPresignData(data: unknown): data is PrivateDocumentPresignData {
+  if (typeof data !== "object" || data === null) return false;
+  const value = data as {
+    document?: { id?: unknown; version?: unknown };
+    upload?: { url?: unknown; headers?: unknown };
+  };
+  return (
+    typeof value.document?.id === "string" &&
+    typeof value.document.version === "number" &&
+    typeof value.upload?.url === "string" &&
+    typeof value.upload.headers === "object" &&
+    value.upload.headers !== null
+  );
+}
+
+function assertSameOriginUploadUrl(url: string): void {
+  if (url.startsWith("/") && !url.startsWith("//")) return;
+
+  const origin = globalThis.location?.origin;
+  if (!origin) {
+    throw new Error("API không trả về đường dẫn tải ảnh nội bộ hợp lệ.");
+  }
+
+  let uploadUrl: URL;
+  try {
+    uploadUrl = new URL(url, origin);
+  } catch {
+    throw new Error("API không trả về đường dẫn tải ảnh nội bộ hợp lệ.");
+  }
+  if (uploadUrl.origin !== origin) {
+    throw new Error("API trả về đường dẫn kho ảnh bên ngoài không còn được hỗ trợ.");
+  }
 }
 
 export async function uploadStaffPrivateDocument({
@@ -63,17 +116,19 @@ export async function uploadStaffPrivateDocument({
   kind,
   file,
   onPhase,
+  fetcher = fetch,
 }: Readonly<{
   staffId: string;
   kind: StaffPrivateDocumentKind;
   file: File;
   onPhase?: (phase: "PREPARING" | "UPLOADING" | "VERIFYING") => void;
+  fetcher?: typeof fetch;
 }>): Promise<void> {
   if (!(PRIVATE_DOCUMENT_MIME_TYPES as readonly string[]).includes(file.type)) {
     throw new Error("Chỉ chấp nhận ảnh JPEG, PNG hoặc WebP.");
   }
-  if (file.size > PRIVATE_DOCUMENT_MAX_SIZE_BYTES) {
-    throw new Error("Mỗi ảnh không được lớn hơn 8 MB.");
+  if (file.size < 1 || file.size > PRIVATE_DOCUMENT_MAX_SIZE_BYTES) {
+    throw new Error("Mỗi ảnh phải có dung lượng từ 1 byte đến 8 MB.");
   }
 
   onPhase?.("PREPARING");
@@ -83,24 +138,33 @@ export async function uploadStaffPrivateDocument({
   const presignPath = isBankQr
     ? `/api/staff/${encodedStaffId}/bank-qr/presign`
     : `/api/staff/${encodedStaffId}/identity-documents/presign`;
-  const presignResponse = await fetch(presignPath, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      ...(isBankQr ? {} : { side: kind }),
-      originalFileName: file.name,
-      mimeType: file.type,
-      sizeBytes: file.size,
-      checksumSha256: checksum,
-    }),
-  });
-  const presignPayload = (await presignResponse.json()) as ApiEnvelope<{
-    document: Readonly<{ id: string; version: number }>;
-    upload: Readonly<{ url: string; headers: Readonly<Record<string, string>> }>;
-  }>;
-  if (!presignResponse.ok || !presignPayload.data) {
-    throw new Error(apiMessage(presignPayload, "Không thể chuẩn bị tải ảnh."));
+  let presignResponse: Response;
+  try {
+    presignResponse = await fetcher(presignPath, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...(isBankQr ? {} : { side: kind }),
+        originalFileName: file.name,
+        mimeType: file.type,
+        sizeBytes: file.size,
+        checksumSha256: checksum,
+      }),
+    });
+  } catch (error) {
+    throw new Error("Không thể kết nối máy chủ để chuẩn bị tải ảnh. Hãy thử lại.", {
+      cause: error,
+    });
   }
+  const presignPayload = await apiEnvelope<PrivateDocumentPresignData>(presignResponse);
+  if (!presignResponse.ok) {
+    throw new Error(responseMessage(presignResponse, presignPayload, "Không thể chuẩn bị tải ảnh"));
+  }
+  if (!validPresignData(presignPayload.data)) {
+    throw new Error("Phản hồi chuẩn bị tải ảnh không hợp lệ. Hãy thử lại.");
+  }
+  assertSameOriginUploadUrl(presignPayload.data.upload.url);
 
   onPhase?.("UPLOADING");
   let uploadResponse: Response;
@@ -109,20 +173,22 @@ export async function uploadStaffPrivateDocument({
       url: presignPayload.data.upload.url,
       headers: presignPayload.data.upload.headers,
       body: file,
+      fetcher,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new Error(
-        `Kho ảnh không phản hồi sau ${PRIVATE_DOCUMENT_UPLOAD_TIMEOUT_MS / 1_000} giây.`,
+        `Máy chủ không phản hồi sau ${PRIVATE_DOCUMENT_UPLOAD_TIMEOUT_MS / 1_000} giây. Hãy thử lại.`,
         { cause: error },
       );
     }
-    throw new Error("Không thể kết nối kho ảnh. Hãy kiểm tra cấu hình lưu trữ.", {
+    throw new Error("Không thể tải ảnh lên máy chủ. Hãy kiểm tra kết nối và thử lại.", {
       cause: error,
     });
   }
   if (!uploadResponse.ok) {
-    throw new Error("Kho lưu trữ từ chối file ảnh.");
+    const uploadPayload = await apiEnvelope<unknown>(uploadResponse);
+    throw new Error(responseMessage(uploadResponse, uploadPayload, "Không thể tải file ảnh"));
   }
 
   onPhase?.("VERIFYING");
@@ -130,13 +196,26 @@ export async function uploadStaffPrivateDocument({
   const completePath = isBankQr
     ? `/api/staff/${encodedStaffId}/bank-qr/${documentId}/complete`
     : `/api/staff/${encodedStaffId}/identity-documents/${documentId}/complete`;
-  const completeResponse = await fetch(completePath, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ version: presignPayload.data.document.version }),
-  });
-  const completePayload = (await completeResponse.json()) as ApiEnvelope<unknown>;
+  let completeResponse: Response;
+  try {
+    completeResponse = await fetcher(completePath, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: presignPayload.data.document.version }),
+    });
+  } catch (error) {
+    throw new Error(
+      "Ảnh đã được tải nhưng máy chủ chưa thể xác minh. Hãy chọn lại file để thử lại.",
+      {
+        cause: error,
+      },
+    );
+  }
+  const completePayload = await apiEnvelope<unknown>(completeResponse);
   if (!completeResponse.ok) {
-    throw new Error(apiMessage(completePayload, "Không thể xác minh ảnh đã tải."));
+    throw new Error(
+      responseMessage(completeResponse, completePayload, "Không thể xác minh ảnh đã tải"),
+    );
   }
 }

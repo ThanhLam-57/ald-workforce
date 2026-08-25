@@ -9,12 +9,16 @@ import { prisma, type Prisma } from "@ald/db";
 import { DomainError, requirePermission, type ActorContext } from "@ald/domain";
 
 import { appendSecureAudit, systemAuditReason } from "./audit-service";
-import {
-  createEvidenceViewUrl,
-  createPrivateUploadUrl,
-  verifyPrivateObject,
-} from "./object-storage";
+import { createEvidenceViewUrl, verifyPrivateObject } from "./object-storage";
 import type { RequestMetadata } from "./request-metadata";
+import {
+  cleanupRejectedPrivateObjects,
+  isPrivateDocumentContentFailure,
+  privateDocumentStorageUnavailable,
+  STAFF_PRIVATE_DOCUMENT_UPLOAD_TTL_MS,
+  storeStaffPrivateDocumentUpload,
+} from "./staff-private-document-upload";
+import { STAFF_PRIVATE_DOCUMENT_VERSION_HEADER } from "./staff-private-document-upload-body";
 import { authorizeBranchStaff } from "./staff-onboarding-service";
 import { toBusinessDate } from "./business-date";
 
@@ -30,11 +34,23 @@ const bankQrSelect = {
   checksumSha256: true,
   status: true,
   version: true,
+  createdAt: true,
   uploadedAt: true,
   verifiedAt: true,
 } satisfies Prisma.StaffBankQrDocumentSelect;
 
 type BankQrRecord = Prisma.StaffBankQrDocumentGetPayload<{ select: typeof bankQrSelect }>;
+
+type RejectedPendingBankQr = Readonly<{
+  id: string;
+  branchId: string;
+  objectKey: string;
+  version: number;
+}>;
+
+function auditJson(value: Record<string, unknown>): Prisma.InputJsonValue {
+  return value as Prisma.InputJsonValue;
+}
 
 function bankQrDto(document: BankQrRecord): StaffBankQrDocumentDto {
   return {
@@ -53,6 +69,58 @@ function extensionForMimeType(mimeType: StaffBankQrDocumentPresignInput["mimeTyp
   if (mimeType === "image/jpeg") return "jpg";
   if (mimeType === "image/png") return "png";
   return "webp";
+}
+
+async function rejectPendingBankQr(input: {
+  actor: ActorContext;
+  staffId: string;
+  document: BankQrRecord;
+  expectedVersion: number;
+  rejectionReason: string;
+  auditReason: string;
+  metadata: RequestMetadata;
+}): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const rejectedAt = new Date();
+    const result = await tx.staffBankQrDocument.updateMany({
+      where: {
+        id: input.document.id,
+        companyId: input.actor.companyId,
+        staffId: input.staffId,
+        status: "PENDING_UPLOAD",
+        version: input.expectedVersion,
+      },
+      data: {
+        status: "REJECTED",
+        rejectedAt,
+        rejectionReason: input.rejectionReason,
+        version: { increment: 1 },
+      },
+    });
+    if (result.count !== 1) return false;
+    await appendSecureAudit(
+      {
+        actor: input.actor,
+        branchId: input.document.branchId,
+        action: "staff.bank-qr.reject",
+        entityType: "StaffBankQrDocument",
+        entityId: input.document.id,
+        reason: input.auditReason,
+        before: {
+          status: "PENDING_UPLOAD",
+          version: input.expectedVersion,
+        },
+        after: {
+          status: "REJECTED",
+          version: input.expectedVersion + 1,
+          rejectionReason: input.rejectionReason,
+        },
+        metadata: input.metadata,
+      },
+      tx,
+    );
+    return true;
+  });
 }
 
 async function findScopedBankQr(
@@ -135,43 +203,143 @@ export async function presignStaffBankQr(
   const objectKey =
     `companies/${actor.companyId}/staff/${staffId}/bank-qr/` +
     `${randomUUID()}.${extensionForMimeType(input.mimeType)}`;
-  const upload = await createPrivateUploadUrl({
-    objectKey,
-    mimeType: input.mimeType,
-    sizeBytes: input.sizeBytes,
-    checksumSha256: input.checksumSha256,
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`
+      SELECT 1::integer
+      FROM pg_advisory_xact_lock(
+        hashtextextended(${`staff-bank-qr-upload:${actor.companyId}:${staffId}`}, 0)
+      )
+    `;
+    const rejectedAt = new Date();
+    const rejected = await tx.$queryRaw<RejectedPendingBankQr[]>`
+      UPDATE "staff_bank_qr_documents"
+      SET
+        "status" = 'REJECTED',
+        "rejectedAt" = ${rejectedAt},
+        "rejectionReason" = 'Được thay thế bởi yêu cầu tải ảnh mới.',
+        "version" = "version" + 1,
+        "updatedAt" = ${rejectedAt}
+      WHERE "companyId" = ${actor.companyId}::uuid
+        AND "staffId" = ${staffId}::uuid
+        AND "status" = 'PENDING_UPLOAD'
+      RETURNING "id", "branchId", "objectKey", "version"
+    `;
+    if (rejected.length > 0) {
+      await tx.auditLog.createMany({
+        data: rejected.map((previous) => ({
+          companyId: actor.companyId,
+          branchId: previous.branchId,
+          actorUserId: actor.userId,
+          action: "staff.bank-qr.reject",
+          entityType: "StaffBankQrDocument",
+          entityId: previous.id,
+          reason: systemAuditReason("STAFF_BANK_QR_UPLOAD_REPLACED"),
+          before: auditJson({
+            branchId: previous.branchId,
+            status: "PENDING_UPLOAD",
+            version: previous.version - 1,
+          }),
+          after: auditJson({
+            branchId: previous.branchId,
+            status: "REJECTED",
+            version: previous.version,
+            rejectionReason: "Được thay thế bởi yêu cầu tải ảnh mới.",
+          }),
+          requestId: metadata.requestId,
+          ipAddress: metadata.ipAddress,
+          userAgent: metadata.userAgent,
+        })),
+      });
+    }
+
+    const created = await tx.staffBankQrDocument.create({
+      data: {
+        companyId: actor.companyId,
+        branchId: scope.branchId,
+        staffId,
+        objectKey,
+        originalFileName: input.originalFileName,
+        mimeType: input.mimeType,
+        sizeBytes: BigInt(input.sizeBytes),
+        checksumSha256: input.checksumSha256,
+        createdByUserId: actor.userId,
+      },
+      select: bankQrSelect,
+    });
+    await appendSecureAudit(
+      {
+        actor,
+        branchId: scope.branchId,
+        action: "staff.bank-qr.presign",
+        entityType: "StaffBankQrDocument",
+        entityId: created.id,
+        reason: systemAuditReason("STAFF_BANK_QR_UPLOAD_STARTED"),
+        after: {
+          staffId,
+          originalFileName: created.originalFileName,
+          mimeType: created.mimeType,
+          sizeBytes: created.sizeBytes.toString(),
+          status: created.status,
+        },
+        metadata,
+      },
+      tx,
+    );
+    return {
+      document: created,
+      replacedObjectKeys: rejected.map((previous) => previous.objectKey),
+    };
   });
-  const document = await prisma.staffBankQrDocument.create({
-    data: {
-      companyId: actor.companyId,
-      branchId: scope.branchId,
-      staffId,
-      objectKey,
-      originalFileName: input.originalFileName,
-      mimeType: input.mimeType,
-      sizeBytes: BigInt(input.sizeBytes),
-      checksumSha256: input.checksumSha256,
-      createdByUserId: actor.userId,
-    },
-    select: bankQrSelect,
-  });
-  await appendSecureAudit({
-    actor,
-    branchId: scope.branchId,
-    action: "staff.bank-qr.presign",
-    entityType: "StaffBankQrDocument",
-    entityId: document.id,
-    reason: systemAuditReason("STAFF_BANK_QR_UPLOAD_STARTED"),
-    after: {
-      staffId,
-      originalFileName: document.originalFileName,
-      mimeType: document.mimeType,
-      sizeBytes: document.sizeBytes.toString(),
-      status: document.status,
-    },
+  await cleanupRejectedPrivateObjects({
+    objectKeys: result.replacedObjectKeys,
     metadata,
+    event: "staff.bank-qr.replaced_object_cleanup_failed",
   });
-  return { document: bankQrDto(document), upload };
+  const document = result.document;
+  const encodedStaffId = encodeURIComponent(staffId);
+  const encodedDocumentId = encodeURIComponent(document.id);
+  return {
+    document: bankQrDto(document),
+    upload: {
+      url: `/api/staff/${encodedStaffId}/bank-qr/${encodedDocumentId}/upload`,
+      expiresInSeconds: STAFF_PRIVATE_DOCUMENT_UPLOAD_TTL_MS / 1_000,
+      headers: {
+        "Content-Type": input.mimeType,
+        [STAFF_PRIVATE_DOCUMENT_VERSION_HEADER]: String(document.version),
+      },
+    },
+  };
+}
+
+export async function uploadStaffBankQr(
+  actor: ActorContext,
+  staffId: string,
+  documentId: string,
+  expectedVersion: number,
+  request: Request,
+  metadata: RequestMetadata,
+): Promise<StaffBankQrDocumentDto> {
+  requirePermission(actor, "staff-bank-qr:write");
+  const document = await findScopedBankQr(actor, staffId, documentId);
+  await storeStaffPrivateDocumentUpload({
+    document,
+    expectedVersion,
+    request,
+    metadata,
+    event: "staff.bank-qr.storage_upload_failed",
+  });
+  const current = await findScopedBankQr(actor, staffId, documentId);
+  if (current.status !== "PENDING_UPLOAD" || current.version !== expectedVersion) {
+    if (current.status === "REJECTED") {
+      await cleanupRejectedPrivateObjects({
+        objectKeys: [document.objectKey],
+        metadata,
+        event: "staff.bank-qr.rejected_upload_cleanup_failed",
+      });
+    }
+    throw new DomainError("CONFLICT", "Yêu cầu tải ảnh đã thay đổi. Vui lòng tải lại hồ sơ.");
+  }
+  return bankQrDto(current);
 }
 
 export async function completeStaffBankQr(
@@ -186,6 +354,28 @@ export async function completeStaffBankQr(
   if (document.status !== "PENDING_UPLOAD" || document.version !== input.version) {
     throw new DomainError("CONFLICT", "Yêu cầu tải ảnh đã thay đổi. Vui lòng tải lại hồ sơ.");
   }
+  if (Date.now() - document.createdAt.getTime() > STAFF_PRIVATE_DOCUMENT_UPLOAD_TTL_MS) {
+    const rejected = await rejectPendingBankQr({
+      actor,
+      staffId,
+      document,
+      expectedVersion: input.version,
+      rejectionReason: "Yêu cầu tải ảnh đã hết hạn.",
+      auditReason: systemAuditReason("STAFF_BANK_QR_UPLOAD_EXPIRED"),
+      metadata,
+    });
+    if (rejected) {
+      await cleanupRejectedPrivateObjects({
+        objectKeys: [document.objectKey],
+        metadata,
+        event: "staff.bank-qr.expired_object_cleanup_failed",
+      });
+    }
+    throw new DomainError(
+      "CONFLICT",
+      "Yêu cầu tải ảnh đã hết hạn. Vui lòng chọn lại file để tạo lượt tải mới.",
+    );
+  }
 
   try {
     await verifyPrivateObject({
@@ -194,33 +384,28 @@ export async function completeStaffBankQr(
       sizeBytes: Number(document.sizeBytes),
       checksumSha256: document.checksumSha256,
     });
-  } catch {
-    const rejected = await prisma.staffBankQrDocument.updateMany({
-      where: {
-        id: document.id,
-        companyId: actor.companyId,
-        staffId,
-        status: "PENDING_UPLOAD",
-        version: input.version,
-      },
-      data: {
-        status: "REJECTED",
-        rejectedAt: new Date(),
-        rejectionReason: "Metadata file tải lên không khớp yêu cầu đã ký.",
-        version: { increment: 1 },
-      },
+  } catch (cause) {
+    if (!isPrivateDocumentContentFailure(cause)) {
+      throw privateDocumentStorageUnavailable(cause, {
+        event: "staff.bank-qr.storage_verify_failed",
+        requestId: metadata.requestId,
+        documentId: document.id,
+      });
+    }
+    const rejected = await rejectPendingBankQr({
+      actor,
+      staffId,
+      document,
+      expectedVersion: input.version,
+      rejectionReason: "Metadata file tải lên không khớp yêu cầu đã ký.",
+      auditReason: systemAuditReason("STAFF_BANK_QR_UPLOAD_REJECTED"),
+      metadata,
     });
-    if (rejected.count === 1) {
-      await appendSecureAudit({
-        actor,
-        branchId: document.branchId,
-        action: "staff.bank-qr.reject",
-        entityType: "StaffBankQrDocument",
-        entityId: document.id,
-        reason: systemAuditReason("STAFF_BANK_QR_UPLOAD_REJECTED"),
-        before: { status: document.status, version: document.version },
-        after: { status: "REJECTED", reason: "Metadata file không khớp." },
+    if (rejected) {
+      await cleanupRejectedPrivateObjects({
+        objectKeys: [document.objectKey],
         metadata,
+        event: "staff.bank-qr.invalid_object_cleanup_failed",
       });
     }
     throw new DomainError(
