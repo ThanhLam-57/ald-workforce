@@ -1001,7 +1001,7 @@ export function StaffWorkspace({
       ) : null}
 
       <div className="overflow-auto rounded-2xl border border-slate-200 bg-white">
-        <table className="min-w-[1320px] text-sm">
+        <table className="min-w-[1560px] text-sm">
           <thead className="bg-slate-100 text-left">
             <tr>
               <th className="px-4 py-3">Mã nhân viên</th>
@@ -1011,6 +1011,8 @@ export function StaffWorkspace({
               <th className="px-4 py-3">ID TikTok</th>
               <th className="px-4 py-3">Số điện thoại</th>
               <th className="px-4 py-3">Cơ sở</th>
+              <th className="whitespace-nowrap px-4 py-3">Ngày thử việc</th>
+              <th className="whitespace-nowrap px-4 py-3">Ngày chính thức</th>
               <th className="px-4 py-3">Ca hiện hành</th>
               <th className="px-4 py-3">Trạng thái</th>
               <th className="px-4 py-3">Thao tác</th>
@@ -1029,6 +1031,12 @@ export function StaffWorkspace({
                 <td className="px-4 py-3">{person.phone ?? "—"}</td>
                 <td className="px-4 py-3">
                   {person.branch.code} — {person.branch.name}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3">
+                  {displayBusinessDate(person.joinedDate) ?? "—"}
+                </td>
+                <td className="whitespace-nowrap px-4 py-3">
+                  {displayBusinessDate(person.officialDate) ?? "—"}
                 </td>
                 <td className="px-4 py-3">
                   {person.currentSchedule
