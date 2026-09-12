@@ -12,6 +12,7 @@ describe("staffWorkspaceCapabilitiesFor", () => {
       canUploadPrivateDocuments: true,
       canViewPrivateDocuments: true,
       canTerminateStaff: true,
+      canRestoreStaff: true,
       canCorrectStartDate: true,
     });
   });
@@ -25,20 +26,22 @@ describe("staffWorkspaceCapabilitiesFor", () => {
       canUploadPrivateDocuments: true,
       canViewPrivateDocuments: true,
       canTerminateStaff: false,
+      canRestoreStaff: false,
       canCorrectStartDate: false,
     });
   });
 
   it("không cấp capability nếu vai trò nhân viên bị chuyển nhầm tới workspace", () => {
-    expect(Object.values(staffWorkspaceCapabilitiesFor("LIVE_EMPLOYEE"))).toEqual([
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-      false,
-    ]);
+    expect(staffWorkspaceCapabilitiesFor("LIVE_EMPLOYEE")).toEqual({
+      canViewSalary: false,
+      canEditSalary: false,
+      canEditAssignment: false,
+      canEditSchedule: false,
+      canUploadPrivateDocuments: false,
+      canViewPrivateDocuments: false,
+      canTerminateStaff: false,
+      canRestoreStaff: false,
+      canCorrectStartDate: false,
+    });
   });
 });

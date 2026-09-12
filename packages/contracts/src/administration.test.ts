@@ -11,6 +11,7 @@ import {
   staffCodePreviewQuerySchema,
   staffOnboardSchema,
   staffProfileUpdateSchema,
+  staffRestoreSchema,
   staffStartDateCorrectionSchema,
   staffUpdateSchema,
   staffWorkScheduleCreateSchema,
@@ -296,5 +297,24 @@ describe("employment milestone dates", () => {
         version: 1,
       }),
     ).toMatchObject({ staffCode: "live_new_01", version: 1 });
+  });
+
+  it("bắt buộc lý do và optimistic lock khi hoàn tác nghỉ việc", () => {
+    expect(
+      staffRestoreSchema.parse({
+        version: 2,
+        reason: "Thao tác cho nghỉ việc được thực hiện nhầm.",
+      }),
+    ).toEqual({
+      version: 2,
+      reason: "Thao tác cho nghỉ việc được thực hiện nhầm.",
+    });
+    expect(() => staffRestoreSchema.parse({ version: 2, reason: " " })).toThrow();
+    expect(() =>
+      staffRestoreSchema.parse({
+        version: 0,
+        reason: "Thao tác cho nghỉ việc được thực hiện nhầm.",
+      }),
+    ).toThrow();
   });
 });

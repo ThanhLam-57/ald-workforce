@@ -42,6 +42,9 @@ type UploadState = Readonly<{
   message: string;
 }>;
 type StaffCodePreviewStatus = "IDLE" | "LOADING" | "READY" | "ERROR";
+type StaffRestoreResponse = Readonly<
+  Pick<BranchStaffDto, "id" | "employmentStatus" | "terminationDate" | "version">
+>;
 
 function businessToday(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -210,6 +213,9 @@ export function StaffWorkspace({
   const [showTerminationDialog, setShowTerminationDialog] = useState(false);
   const [terminationDate, setTerminationDate] = useState("");
   const [terminationError, setTerminationError] = useState<string | null>(null);
+  const [showRestoreDialog, setShowRestoreDialog] = useState(false);
+  const [restoreReason, setRestoreReason] = useState("");
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [showStartDateDialog, setShowStartDateDialog] = useState(false);
   const [startDate, setStartDate] = useState("");
   const [startDateReason, setStartDateReason] = useState("");
@@ -225,6 +231,51 @@ export function StaffWorkspace({
     useState<StaffCodePreviewStatus>("IDLE");
   const [staffCodePreviewReloadKey, setStaffCodePreviewReloadKey] = useState(0);
   const staffCodePreviewRequestId = useRef(0);
+  const restoreDialogPanelRef = useRef<HTMLDivElement>(null);
+  const restoreTriggerRef = useRef<HTMLButtonElement>(null);
+  const profileCloseButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingRef = useRef(pending);
+
+  useEffect(() => {
+    pendingRef.current = pending;
+  }, [pending]);
+
+  useEffect(() => {
+    if (!showRestoreDialog) return;
+    const restoreTrigger = restoreTriggerRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !pendingRef.current) {
+        setShowRestoreDialog(false);
+        setRestoreReason("");
+        setRestoreError(null);
+        return;
+      }
+      if (event.key !== "Tab" || !restoreDialogPanelRef.current) return;
+      const focusable = Array.from(
+        restoreDialogPanelRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      restoreTrigger?.focus();
+    };
+  }, [showRestoreDialog]);
 
   useEffect(() => {
     if (!showCreate) {
@@ -428,6 +479,97 @@ export function StaffWorkspace({
     setShowTerminationDialog(false);
     setTerminationDate("");
     setTerminationError(null);
+  }
+
+  async function restoreSelected(): Promise<void> {
+    if (!selected || !capabilities.canRestoreStaff || selected.employmentStatus !== "TERMINATED") {
+      return;
+    }
+    if (!restoreReason.trim()) {
+      setRestoreError("Vui lòng nhập lý do hoàn tác nghỉ việc.");
+      return;
+    }
+
+    const targetId = selected.id;
+    const targetName = selected.fullName;
+    setPending(true);
+    setRestoreError(null);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/staff/${encodeURIComponent(targetId)}/restore`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          reason: restoreReason,
+          version: selected.version,
+        }),
+      });
+      const payload = (await response.json()) as ApiEnvelope<StaffRestoreResponse>;
+      if (!response.ok || !payload.data) {
+        const failureMessage = messageFrom(payload, "Không thể hoàn tác nghỉ việc.");
+        if (response.status === 409) {
+          try {
+            await reloadStaff(targetId, true);
+            setRestoreError(`${failureMessage} Dữ liệu mới nhất đã được tải lại.`);
+            return;
+          } catch {
+            // Giữ lỗi gốc của thao tác hoàn tác nếu việc tải lại cũng thất bại.
+          }
+        }
+        throw new Error(failureMessage);
+      }
+
+      const restored = payload.data;
+      setStaff((current) =>
+        current.map((person) =>
+          person.id === targetId
+            ? {
+                ...person,
+                employmentStatus: restored.employmentStatus,
+                terminationDate: restored.terminationDate,
+                version: restored.version,
+              }
+            : person,
+        ),
+      );
+      setEditForm((current) =>
+        current ? { ...current, employmentStatus: restored.employmentStatus } : current,
+      );
+      setShowRestoreDialog(false);
+      setRestoreReason("");
+      setRestoreError(null);
+      setStatusFilter("ALL");
+      setMessage(`Đã hoàn tác nghỉ việc cho ${targetName}.`);
+      try {
+        await reloadStaff(targetId, true);
+      } catch {
+        setError(
+          "Đã hoàn tác nghỉ việc, nhưng chưa tải lại được danh sách. Hãy tải lại trang trước khi thao tác tiếp.",
+        );
+      }
+      requestAnimationFrame(() => profileCloseButtonRef.current?.focus());
+    } catch (caught) {
+      setRestoreError(caught instanceof Error ? caught.message : "Không thể hoàn tác nghỉ việc.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function openRestoreDialog(): void {
+    if (!selected || !capabilities.canRestoreStaff || selected.employmentStatus !== "TERMINATED") {
+      return;
+    }
+    setRestoreReason("");
+    setRestoreError(null);
+    setShowRestoreDialog(true);
+  }
+
+  function closeRestoreDialog(): void {
+    if (pending) return;
+    setShowRestoreDialog(false);
+    setRestoreReason("");
+    setRestoreError(null);
   }
 
   async function loadScheduleHistory(staffId: string): Promise<void> {
@@ -799,14 +941,18 @@ export function StaffWorkspace({
     setEditing(false);
     setEditForm(profileForm(person));
     setShowTerminationDialog(false);
+    setShowRestoreDialog(false);
     setShowStartDateDialog(false);
     setStartDate("");
     setStartDateReason("");
     setStartDateError(null);
     setTerminationDate("");
     setTerminationError(null);
+    setRestoreReason("");
+    setRestoreError(null);
     setUploadStates({});
     setError(null);
+    setMessage(null);
     setEditFieldErrors({});
     const current = person.currentSchedule;
     setSchedule({
@@ -827,12 +973,15 @@ export function StaffWorkspace({
     setEditing(false);
     setEditForm(null);
     setShowTerminationDialog(false);
+    setShowRestoreDialog(false);
     setShowStartDateDialog(false);
     setStartDate("");
     setStartDateReason("");
     setStartDateError(null);
     setTerminationDate("");
     setTerminationError(null);
+    setRestoreReason("");
+    setRestoreError(null);
     setError(null);
     setUploadStates({});
     setEditFieldErrors({});
@@ -901,7 +1050,7 @@ export function StaffWorkspace({
         </div>
       </div>
 
-      {message ? <Notice tone="success">{message}</Notice> : null}
+      {message && !selected ? <Notice tone="success">{message}</Notice> : null}
       {error && !selected ? <Notice tone="error">{error}</Notice> : null}
 
       {showCreate ? (
@@ -1070,6 +1219,7 @@ export function StaffWorkspace({
 
       {selected && editForm ? (
         <div
+          aria-hidden={showRestoreDialog ? true : undefined}
           aria-label={`Hồ sơ nhân viên ${selected.fullName}`}
           aria-modal="true"
           className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-slate-950/50 p-2 sm:p-4"
@@ -1085,8 +1235,27 @@ export function StaffWorkspace({
                 <p className="break-words text-sm text-slate-600">
                   {selected.staffCode} · {selected.branch.code} — {selected.branch.name}
                 </p>
+                {selected.employmentStatus === "TERMINATED" ? (
+                  <p className="mt-1 text-sm font-medium text-rose-700">
+                    Đã nghỉ việc từ{" "}
+                    {displayBusinessDate(selected.terminationDate) ?? "chưa rõ ngày"}
+                  </p>
+                ) : null}
               </div>
               <div className="flex max-w-full shrink-0 flex-wrap justify-end gap-2 max-sm:w-full">
+                {!editing &&
+                capabilities.canRestoreStaff &&
+                selected.employmentStatus === "TERMINATED" ? (
+                  <button
+                    className="rounded-lg bg-emerald-800 px-4 py-2 font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
+                    disabled={pending}
+                    ref={restoreTriggerRef}
+                    type="button"
+                    onClick={openRestoreDialog}
+                  >
+                    Hoàn tác nghỉ việc
+                  </button>
+                ) : null}
                 {!editing && selected.employmentStatus !== "TERMINATED" ? (
                   <Button
                     type="button"
@@ -1119,6 +1288,7 @@ export function StaffWorkspace({
                   aria-label="Đóng"
                   className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
                   onClick={closeDetails}
+                  ref={profileCloseButtonRef}
                   type="button"
                 >
                   Đóng
@@ -1133,6 +1303,11 @@ export function StaffWorkspace({
               {error ? (
                 <div className="mb-4">
                   <Notice tone="error">{error}</Notice>
+                </div>
+              ) : null}
+              {message ? (
+                <div className="mb-4">
+                  <Notice tone="success">{message}</Notice>
                 </div>
               ) : null}
               {editing ? (
@@ -1651,6 +1826,104 @@ export function StaffWorkspace({
           </div>
         </div>
       ) : null}
+
+      {showRestoreDialog &&
+      selected &&
+      capabilities.canRestoreStaff &&
+      selected.employmentStatus === "TERMINATED" ? (
+        <div
+          aria-busy={pending}
+          aria-describedby="restore-staff-description"
+          aria-labelledby="restore-staff-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[70] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4"
+          role="alertdialog"
+        >
+          <div
+            className="max-h-[94dvh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl"
+            ref={restoreDialogPanelRef}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="break-words text-xl font-semibold" id="restore-staff-title">
+                  Xác nhận hoàn tác nghỉ việc
+                </h2>
+                <p className="mt-1 break-words text-sm text-slate-600">
+                  {selected.fullName} · {selected.staffCode}
+                </p>
+              </div>
+              <button
+                aria-label="Đóng hoàn tác nghỉ việc"
+                className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                disabled={pending}
+                type="button"
+                onClick={closeRestoreDialog}
+              >
+                Đóng
+              </button>
+            </div>
+
+            <div
+              className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"
+              id="restore-staff-description"
+            >
+              <p>
+                Đây là thao tác hoàn tác lần cho nghỉ được ghi nhận ngày{" "}
+                {displayBusinessDate(selected.terminationDate) ?? "không xác định"}.
+              </p>
+              <p className="mt-2">
+                Nếu nhân viên đã nghỉ thật rồi quay lại làm sau một thời gian, không dùng hoàn tác;
+                hãy tạo phân công mới theo quy trình tái tuyển dụng.
+              </p>
+              <p className="mt-2">
+                Trạng thái, phân công và tài khoản bị ảnh hưởng sẽ được khôi phục. Các phiên đăng
+                nhập cũ không được mở lại; nhân viên cần đăng nhập lại.
+              </p>
+            </div>
+
+            <div className="mt-4">
+              <Field label="Lý do hoàn tác nghỉ việc">
+                <textarea
+                  autoFocus
+                  className="min-h-24"
+                  maxLength={500}
+                  placeholder="Ví dụ: Bấm nhầm thao tác cho nghỉ việc."
+                  required
+                  value={restoreReason}
+                  onChange={(event) => {
+                    setRestoreReason(event.target.value);
+                    setRestoreError(null);
+                  }}
+                />
+              </Field>
+              {restoreError ? (
+                <p className="mt-2 text-sm text-rose-700" role="alert">
+                  {restoreError}
+                </p>
+              ) : null}
+            </div>
+
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <button
+                className="rounded-lg border border-slate-300 px-4 py-2 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                disabled={pending}
+                type="button"
+                onClick={closeRestoreDialog}
+              >
+                Hủy
+              </button>
+              <button
+                className="rounded-lg bg-emerald-800 px-4 py-2 font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
+                disabled={pending || !restoreReason.trim()}
+                type="button"
+                onClick={() => void restoreSelected()}
+              >
+                {pending ? "Đang hoàn tác…" : "Xác nhận hoàn tác"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1753,7 +2026,16 @@ function ProfileReadOnly({
       {person.employmentStatus === "TERMINATED" ? (
         <Info label="Ngày nghỉ việc" value={displayBusinessDate(person.terminationDate)} />
       ) : null}
-      <Info label="Trạng thái" value={person.employmentStatus} />
+      <Info
+        label="Trạng thái"
+        value={
+          person.employmentStatus === "ACTIVE"
+            ? "Đang làm"
+            : person.employmentStatus === "TERMINATED"
+              ? "Đã nghỉ việc"
+              : "Tạm nghỉ"
+        }
+      />
       {canViewSalary && person.baseSalaryAmount !== undefined ? (
         <Info label="Lương cơ bản" value={formatMoney(person.baseSalaryAmount)} />
       ) : null}
@@ -1883,11 +2165,13 @@ function Notice({
 }: Readonly<{ tone: "success" | "error"; children: React.ReactNode }>) {
   return (
     <p
+      aria-live={tone === "success" ? "polite" : "assertive"}
       className={`rounded-xl border p-3 text-sm ${
         tone === "success"
           ? "border-emerald-200 bg-emerald-50 text-emerald-800"
           : "border-rose-200 bg-rose-50 text-rose-800"
       }`}
+      role={tone === "success" ? "status" : "alert"}
     >
       {children}
     </p>

@@ -14,6 +14,7 @@ import {
   archiveStaff,
   createAssignment,
   createStaff,
+  restoreStaff,
   transferAssignment,
   terminateStaff,
   updateAssignment,
@@ -723,6 +724,485 @@ describe("administration state transitions", () => {
     expect(storedUser.active).toBe(false);
     expect(sessionCount).toBe(0);
     expect(audit?.reason).toBe("SYSTEM:STAFF_TERMINATED_FROM_UI");
+  });
+
+  it("hoàn tác nghỉ việc khôi phục lịch sử, phân công và trạng thái tài khoản một cách có audit", async () => {
+    const staff = await createStaff(
+      gm,
+      {
+        staffCode: `UNDO${runId}`,
+        fullName: "Nhân viên hoàn tác nghỉ việc",
+        jobTitle: "Live",
+        joinedDate: "2026-06-01",
+        employmentCategory: "OFFICIAL",
+        officialDate: "2026-06-01",
+      },
+      metadata,
+    );
+    const initialHistory = await prisma.staffEmploymentHistory.findFirstOrThrow({
+      where: { companyId: gm.companyId, staffId: staff.id },
+    });
+    await prisma.staffEmploymentHistory.update({
+      where: { id: initialHistory.id },
+      data: { effectiveTo: new Date("2026-09-01T00:00:00.000Z") },
+    });
+    const futureHistory = await prisma.staffEmploymentHistory.create({
+      data: {
+        companyId: gm.companyId,
+        staffId: staff.id,
+        employmentStatus: "ON_LEAVE",
+        employmentCategory: "OFFICIAL",
+        effectiveFrom: new Date("2026-09-01T00:00:00.000Z"),
+        createdByUserId: gm.userId,
+      },
+    });
+    const [currentAssignment, futureAssignment, user] = await Promise.all([
+      prisma.branchAssignment.create({
+        data: {
+          companyId: gm.companyId,
+          branchId: branchAId,
+          staffId: staff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: `UNDO-${runId}`.toUpperCase(),
+          effectiveFrom: new Date("2026-06-01T00:00:00.000Z"),
+          effectiveTo: new Date("2026-09-01T00:00:00.000Z"),
+        },
+      }),
+      prisma.branchAssignment.create({
+        data: {
+          companyId: gm.companyId,
+          branchId: branchCId,
+          staffId: staff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: `UNDO-F-${runId}`.toUpperCase(),
+          effectiveFrom: new Date("2026-09-01T00:00:00.000Z"),
+        },
+      }),
+      prisma.user.create({
+        data: {
+          companyId: gm.companyId,
+          staffId: staff.id,
+          name: staff.fullName,
+          email: `undo-termination-${runId}@test.local`,
+          username: `undo_termination_${runId}`,
+          role: "LIVE_EMPLOYEE",
+        },
+      }),
+    ]);
+    await prisma.session.create({
+      data: {
+        userId: user.id,
+        token: `undo-termination-session-${runId}`,
+        expiresAt: new Date("2027-01-01T00:00:00.000Z"),
+      },
+    });
+
+    const now = new Date("2026-07-24T03:00:00.000Z");
+    const terminated = await terminateStaff(
+      gm,
+      staff.id,
+      { terminationDate: "2026-07-15", version: staff.version },
+      metadata,
+      now,
+    );
+    await expect(
+      restoreStaff(
+        manager,
+        staff.id,
+        { version: terminated.version, reason: "Không được phép hoàn tác." },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      restoreStaff(
+        gm,
+        staff.id,
+        { version: terminated.version + 1, reason: "Kiểm tra optimistic lock." },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const reason = "Tổng quản lý đã bấm nhầm thao tác cho nghỉ việc.";
+    const restored = await restoreStaff(
+      gm,
+      staff.id,
+      { version: terminated.version, reason },
+      metadata,
+    );
+    const [storedCurrentAssignment, storedFutureAssignment, storedUser, sessionCount, histories] =
+      await Promise.all([
+        prisma.branchAssignment.findUniqueOrThrow({ where: { id: currentAssignment.id } }),
+        prisma.branchAssignment.findUniqueOrThrow({ where: { id: futureAssignment.id } }),
+        prisma.user.findUniqueOrThrow({ where: { id: user.id } }),
+        prisma.session.count({ where: { userId: user.id } }),
+        prisma.staffEmploymentHistory.findMany({
+          where: { companyId: gm.companyId, staffId: staff.id },
+          orderBy: { effectiveFrom: "asc" },
+        }),
+      ]);
+
+    expect(restored).toMatchObject({
+      employmentStatus: "ACTIVE",
+      terminationDate: null,
+      version: terminated.version + 1,
+    });
+    expect(storedCurrentAssignment).toMatchObject({
+      effectiveTo: new Date("2026-09-01T00:00:00.000Z"),
+      version: currentAssignment.version + 2,
+    });
+    expect(storedFutureAssignment).toMatchObject({
+      archivedAt: null,
+      version: futureAssignment.version + 2,
+    });
+    expect(storedUser).toMatchObject({ active: true, version: user.version + 2 });
+    expect(sessionCount).toBe(0);
+    expect(histories.map(({ employmentStatus }) => employmentStatus)).toEqual([
+      "ACTIVE",
+      "ACTIVE",
+      "ON_LEAVE",
+    ]);
+    expect(histories[0]?.effectiveTo).toEqual(new Date("2026-07-15T00:00:00.000Z"));
+    expect(histories[1]?.effectiveFrom).toEqual(new Date("2026-07-15T00:00:00.000Z"));
+    expect(histories[1]?.effectiveTo).toEqual(new Date("2026-09-01T00:00:00.000Z"));
+    expect(histories[2]).toMatchObject({
+      id: futureHistory.id,
+      effectiveFrom: new Date("2026-09-01T00:00:00.000Z"),
+    });
+
+    const [terminationAudit, restoreAudit] = await Promise.all([
+      prisma.auditLog.findFirstOrThrow({
+        where: { companyId: gm.companyId, entityId: staff.id, action: "staff.terminate" },
+        orderBy: { occurredAt: "desc" },
+      }),
+      prisma.auditLog.findFirstOrThrow({
+        where: {
+          companyId: gm.companyId,
+          entityId: staff.id,
+          action: "staff.termination.restore",
+        },
+        orderBy: { occurredAt: "desc" },
+      }),
+    ]);
+    expect(terminationAudit.before).toMatchObject({
+      terminationRecovery: {
+        schemaVersion: 1,
+        previousEmploymentStatus: "ACTIVE",
+        endedAssignments: [expect.objectContaining({ id: currentAssignment.id })],
+        archivedFutureAssignments: [expect.objectContaining({ id: futureAssignment.id })],
+        linkedUser: expect.objectContaining({ id: user.id, active: true }),
+      },
+    });
+    expect(restoreAudit).toMatchObject({ reason });
+    expect(restoreAudit.after).toMatchObject({
+      recoveryMetadataAvailable: true,
+      restoredAssignments: 1,
+      restoredFutureAssignments: 1,
+      restoredUserId: user.id,
+      sessionsRestored: false,
+    });
+    await expect(
+      restoreStaff(
+        gm,
+        staff.id,
+        { version: restored.version, reason: "Không thể hoàn tác hai lần." },
+        metadata,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("từ chối dữ liệu nghỉ việc cũ thiếu recovery snapshot mà không thay đổi side effect", async () => {
+    const staff = await createStaff(
+      gm,
+      {
+        staffCode: `LEGUNDO${runId}`,
+        fullName: "Nhân viên hoàn tác dữ liệu cũ",
+        jobTitle: "Live",
+        joinedDate: "2026-06-01",
+        employmentCategory: "OFFICIAL",
+        officialDate: "2026-06-01",
+      },
+      metadata,
+    );
+    const initialHistory = await prisma.staffEmploymentHistory.findFirstOrThrow({
+      where: { companyId: gm.companyId, staffId: staff.id },
+    });
+    const [currentAssignment, futureAssignment, user] = await Promise.all([
+      prisma.branchAssignment.create({
+        data: {
+          companyId: gm.companyId,
+          branchId: branchAId,
+          staffId: staff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: `LEGUNDO-${runId}`.toUpperCase(),
+          effectiveFrom: new Date("2026-06-01T00:00:00.000Z"),
+          effectiveTo: new Date("2026-09-01T00:00:00.000Z"),
+        },
+      }),
+      prisma.branchAssignment.create({
+        data: {
+          companyId: gm.companyId,
+          branchId: branchCId,
+          staffId: staff.id,
+          assignmentType: "MEMBER",
+          attendanceMachineCode: `LEGUNDO-F-${runId}`.toUpperCase(),
+          effectiveFrom: new Date("2026-09-01T00:00:00.000Z"),
+        },
+      }),
+      prisma.user.create({
+        data: {
+          companyId: gm.companyId,
+          staffId: staff.id,
+          name: staff.fullName,
+          email: `legacy-undo-${runId}@test.local`,
+          username: `legacy_undo_${runId}`,
+          role: "LIVE_EMPLOYEE",
+        },
+      }),
+    ]);
+    const terminated = await prisma.staffMember.update({
+      where: { id: staff.id },
+      data: {
+        employmentStatus: "TERMINATED",
+        terminationDate: new Date("2026-07-15T00:00:00.000Z"),
+        version: { increment: 1 },
+      },
+    });
+    await Promise.all([
+      prisma.staffEmploymentHistory.update({
+        where: { id: initialHistory.id },
+        data: {
+          effectiveTo: new Date("2026-07-15T00:00:00.000Z"),
+          version: { increment: 1 },
+        },
+      }),
+      prisma.staffEmploymentHistory.create({
+        data: {
+          companyId: gm.companyId,
+          staffId: staff.id,
+          employmentStatus: "TERMINATED",
+          employmentCategory: "OFFICIAL",
+          effectiveFrom: new Date("2026-07-15T00:00:00.000Z"),
+          createdByUserId: gm.userId,
+        },
+      }),
+      prisma.branchAssignment.update({
+        where: { id: currentAssignment.id },
+        data: {
+          effectiveTo: new Date("2026-08-01T00:00:00.000Z"),
+          version: { increment: 1 },
+        },
+      }),
+      prisma.branchAssignment.update({
+        where: { id: futureAssignment.id },
+        data: { archivedAt: new Date("2026-07-24T03:00:00.000Z"), version: { increment: 1 } },
+      }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: { active: false, version: { increment: 1 } },
+      }),
+    ]);
+    const legacyAudit = await prisma.auditLog.create({
+      data: {
+        companyId: gm.companyId,
+        branchId: branchAId,
+        actorUserId: gm.userId,
+        action: "staff.terminate",
+        entityType: "StaffMember",
+        entityId: staff.id,
+        reason: "SYSTEM:STAFF_TERMINATED_FROM_UI",
+        before: { employmentStatus: "ACTIVE" },
+        after: {
+          employmentStatus: "TERMINATED",
+          terminationDate: "2026-07-15",
+          assignmentCutoff: "2026-08-01",
+          endedAssignments: 1,
+          cancelledFutureAssignments: 1,
+          disabledUserId: user.id,
+          sessionsRevoked: true,
+        },
+        requestId: metadata.requestId,
+      },
+    });
+
+    await expect(
+      restoreStaff(
+        gm,
+        staff.id,
+        {
+          version: terminated.version,
+          reason: "Khôi phục thao tác nghỉ việc được ghi trước khi có recovery snapshot.",
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("bản chụp khôi phục đầy đủ"),
+    });
+    await prisma.auditLog.create({
+      data: {
+        companyId: gm.companyId,
+        branchId: branchAId,
+        actorUserId: gm.userId,
+        action: "staff.terminate",
+        entityType: "StaffMember",
+        entityId: staff.id,
+        reason: "SYSTEM:STAFF_TERMINATED_FROM_UI",
+        before: {
+          employmentStatus: "ACTIVE",
+          terminationRecovery: { schemaVersion: 1, terminationDate: "không-hợp-lệ" },
+        },
+        after: {
+          employmentStatus: "TERMINATED",
+          terminationDate: "2026-07-15",
+          assignmentCutoff: "2026-08-01",
+          endedAssignments: 1,
+          cancelledFutureAssignments: 1,
+          disabledUserId: user.id,
+          sessionsRevoked: true,
+        },
+        requestId: metadata.requestId,
+        occurredAt: new Date(legacyAudit.occurredAt.getTime() + 1_000),
+      },
+    });
+    await expect(
+      restoreStaff(
+        gm,
+        staff.id,
+        {
+          version: terminated.version,
+          reason: "Không được hoàn tác từ recovery snapshot bị lỗi.",
+        },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("bản chụp khôi phục đầy đủ"),
+    });
+    const [unchangedStaff, unchangedCurrentAssignment, unchangedFutureAssignment, unchangedUser] =
+      await Promise.all([
+        prisma.staffMember.findUniqueOrThrow({ where: { id: staff.id } }),
+        prisma.branchAssignment.findUniqueOrThrow({ where: { id: currentAssignment.id } }),
+        prisma.branchAssignment.findUniqueOrThrow({ where: { id: futureAssignment.id } }),
+        prisma.user.findUniqueOrThrow({ where: { id: user.id } }),
+      ]);
+    const [histories, restoreAuditCount] = await Promise.all([
+      prisma.staffEmploymentHistory.findMany({
+        where: { companyId: gm.companyId, staffId: staff.id },
+        orderBy: { effectiveFrom: "asc" },
+      }),
+      prisma.auditLog.count({
+        where: {
+          companyId: gm.companyId,
+          entityId: staff.id,
+          action: "staff.termination.restore",
+        },
+      }),
+    ]);
+
+    expect(unchangedStaff).toMatchObject({
+      employmentStatus: "TERMINATED",
+      terminationDate: new Date("2026-07-15T00:00:00.000Z"),
+      version: terminated.version,
+    });
+    expect(unchangedCurrentAssignment).toMatchObject({
+      effectiveTo: new Date("2026-08-01T00:00:00.000Z"),
+      version: currentAssignment.version + 1,
+    });
+    expect(unchangedFutureAssignment).toMatchObject({
+      archivedAt: new Date("2026-07-24T03:00:00.000Z"),
+      version: futureAssignment.version + 1,
+    });
+    expect(unchangedUser).toMatchObject({ active: false, version: user.version + 1 });
+    expect(histories.map(({ employmentStatus }) => employmentStatus)).toEqual([
+      "ACTIVE",
+      "TERMINATED",
+    ]);
+    expect(histories.map(({ effectiveFrom }) => effectiveFrom)).toEqual([
+      new Date("2026-06-01T00:00:00.000Z"),
+      new Date("2026-07-15T00:00:00.000Z"),
+    ]);
+    expect(histories[0]?.effectiveTo).toEqual(new Date("2026-07-15T00:00:00.000Z"));
+    expect(histories[1]?.effectiveTo).toBeNull();
+    expect(restoreAuditCount).toBe(0);
+  });
+
+  it("từ chối hoàn tác khi ngày nghỉ hiện tại không khớp recovery snapshot", async () => {
+    const staff = await createStaff(
+      gm,
+      {
+        staffCode: `MISUNDO${runId}`,
+        fullName: "Nhân viên sai ngày hoàn tác",
+        jobTitle: "Live",
+        joinedDate: "2026-06-01",
+        employmentCategory: "OFFICIAL",
+        officialDate: "2026-06-01",
+      },
+      metadata,
+    );
+    const now = new Date("2026-07-24T03:00:00.000Z");
+    const terminated = await terminateStaff(
+      gm,
+      staff.id,
+      { terminationDate: "2026-07-15", version: staff.version },
+      metadata,
+      now,
+    );
+    const changed = await prisma.staffMember.update({
+      where: { id: staff.id },
+      data: { terminationDate: new Date("2026-07-16T00:00:00.000Z") },
+    });
+    const historiesBefore = await prisma.staffEmploymentHistory.findMany({
+      where: { companyId: gm.companyId, staffId: staff.id },
+      orderBy: { effectiveFrom: "asc" },
+      select: {
+        id: true,
+        employmentStatus: true,
+        effectiveFrom: true,
+        effectiveTo: true,
+        version: true,
+      },
+    });
+
+    await expect(
+      restoreStaff(
+        gm,
+        staff.id,
+        { version: terminated.version, reason: "Kiểm tra ngày nghỉ không khớp." },
+        metadata,
+      ),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("Ngày nghỉ việc đã thay đổi"),
+    });
+
+    const [staffAfter, historiesAfter, restoreAuditCount] = await Promise.all([
+      prisma.staffMember.findUniqueOrThrow({ where: { id: staff.id } }),
+      prisma.staffEmploymentHistory.findMany({
+        where: { companyId: gm.companyId, staffId: staff.id },
+        orderBy: { effectiveFrom: "asc" },
+        select: {
+          id: true,
+          employmentStatus: true,
+          effectiveFrom: true,
+          effectiveTo: true,
+          version: true,
+        },
+      }),
+      prisma.auditLog.count({
+        where: {
+          companyId: gm.companyId,
+          entityId: staff.id,
+          action: "staff.termination.restore",
+        },
+      }),
+    ]);
+    expect(staffAfter).toMatchObject({
+      employmentStatus: "TERMINATED",
+      terminationDate: changed.terminationDate,
+      version: changed.version,
+    });
+    expect(historiesAfter).toEqual(historiesBefore);
+    expect(restoreAuditCount).toBe(0);
   });
 
   it("chặn assignment vào branch inactive hoặc staff terminated", async () => {

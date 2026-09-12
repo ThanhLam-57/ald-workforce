@@ -300,6 +300,11 @@ export const staffTerminateSchema = z.object({
   version: z.number().int().positive(),
 });
 
+export const staffRestoreSchema = z.object({
+  version: z.number().int().positive(),
+  reason: reasonSchema,
+});
+
 export const assignmentCreateSchema = z
   .object({
     staffId: idSchema,
@@ -2736,6 +2741,7 @@ export type StaffCodePreviewQuery = z.infer<typeof staffCodePreviewQuerySchema>;
 export type StaffUpdateInput = z.infer<typeof staffUpdateSchema>;
 export type StaffArchiveInput = z.infer<typeof staffArchiveSchema>;
 export type StaffTerminateInput = z.infer<typeof staffTerminateSchema>;
+export type StaffRestoreInput = z.infer<typeof staffRestoreSchema>;
 export type StaffWorkScheduleCreateInput = z.infer<typeof staffWorkScheduleCreateSchema>;
 export type StaffWorkScheduleUpdateInput = z.infer<typeof staffWorkScheduleUpdateSchema>;
 export type StaffIdentityDocumentPresignInput = z.infer<typeof staffIdentityDocumentPresignSchema>;

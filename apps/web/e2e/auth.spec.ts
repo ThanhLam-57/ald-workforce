@@ -577,13 +577,15 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
   });
   expect(endAssignmentResponse.ok()).toBe(true);
 
-  const terminateStaffResponse = await page.request.patch(`/api/staff/${staff.data.id}`, {
-    data: {
-      employmentStatus: "TERMINATED",
-      effectiveFrom: cleanupDate,
-      version: 1,
+  const terminateStaffResponse = await page.request.post(
+    "/api/staff/" + staff.data.id + "/terminate",
+    {
+      data: {
+        terminationDate: cleanupDate,
+        version: 1,
+      },
     },
-  });
+  );
   expect(terminateStaffResponse.ok()).toBe(true);
 
   const archiveStaffResponse = await page.request.post(`/api/staff/${staff.data.id}/archive`, {

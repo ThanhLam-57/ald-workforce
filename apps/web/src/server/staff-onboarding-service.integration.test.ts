@@ -859,6 +859,7 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
   });
 
   it("GM chỉ thấy nhân viên đã nghỉ khi bật danh sách ẩn", async () => {
+    const historicalViewAt = new Date("2026-07-20T03:00:00.000Z");
     const former = await prisma.staffMember.create({
       data: {
         companyId,
@@ -881,18 +882,43 @@ describe("phân quyền thêm nhân viên, ca làm và CCCD", () => {
         effectiveTo: new Date("2026-01-01T00:00:00.000Z"),
       },
     });
+    const recentlyTerminated = await prisma.staffMember.create({
+      data: {
+        companyId,
+        staffCode: "RECENTFORMER" + runId,
+        fullName: "Nhân viên vừa nghỉ",
+        jobTitle: "Nhân viên Live",
+        employmentCategory: "OFFICIAL",
+        employmentStatus: "TERMINATED",
+        terminationDate: new Date("2026-07-15T00:00:00.000Z"),
+      },
+    });
+    await prisma.branchAssignment.create({
+      data: {
+        companyId,
+        staffId: recentlyTerminated.id,
+        branchId: branchAId,
+        assignmentType: "MEMBER",
+        attendanceMachineCode: "RECENT-FORMER-001",
+        effectiveFrom: new Date("2026-01-01T00:00:00.000Z"),
+        effectiveTo: new Date("2026-08-01T00:00:00.000Z"),
+      },
+    });
 
     expect((await listBranchStaff(gm)).map(({ id }) => id)).not.toContain(former.id);
     expect(
-      (await listBranchStaff(gm, new Date(), true)).find(({ id }) => id === former.id),
+      (await listBranchStaff(gm, historicalViewAt, true)).find(({ id }) => id === former.id),
     ).toMatchObject({
       employmentStatus: "TERMINATED",
       terminationDate: "2025-12-15",
       attendanceMachineCode: "FORMER-001",
     });
-    expect((await listBranchStaff(manager, new Date(), true)).map(({ id }) => id)).not.toContain(
-      former.id,
+    expect((await listBranchStaff(gm, historicalViewAt, true)).map(({ id }) => id)).toContain(
+      recentlyTerminated.id,
     );
+    const managerIds = (await listBranchStaff(manager, historicalViewAt, true)).map(({ id }) => id);
+    expect(managerIds).not.toContain(former.id);
+    expect(managerIds).not.toContain(recentlyTerminated.id);
   });
 
   it("thu hồi quyền của quản lý cũ khi assignment hiện hành chuyển sang cơ sở khác", async () => {

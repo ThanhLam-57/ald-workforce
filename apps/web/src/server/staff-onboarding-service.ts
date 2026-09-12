@@ -354,7 +354,7 @@ export async function listBranchStaff(
     where: {
       companyId: actor.companyId,
       archivedAt: null,
-      ...(!includeInactive ? { employmentStatus: { in: ["ACTIVE", "ON_LEAVE"] } } : {}),
+      ...(!mayIncludeHistorical ? { employmentStatus: { in: ["ACTIVE", "ON_LEAVE"] } } : {}),
       assignments: {
         some: assignmentScope,
       },
