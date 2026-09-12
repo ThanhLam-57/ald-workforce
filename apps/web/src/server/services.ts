@@ -1182,15 +1182,35 @@ export async function restoreStaff(
             entityId: id,
             action: "staff.terminate",
           },
-          orderBy: { occurredAt: "desc" },
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
           select: { id: true, before: true },
         });
+        if (!terminationAudit) {
+          throw new DomainError(
+            "CONFLICT",
+            "Không tìm thấy nhật ký nghỉ việc tương ứng. Không thể hoàn tác an toàn.",
+            { reason: "TERMINATION_AUDIT_MISSING" },
+          );
+        }
         const recovery = parseStaffTerminationRecovery(terminationAudit?.before);
+        const terminationAuditBefore = jsonRecord(terminationAudit?.before);
+        const hasRecoverySnapshotField = Boolean(
+          terminationAuditBefore &&
+            Object.prototype.hasOwnProperty.call(terminationAuditBefore, "terminationRecovery"),
+        );
         const terminationDate = before.terminationDate?.toISOString().slice(0, 10) ?? null;
         if (!recovery) {
+          if (hasRecoverySnapshotField) {
+            throw new DomainError(
+              "CONFLICT",
+              "Dữ liệu nghỉ việc có bản chụp khôi phục đầy đủ nhưng nội dung không hợp lệ. Không thể hoàn tác an toàn.",
+              { reason: "RECOVERY_SNAPSHOT_INVALID" },
+            );
+          }
           throw new DomainError(
             "CONFLICT",
             "Dữ liệu nghỉ việc cũ không có bản chụp khôi phục đầy đủ. Không thể hoàn tác tự động.",
+            { reason: "LEGACY_RECOVERY_REQUIRED" },
           );
         }
         if (recovery.terminationDate !== terminationDate) {

@@ -5,6 +5,7 @@ import type {
   StaffBankQrDocumentDto,
   StaffCodePreviewDto,
   StaffIdentityDocumentDto,
+  StaffManualRestorePreviewDto,
   StaffStartDateCorrectionDto,
   StaffWorkScheduleDto,
 } from "@ald/contracts";
@@ -32,6 +33,7 @@ type BranchOption = Readonly<{ id: string; code: string; name: string }>;
 type ApiEnvelope<T> = Readonly<{
   data?: T;
   error?: Readonly<{
+    details?: unknown;
     message?: unknown;
   }>;
 }>;
@@ -42,9 +44,17 @@ type UploadState = Readonly<{
   message: string;
 }>;
 type StaffCodePreviewStatus = "IDLE" | "LOADING" | "READY" | "ERROR";
+type ManualRestorePreviewStatus = "IDLE" | "LOADING" | "READY" | "ERROR";
 type StaffRestoreResponse = Readonly<
   Pick<BranchStaffDto, "id" | "employmentStatus" | "terminationDate" | "version">
 >;
+
+function errorDetailReason(payload: ApiEnvelope<unknown>): string | null {
+  const details = payload.error?.details;
+  if (typeof details !== "object" || details === null || Array.isArray(details)) return null;
+  const reason = (details as Readonly<Record<string, unknown>>).reason;
+  return typeof reason === "string" ? reason : null;
+}
 
 function businessToday(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -94,6 +104,13 @@ function documentStatus(status: string | null | undefined): string {
   if (status === "PENDING_UPLOAD") return "Chờ tải lên";
   if (status === "REJECTED") return "Tải lên thất bại";
   return "Chưa có";
+}
+
+function userRoleLabel(role: string): string {
+  if (role === "GENERAL_MANAGER") return "Tổng quản lý";
+  if (role === "TRAINING_MANAGER") return "Quản lý đào tạo";
+  if (role === "LIVE_EMPLOYEE") return "Nhân viên Live";
+  return "Vai trò khác";
 }
 
 function formatFileSize(sizeBytes: string): string {
@@ -216,6 +233,18 @@ export function StaffWorkspace({
   const [showRestoreDialog, setShowRestoreDialog] = useState(false);
   const [restoreReason, setRestoreReason] = useState("");
   const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [manualRestoreAvailable, setManualRestoreAvailable] = useState(false);
+  const [manualRestorePreviewStatus, setManualRestorePreviewStatus] =
+    useState<ManualRestorePreviewStatus>("IDLE");
+  const [manualRestorePreview, setManualRestorePreview] =
+    useState<StaffManualRestorePreviewDto | null>(null);
+  const [manualRestoreEmploymentStatus, setManualRestoreEmploymentStatus] = useState<
+    "ACTIVE" | "ON_LEAVE"
+  >("ACTIVE");
+  const [manualRestoreAssignmentSelected, setManualRestoreAssignmentSelected] = useState(false);
+  const [manualRestoreAssignmentEffectiveTo, setManualRestoreAssignmentEffectiveTo] = useState("");
+  const [manualRestoreUserSelected, setManualRestoreUserSelected] = useState(false);
+  const [manualRestoreAcknowledged, setManualRestoreAcknowledged] = useState(false);
   const [showStartDateDialog, setShowStartDateDialog] = useState(false);
   const [startDate, setStartDate] = useState("");
   const [startDateReason, setStartDateReason] = useState("");
@@ -233,6 +262,9 @@ export function StaffWorkspace({
   const staffCodePreviewRequestId = useRef(0);
   const restoreDialogPanelRef = useRef<HTMLDivElement>(null);
   const restoreTriggerRef = useRef<HTMLButtonElement>(null);
+  const manualRestoreTriggerRef = useRef<HTMLButtonElement>(null);
+  const manualRestoreStatusRef = useRef<HTMLSelectElement>(null);
+  const manualRestorePreviewControllerRef = useRef<AbortController | null>(null);
   const profileCloseButtonRef = useRef<HTMLButtonElement>(null);
   const pendingRef = useRef(pending);
 
@@ -247,9 +279,18 @@ export function StaffWorkspace({
     document.body.style.overflow = "hidden";
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !pendingRef.current) {
+        manualRestorePreviewControllerRef.current?.abort();
+        manualRestorePreviewControllerRef.current = null;
         setShowRestoreDialog(false);
         setRestoreReason("");
         setRestoreError(null);
+        setManualRestoreAvailable(false);
+        setManualRestorePreviewStatus("IDLE");
+        setManualRestorePreview(null);
+        setManualRestoreAssignmentSelected(false);
+        setManualRestoreAssignmentEffectiveTo("");
+        setManualRestoreUserSelected(false);
+        setManualRestoreAcknowledged(false);
         return;
       }
       if (event.key !== "Tab" || !restoreDialogPanelRef.current) return;
@@ -271,6 +312,8 @@ export function StaffWorkspace({
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
+      manualRestorePreviewControllerRef.current?.abort();
+      manualRestorePreviewControllerRef.current = null;
       document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", handleKeyDown);
       restoreTrigger?.focus();
@@ -358,6 +401,15 @@ export function StaffWorkspace({
     });
   }, [branchFilter, categoryFilter, search, staff, statusFilter]);
   const selected = staff.find((person) => person.id === selectedId) ?? null;
+  const isManualRestoreMode = manualRestorePreviewStatus !== "IDLE";
+  const canSubmitManualRestore = Boolean(
+    manualRestorePreviewStatus === "READY" &&
+      manualRestorePreview?.eligible &&
+      manualRestorePreview.blockers.length === 0 &&
+      manualRestorePreview.history &&
+      restoreReason.trim() &&
+      manualRestoreAcknowledged,
+  );
 
   function setCurrentEditForm(action: React.SetStateAction<ReturnType<typeof profileForm>>): void {
     setEditForm((current) => {
@@ -481,6 +533,56 @@ export function StaffWorkspace({
     setTerminationError(null);
   }
 
+  function resetManualRestore(): void {
+    manualRestorePreviewControllerRef.current?.abort();
+    manualRestorePreviewControllerRef.current = null;
+    setManualRestoreAvailable(false);
+    setManualRestorePreviewStatus("IDLE");
+    setManualRestorePreview(null);
+    setManualRestoreEmploymentStatus("ACTIVE");
+    setManualRestoreAssignmentSelected(false);
+    setManualRestoreAssignmentEffectiveTo("");
+    setManualRestoreUserSelected(false);
+    setManualRestoreAcknowledged(false);
+  }
+
+  async function completeStaffRestore(
+    restored: StaffRestoreResponse,
+    targetId: string,
+    targetName: string,
+    successMessage: string,
+  ): Promise<void> {
+    setStaff((current) =>
+      current.map((person) =>
+        person.id === targetId
+          ? {
+              ...person,
+              employmentStatus: restored.employmentStatus,
+              terminationDate: restored.terminationDate,
+              version: restored.version,
+            }
+          : person,
+      ),
+    );
+    setEditForm((current) =>
+      current ? { ...current, employmentStatus: restored.employmentStatus } : current,
+    );
+    setShowRestoreDialog(false);
+    setRestoreReason("");
+    setRestoreError(null);
+    resetManualRestore();
+    setStatusFilter("ALL");
+    setMessage(successMessage);
+    try {
+      await reloadStaff(targetId, true);
+    } catch {
+      setError(
+        `Đã khôi phục trạng thái của ${targetName}, nhưng chưa tải lại được danh sách. Hãy tải lại trang trước khi thao tác tiếp.`,
+      );
+    }
+    requestAnimationFrame(() => profileCloseButtonRef.current?.focus());
+  }
+
   async function restoreSelected(): Promise<void> {
     if (!selected || !capabilities.canRestoreStaff || selected.employmentStatus !== "TERMINATED") {
       return;
@@ -508,6 +610,12 @@ export function StaffWorkspace({
       const payload = (await response.json()) as ApiEnvelope<StaffRestoreResponse>;
       if (!response.ok || !payload.data) {
         const failureMessage = messageFrom(payload, "Không thể hoàn tác nghỉ việc.");
+        if (response.status === 409 && errorDetailReason(payload) === "LEGACY_RECOVERY_REQUIRED") {
+          setManualRestoreAvailable(true);
+          setRestoreError(failureMessage);
+          requestAnimationFrame(() => manualRestoreTriggerRef.current?.focus());
+          return;
+        }
         if (response.status === 409) {
           try {
             await reloadStaff(targetId, true);
@@ -520,37 +628,152 @@ export function StaffWorkspace({
         throw new Error(failureMessage);
       }
 
-      const restored = payload.data;
-      setStaff((current) =>
-        current.map((person) =>
-          person.id === targetId
-            ? {
-                ...person,
-                employmentStatus: restored.employmentStatus,
-                terminationDate: restored.terminationDate,
-                version: restored.version,
-              }
-            : person,
-        ),
+      await completeStaffRestore(
+        payload.data,
+        targetId,
+        targetName,
+        `Đã hoàn tác nghỉ việc cho ${targetName}.`,
       );
-      setEditForm((current) =>
-        current ? { ...current, employmentStatus: restored.employmentStatus } : current,
-      );
-      setShowRestoreDialog(false);
-      setRestoreReason("");
-      setRestoreError(null);
-      setStatusFilter("ALL");
-      setMessage(`Đã hoàn tác nghỉ việc cho ${targetName}.`);
-      try {
-        await reloadStaff(targetId, true);
-      } catch {
-        setError(
-          "Đã hoàn tác nghỉ việc, nhưng chưa tải lại được danh sách. Hãy tải lại trang trước khi thao tác tiếp.",
-        );
-      }
-      requestAnimationFrame(() => profileCloseButtonRef.current?.focus());
     } catch (caught) {
       setRestoreError(caught instanceof Error ? caught.message : "Không thể hoàn tác nghỉ việc.");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function loadManualRestorePreview(): Promise<void> {
+    if (!selected || !capabilities.canRestoreStaff || selected.employmentStatus !== "TERMINATED") {
+      return;
+    }
+
+    manualRestorePreviewControllerRef.current?.abort();
+    const controller = new AbortController();
+    manualRestorePreviewControllerRef.current = controller;
+    const targetId = selected.id;
+    const targetVersion = selected.version;
+    setManualRestoreAvailable(true);
+    setManualRestorePreviewStatus("LOADING");
+    setManualRestorePreview(null);
+    setRestoreError(null);
+    setManualRestoreAssignmentSelected(false);
+    setManualRestoreAssignmentEffectiveTo("");
+    setManualRestoreUserSelected(false);
+    setManualRestoreAcknowledged(false);
+
+    try {
+      const response = await fetch(
+        `/api/staff/${encodeURIComponent(targetId)}/restore/manual?version=${targetVersion}`,
+        { cache: "no-store", signal: controller.signal },
+      );
+      const payload = (await response.json()) as ApiEnvelope<StaffManualRestorePreviewDto>;
+      if (!response.ok || !payload.data) {
+        throw new Error(messageFrom(payload, "Không thể tải dữ liệu khôi phục được gợi ý."));
+      }
+      if (controller.signal.aborted) return;
+
+      const preview = payload.data;
+      setManualRestorePreview(preview);
+      setManualRestoreEmploymentStatus(preview.suggestedEmploymentStatus);
+      setManualRestoreAssignmentSelected(false);
+      setManualRestoreAssignmentEffectiveTo(preview.assignment?.suggestedEffectiveTo ?? "");
+      setManualRestoreUserSelected(false);
+      setManualRestoreAcknowledged(false);
+      setManualRestorePreviewStatus("READY");
+      requestAnimationFrame(() => manualRestoreStatusRef.current?.focus());
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      setManualRestorePreviewStatus("ERROR");
+      setRestoreError(
+        caught instanceof Error ? caught.message : "Không thể tải dữ liệu khôi phục được gợi ý.",
+      );
+    } finally {
+      if (manualRestorePreviewControllerRef.current === controller) {
+        manualRestorePreviewControllerRef.current = null;
+      }
+    }
+  }
+
+  async function restoreSelectedManually(): Promise<void> {
+    const preview = manualRestorePreview;
+    if (
+      !selected ||
+      !capabilities.canRestoreStaff ||
+      selected.employmentStatus !== "TERMINATED" ||
+      !preview ||
+      !preview.eligible ||
+      preview.blockers.length > 0
+    ) {
+      return;
+    }
+    if (!restoreReason.trim()) {
+      setRestoreError("Vui lòng nhập lý do hoàn tác nghỉ việc.");
+      return;
+    }
+    if (!preview.history) {
+      setRestoreError("Không tìm thấy lịch sử việc làm phù hợp để khôi phục.");
+      return;
+    }
+    if (!manualRestoreAcknowledged) {
+      setRestoreError("Vui lòng xác nhận bạn đã kiểm tra dữ liệu được gợi ý.");
+      return;
+    }
+
+    const targetId = selected.id;
+    const targetName = selected.fullName;
+    setPending(true);
+    setRestoreError(null);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch(`/api/staff/${encodeURIComponent(targetId)}/restore/manual`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          version: preview.staff.version,
+          terminationAuditId: preview.terminationAudit.id,
+          targetEmploymentStatus: manualRestoreEmploymentStatus,
+          history: { id: preview.history.id, version: preview.history.version },
+          assignment:
+            preview.assignment && manualRestoreAssignmentSelected
+              ? {
+                  id: preview.assignment.id,
+                  version: preview.assignment.version,
+                  effectiveTo: manualRestoreAssignmentEffectiveTo || null,
+                }
+              : null,
+          user:
+            manualRestoreUserSelected && preview.user
+              ? { id: preview.user.id, version: preview.user.version }
+              : null,
+          reason: restoreReason,
+          acknowledged: true,
+        }),
+      });
+      const payload = (await response.json()) as ApiEnvelope<StaffRestoreResponse>;
+      if (!response.ok || !payload.data) {
+        const failureMessage = messageFrom(payload, "Không thể khôi phục dữ liệu cũ.");
+        if (response.status === 409) {
+          setManualRestorePreviewStatus("ERROR");
+          setManualRestorePreview(null);
+          setRestoreError(`${failureMessage} Hãy tải lại dữ liệu gợi ý.`);
+          try {
+            await reloadStaff(targetId, true);
+          } catch {
+            // Giữ lỗi gốc nếu danh sách cũng không thể tải lại.
+          }
+          return;
+        }
+        throw new Error(failureMessage);
+      }
+
+      await completeStaffRestore(
+        payload.data,
+        targetId,
+        targetName,
+        `Đã khôi phục dữ liệu cũ cho ${targetName}.`,
+      );
+    } catch (caught) {
+      setRestoreError(caught instanceof Error ? caught.message : "Không thể khôi phục dữ liệu cũ.");
     } finally {
       setPending(false);
     }
@@ -562,6 +785,7 @@ export function StaffWorkspace({
     }
     setRestoreReason("");
     setRestoreError(null);
+    resetManualRestore();
     setShowRestoreDialog(true);
   }
 
@@ -570,6 +794,7 @@ export function StaffWorkspace({
     setShowRestoreDialog(false);
     setRestoreReason("");
     setRestoreError(null);
+    resetManualRestore();
   }
 
   async function loadScheduleHistory(staffId: string): Promise<void> {
@@ -950,6 +1175,7 @@ export function StaffWorkspace({
     setTerminationError(null);
     setRestoreReason("");
     setRestoreError(null);
+    resetManualRestore();
     setUploadStates({});
     setError(null);
     setMessage(null);
@@ -982,6 +1208,7 @@ export function StaffWorkspace({
     setTerminationError(null);
     setRestoreReason("");
     setRestoreError(null);
+    resetManualRestore();
     setError(null);
     setUploadStates({});
     setEditFieldErrors({});
@@ -1832,7 +2059,7 @@ export function StaffWorkspace({
       capabilities.canRestoreStaff &&
       selected.employmentStatus === "TERMINATED" ? (
         <div
-          aria-busy={pending}
+          aria-busy={pending || manualRestorePreviewStatus === "LOADING"}
           aria-describedby="restore-staff-description"
           aria-labelledby="restore-staff-title"
           aria-modal="true"
@@ -1840,13 +2067,17 @@ export function StaffWorkspace({
           role="alertdialog"
         >
           <div
-            className="max-h-[94dvh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl"
+            className={`max-h-[94dvh] w-full overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl ${
+              isManualRestoreMode ? "max-w-2xl" : "max-w-lg"
+            }`}
             ref={restoreDialogPanelRef}
           >
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h2 className="break-words text-xl font-semibold" id="restore-staff-title">
-                  Xác nhận hoàn tác nghỉ việc
+                  {isManualRestoreMode
+                    ? "Khôi phục thủ công dữ liệu cũ"
+                    : "Xác nhận hoàn tác nghỉ việc"}
                 </h2>
                 <p className="mt-1 break-words text-sm text-slate-600">
                   {selected.fullName} · {selected.staffCode}
@@ -1863,28 +2094,250 @@ export function StaffWorkspace({
               </button>
             </div>
 
-            <div
-              className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"
-              id="restore-staff-description"
-            >
-              <p>
-                Đây là thao tác hoàn tác lần cho nghỉ được ghi nhận ngày{" "}
-                {displayBusinessDate(selected.terminationDate) ?? "không xác định"}.
+            {isManualRestoreMode ? (
+              <div
+                className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"
+                id="restore-staff-description"
+              >
+                <p className="font-medium">Dữ liệu này không có bản chụp khôi phục đầy đủ.</p>
+                <p className="mt-2">
+                  Các giá trị dưới đây được gợi ý từ nhật ký cũ. Hãy kiểm tra kỹ trước khi xác nhận;
+                  đây chỉ dành cho trường hợp bấm nhầm nghỉ việc, không phải tái tuyển dụng.
+                </p>
+                <p className="mt-2">
+                  Phiên đăng nhập cũ không được mở lại. Nếu kích hoạt tài khoản, nhân viên vẫn phải
+                  đăng nhập lại.
+                </p>
+              </div>
+            ) : (
+              <div
+                className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"
+                id="restore-staff-description"
+              >
+                <p>
+                  Đây là thao tác hoàn tác lần cho nghỉ được ghi nhận ngày{" "}
+                  {displayBusinessDate(selected.terminationDate) ?? "không xác định"}.
+                </p>
+                <p className="mt-2">
+                  Nếu nhân viên đã nghỉ thật rồi quay lại làm sau một thời gian, không dùng hoàn
+                  tác; hãy tạo phân công mới theo quy trình tái tuyển dụng.
+                </p>
+                <p className="mt-2">
+                  Trạng thái, phân công và tài khoản bị ảnh hưởng sẽ được khôi phục. Các phiên đăng
+                  nhập cũ không được mở lại; nhân viên cần đăng nhập lại.
+                </p>
+              </div>
+            )}
+
+            {manualRestorePreviewStatus === "LOADING" ? (
+              <p aria-live="polite" className="mt-4 text-sm text-slate-600" role="status">
+                Đang tải dữ liệu khôi phục được gợi ý…
               </p>
-              <p className="mt-2">
-                Nếu nhân viên đã nghỉ thật rồi quay lại làm sau một thời gian, không dùng hoàn tác;
-                hãy tạo phân công mới theo quy trình tái tuyển dụng.
-              </p>
-              <p className="mt-2">
-                Trạng thái, phân công và tài khoản bị ảnh hưởng sẽ được khôi phục. Các phiên đăng
-                nhập cũ không được mở lại; nhân viên cần đăng nhập lại.
-              </p>
-            </div>
+            ) : null}
+
+            {manualRestorePreviewStatus === "ERROR" ? (
+              <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-sm text-slate-700">
+                  Chưa thể tải dữ liệu gợi ý. Bạn có thể thử lại mà không cần đóng hồ sơ.
+                </p>
+                <button
+                  className="mt-3 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-100"
+                  type="button"
+                  onClick={() => void loadManualRestorePreview()}
+                >
+                  Tải lại dữ liệu gợi ý
+                </button>
+              </div>
+            ) : null}
+
+            {manualRestorePreviewStatus === "READY" && manualRestorePreview ? (
+              <div className="mt-4 space-y-4">
+                {manualRestorePreview.blockers.length > 0 ? (
+                  <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-900">
+                    <p className="font-medium">Chưa thể khôi phục dữ liệu này:</p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                      {manualRestorePreview.blockers.map((blocker, index) => (
+                        <li key={`${index}-${blocker}`}>{blocker}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {manualRestorePreview.warnings.length > 0 ? (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+                    <p className="font-medium">Thông tin cần kiểm tra:</p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                      {manualRestorePreview.warnings.map((warning, index) => (
+                        <li key={`${index}-${warning}`}>{warning}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+                  <Field label="Trạng thái sau khôi phục">
+                    <select
+                      ref={manualRestoreStatusRef}
+                      value={manualRestoreEmploymentStatus}
+                      onChange={(event) => {
+                        setManualRestoreEmploymentStatus(
+                          event.target.value === "ON_LEAVE" ? "ON_LEAVE" : "ACTIVE",
+                        );
+                        setRestoreError(null);
+                      }}
+                    >
+                      <option value="ACTIVE">Đang làm</option>
+                      <option value="ON_LEAVE">Tạm nghỉ</option>
+                    </select>
+                  </Field>
+                  <Field label="Loại nhân sự được gợi ý">
+                    <input
+                      readOnly
+                      value={
+                        manualRestorePreview.suggestedEmploymentCategory === "OFFICIAL"
+                          ? "Chính thức"
+                          : manualRestorePreview.suggestedEmploymentCategory === "PROBATION"
+                            ? "Thử việc"
+                            : manualRestorePreview.suggestedEmploymentCategory === "CONTRACTOR"
+                              ? "Cộng tác viên"
+                              : "Thực tập"
+                      }
+                    />
+                  </Field>
+                  <Field label="Ngày nghỉ việc đã ghi nhận">
+                    <input
+                      readOnly
+                      value={displayBusinessDate(manualRestorePreview.staff.terminationDate) ?? ""}
+                    />
+                  </Field>
+                  <Field label="Mốc kết thúc phân công đã ghi nhận">
+                    <input
+                      readOnly
+                      value={displayBusinessDate(manualRestorePreview.assignmentCutoff) ?? ""}
+                    />
+                  </Field>
+                </div>
+
+                {manualRestorePreview.assignment ? (
+                  <div className="min-w-0 rounded-xl border border-slate-200 p-4">
+                    <label className="flex min-w-0 items-start gap-3 text-sm font-medium">
+                      <input
+                        checked={manualRestoreAssignmentSelected}
+                        className="mt-0.5 h-4 w-4 shrink-0 p-0"
+                        type="checkbox"
+                        onChange={(event) => {
+                          setManualRestoreAssignmentSelected(event.target.checked);
+                          setRestoreError(null);
+                        }}
+                      />
+                      <span className="min-w-0 break-words">
+                        Khôi phục phân công tại {manualRestorePreview.assignment.branch.code} —{" "}
+                        {manualRestorePreview.assignment.branch.name}
+                      </span>
+                    </label>
+                    <dl className="mt-3 grid min-w-0 gap-3 text-sm sm:grid-cols-2">
+                      <div className="min-w-0">
+                        <dt className="text-slate-500">Loại phân công</dt>
+                        <dd className="break-words font-medium">
+                          {manualRestorePreview.assignment.assignmentType === "MEMBER"
+                            ? "Nhân viên"
+                            : manualRestorePreview.assignment.assignmentType === "PRIMARY_MANAGER"
+                              ? "Quản lý chính"
+                              : "Quản lý hỗ trợ"}
+                        </dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-slate-500">Mã máy chấm công</dt>
+                        <dd className="break-words font-medium">
+                          {manualRestorePreview.assignment.attendanceMachineCode ?? "Không có"}
+                        </dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-slate-500">Ngày bắt đầu</dt>
+                        <dd className="font-medium">
+                          {displayBusinessDate(manualRestorePreview.assignment.effectiveFrom)}
+                        </dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-slate-500">Ngày kết thúc hiện tại</dt>
+                        <dd className="font-medium">
+                          {displayBusinessDate(manualRestorePreview.assignment.effectiveTo)}
+                        </dd>
+                      </div>
+                    </dl>
+                    <div className="mt-3">
+                      <Field label="Ngày kết thúc phân công sau khôi phục (không bắt buộc)">
+                        <input
+                          disabled={!manualRestoreAssignmentSelected}
+                          type="date"
+                          value={manualRestoreAssignmentEffectiveTo}
+                          onChange={(event) => {
+                            setManualRestoreAssignmentEffectiveTo(event.target.value);
+                            setRestoreError(null);
+                          }}
+                        />
+                      </Field>
+                      <p className="mt-1 text-xs text-slate-500">
+                        Đây là lựa chọn riêng, mặc định không mở lại phân công. Nếu không chọn, bạn
+                        có thể tạo hoặc sửa phân công sau khi khôi phục trạng thái. Khi chọn, để
+                        trống ngày kết thúc nếu phân công tiếp tục không thời hạn.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900">
+                    Không có phân công cũ cần mở lại. Sau khi khôi phục trạng thái, hãy tạo phân
+                    công mới nếu nhân viên cần xuất hiện trong phạm vi cơ sở.
+                  </p>
+                )}
+
+                {manualRestorePreview.user ? (
+                  <div className="rounded-xl border border-slate-200 p-4">
+                    <label className="flex items-start gap-3 text-sm font-medium">
+                      <input
+                        checked={manualRestoreUserSelected}
+                        className="mt-0.5 h-4 w-4 shrink-0 p-0"
+                        disabled={!manualRestorePreview.user.canReactivate}
+                        type="checkbox"
+                        onChange={(event) => {
+                          setManualRestoreUserSelected(event.target.checked);
+                          setRestoreError(null);
+                        }}
+                      />
+                      <span className="min-w-0 break-words">
+                        Kích hoạt lại tài khoản{" "}
+                        {manualRestorePreview.user.username ?? "chưa có tên đăng nhập"}
+                      </span>
+                    </label>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Mặc định không kích hoạt để tránh cấp lại quyền ngoài ý muốn. Phiên đăng nhập
+                      cũ không được phục hồi. Vai trò tài khoản:{" "}
+                      {userRoleLabel(manualRestorePreview.user.role)}.
+                    </p>
+                  </div>
+                ) : null}
+
+                <label className="flex items-start gap-3 rounded-xl border border-slate-200 p-4 text-sm font-medium">
+                  <input
+                    checked={manualRestoreAcknowledged}
+                    className="mt-0.5 h-4 w-4 shrink-0 p-0"
+                    type="checkbox"
+                    onChange={(event) => {
+                      setManualRestoreAcknowledged(event.target.checked);
+                      setRestoreError(null);
+                    }}
+                  />
+                  <span className="min-w-0 break-words">
+                    Tôi đã kiểm tra trạng thái, ngày hiệu lực và phân công được gợi ý.
+                  </span>
+                </label>
+              </div>
+            ) : null}
 
             <div className="mt-4">
               <Field label="Lý do hoàn tác nghỉ việc">
                 <textarea
-                  autoFocus
+                  autoFocus={!isManualRestoreMode}
                   className="min-h-24"
                   maxLength={500}
                   placeholder="Ví dụ: Bấm nhầm thao tác cho nghỉ việc."
@@ -1901,6 +2354,16 @@ export function StaffWorkspace({
                   {restoreError}
                 </p>
               ) : null}
+              {manualRestoreAvailable && !isManualRestoreMode ? (
+                <button
+                  className="mt-3 rounded-lg border border-emerald-700 px-4 py-2 text-sm font-medium text-emerald-800 hover:bg-emerald-50"
+                  ref={manualRestoreTriggerRef}
+                  type="button"
+                  onClick={() => void loadManualRestorePreview()}
+                >
+                  Khôi phục thủ công
+                </button>
+              ) : null}
             </div>
 
             <div className="mt-5 flex flex-wrap justify-end gap-2">
@@ -1912,14 +2375,25 @@ export function StaffWorkspace({
               >
                 Hủy
               </button>
-              <button
-                className="rounded-lg bg-emerald-800 px-4 py-2 font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
-                disabled={pending || !restoreReason.trim()}
-                type="button"
-                onClick={() => void restoreSelected()}
-              >
-                {pending ? "Đang hoàn tác…" : "Xác nhận hoàn tác"}
-              </button>
+              {isManualRestoreMode ? (
+                <button
+                  className="rounded-lg bg-emerald-800 px-4 py-2 font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
+                  disabled={pending || !canSubmitManualRestore}
+                  type="button"
+                  onClick={() => void restoreSelectedManually()}
+                >
+                  {pending ? "Đang khôi phục…" : "Khôi phục dữ liệu cũ"}
+                </button>
+              ) : (
+                <button
+                  className="rounded-lg bg-emerald-800 px-4 py-2 font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
+                  disabled={pending || !restoreReason.trim()}
+                  type="button"
+                  onClick={() => void restoreSelected()}
+                >
+                  {pending ? "Đang hoàn tác…" : "Xác nhận hoàn tác"}
+                </button>
+              )}
             </div>
           </div>
         </div>

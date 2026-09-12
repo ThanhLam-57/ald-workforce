@@ -305,6 +305,30 @@ export const staffRestoreSchema = z.object({
   reason: reasonSchema,
 });
 
+export const staffManualRestorePreviewQuerySchema = z.object({
+  version: z.coerce.number().int().positive(),
+});
+
+const staffManualRestoreRecordSchema = z.object({
+  id: idSchema,
+  version: z.number().int().positive(),
+});
+
+export const staffManualRestoreSchema = z.object({
+  version: z.number().int().positive(),
+  terminationAuditId: idSchema,
+  targetEmploymentStatus: z.enum(["ACTIVE", "ON_LEAVE"]),
+  history: staffManualRestoreRecordSchema,
+  assignment: staffManualRestoreRecordSchema
+    .extend({
+      effectiveTo: z.iso.date().nullable(),
+    })
+    .nullable(),
+  user: staffManualRestoreRecordSchema.nullable(),
+  reason: reasonSchema,
+  acknowledged: z.literal(true),
+});
+
 export const assignmentCreateSchema = z
   .object({
     staffId: idSchema,
@@ -2742,6 +2766,63 @@ export type StaffUpdateInput = z.infer<typeof staffUpdateSchema>;
 export type StaffArchiveInput = z.infer<typeof staffArchiveSchema>;
 export type StaffTerminateInput = z.infer<typeof staffTerminateSchema>;
 export type StaffRestoreInput = z.infer<typeof staffRestoreSchema>;
+export type StaffManualRestorePreviewQuery = z.infer<typeof staffManualRestorePreviewQuerySchema>;
+export type StaffManualRestoreInput = z.infer<typeof staffManualRestoreSchema>;
+export type StaffManualRestorePreviewDto = Readonly<{
+  eligible: boolean;
+  blockers: readonly string[];
+  warnings: readonly string[];
+  staff: Readonly<{
+    id: string;
+    staffCode: string;
+    fullName: string;
+    employmentStatus: "TERMINATED";
+    employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+    terminationDate: string;
+    version: number;
+  }>;
+  terminationAudit: Readonly<{
+    id: string;
+    occurredAt: string;
+  }>;
+  assignmentCutoff: string;
+  suggestedEmploymentStatus: "ACTIVE" | "ON_LEAVE";
+  suggestedEmploymentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+  history: Readonly<{
+    id: string;
+    employmentStatus: "TERMINATED";
+    employmentCategory: "OFFICIAL" | "PROBATION" | "CONTRACTOR" | "INTERN";
+    effectiveFrom: string;
+    effectiveTo: string | null;
+    version: number;
+  }> | null;
+  assignment: Readonly<{
+    id: string;
+    branch: Readonly<{
+      id: string;
+      code: string;
+      name: string;
+      isActive: boolean;
+    }>;
+    assignmentType: "MEMBER" | "PRIMARY_MANAGER" | "SECONDARY_MANAGER";
+    attendanceMachineCode: string | null;
+    effectiveFrom: string;
+    effectiveTo: string;
+    suggestedEffectiveTo: string | null;
+    version: number;
+  }> | null;
+  user: Readonly<{
+    id: string;
+    name: string;
+    username: string | null;
+    role: string;
+    active: boolean;
+    banned: boolean;
+    version: number;
+    canReactivate: boolean;
+  }> | null;
+  sessionsRestored: false;
+}>;
 export type StaffWorkScheduleCreateInput = z.infer<typeof staffWorkScheduleCreateSchema>;
 export type StaffWorkScheduleUpdateInput = z.infer<typeof staffWorkScheduleUpdateSchema>;
 export type StaffIdentityDocumentPresignInput = z.infer<typeof staffIdentityDocumentPresignSchema>;

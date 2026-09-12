@@ -8,6 +8,8 @@ import {
   assignmentUpdateSchema,
   staffCreateSchema,
   staffIdentityDocumentPresignSchema,
+  staffManualRestorePreviewQuerySchema,
+  staffManualRestoreSchema,
   staffCodePreviewQuerySchema,
   staffOnboardSchema,
   staffProfileUpdateSchema,
@@ -316,5 +318,31 @@ describe("employment milestone dates", () => {
         reason: "Thao tác cho nghỉ việc được thực hiện nhầm.",
       }),
     ).toThrow();
+  });
+
+  it("validate đầy đủ lựa chọn khi khôi phục thủ công dữ liệu nghỉ việc cũ", () => {
+    expect(staffManualRestorePreviewQuerySchema.parse({ version: "3" })).toEqual({ version: 3 });
+    const input = {
+      version: 3,
+      terminationAuditId: "11111111-1111-4111-8111-111111111111",
+      targetEmploymentStatus: "ACTIVE" as const,
+      history: { id: "22222222-2222-4222-8222-222222222222", version: 2 },
+      assignment: {
+        id: "33333333-3333-4333-8333-333333333333",
+        version: 2,
+        effectiveTo: null,
+      },
+      user: { id: "44444444-4444-4444-8444-444444444444", version: 2 },
+      reason: "Hoàn tác thao tác cho nghỉ việc đã bấm nhầm.",
+      acknowledged: true as const,
+    };
+
+    expect(staffManualRestoreSchema.parse(input)).toEqual(input);
+    expect(() => staffManualRestoreSchema.parse({ ...input, acknowledged: false })).toThrow();
+    expect(() =>
+      staffManualRestoreSchema.parse({ ...input, targetEmploymentStatus: "TERMINATED" }),
+    ).toThrow();
+    expect(() => staffManualRestoreSchema.parse({ ...input, reason: " " })).toThrow();
+    expect(() => staffManualRestorePreviewQuerySchema.parse({ version: "0" })).toThrow();
   });
 });
