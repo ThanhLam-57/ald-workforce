@@ -134,7 +134,7 @@ export function canonicalPayrollHash(value: unknown): string {
 }
 
 async function appendAudit(
-  tx: Transaction,
+  database: Pick<Prisma.TransactionClient, "auditLog">,
   input: Readonly<{
     actor: ActorContext;
     action: string;
@@ -147,7 +147,7 @@ async function appendAudit(
   }>,
 ): Promise<void> {
   const branchId = auditBranchId(input.after) ?? auditBranchId(input.before);
-  await tx.auditLog.create({
+  await database.auditLog.create({
     data: {
       companyId: input.actor.companyId,
       ...(branchId ? { branchId } : {}),
@@ -860,34 +860,32 @@ export async function getPayrollPrintData(
 > {
   requirePayrollRead(actor);
   await verifyEmployeeSelfService(prisma, actor);
-  return prisma.$transaction(async (tx) => {
-    const period = periodDto(await getPeriodRecord(tx, actor, periodId), actor);
-    if (period.entries.length === 0) {
-      throw new DomainError("VALIDATION_ERROR", "Kỳ lương chưa có dữ liệu đã tính để in.");
-    }
-    const staffId = actor.role === "LIVE_EMPLOYEE" ? actor.staffId! : requestedStaffId;
-    const entry = staffId
-      ? (period.entries.find((item) => item.staff.id === staffId) ?? null)
-      : null;
-    if (staffId && !entry) {
-      throw new DomainError("NOT_FOUND", "Không tìm thấy phiếu lương trong phạm vi được phép.");
-    }
-    await appendAudit(tx, {
-      actor,
-      action: entry ? "PAYROLL_PAYSLIP_PRINT" : "PAYROLL_BRANCH_PRINT",
-      entityType: "PayrollPeriod",
-      entityId: period.id,
-      reason: systemAuditReason(entry ? "PAYROLL_PAYSLIP_PRINT" : "PAYROLL_BRANCH_PRINT"),
-      after: {
-        branchId: period.branch.id,
-        month: period.month,
-        revision: period.revision,
-        staffId: entry?.staff.id ?? null,
-      },
-      metadata,
-    });
-    return { period, entry };
+  // Large payroll snapshots can take longer than Prisma's interactive transaction timeout.
+  // Printing is a read plus an access audit, so neither operation needs a shared transaction.
+  const period = periodDto(await getPeriodRecord(prisma, actor, periodId), actor);
+  if (period.entries.length === 0) {
+    throw new DomainError("VALIDATION_ERROR", "Kỳ lương chưa có dữ liệu đã tính để in.");
+  }
+  const staffId = actor.role === "LIVE_EMPLOYEE" ? actor.staffId! : requestedStaffId;
+  const entry = staffId ? (period.entries.find((item) => item.staff.id === staffId) ?? null) : null;
+  if (staffId && !entry) {
+    throw new DomainError("NOT_FOUND", "Không tìm thấy phiếu lương trong phạm vi được phép.");
+  }
+  await appendAudit(prisma, {
+    actor,
+    action: entry ? "PAYROLL_PAYSLIP_PRINT" : "PAYROLL_BRANCH_PRINT",
+    entityType: "PayrollPeriod",
+    entityId: period.id,
+    reason: systemAuditReason(entry ? "PAYROLL_PAYSLIP_PRINT" : "PAYROLL_BRANCH_PRINT"),
+    after: {
+      branchId: period.branch.id,
+      month: period.month,
+      revision: period.revision,
+      staffId: entry?.staff.id ?? null,
+    },
+    metadata,
   });
+  return { period, entry };
 }
 
 export async function createPayrollPeriod(

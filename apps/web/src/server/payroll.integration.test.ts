@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { prisma } from "@ald/db";
 import type { ActorContext, DomainError } from "@ald/domain";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   calculatePayrollPeriod,
@@ -893,15 +893,37 @@ describe("payroll lifecycle, snapshot và authorization", () => {
   });
 
   it("in trực tiếp chỉ đọc dữ liệu đã lưu, có audit và giữ payroll scope", async () => {
-    const printable = await getPayrollPrintData(gm, periodId, liveId, metadata);
-    expect(printable.entry?.staff.id).toBe(liveId);
-    expect(printable.period.entries.length).toBeGreaterThan(0);
-    await expect(getPayrollPrintData(manager, periodId, liveId, metadata)).rejects.toMatchObject({
-      code: "FORBIDDEN",
-    } satisfies Partial<DomainError>);
-    await expect(getPayrollPrintData(outsider, periodId, liveId, metadata)).rejects.toMatchObject({
-      code: "NOT_FOUND",
-    } satisfies Partial<DomainError>);
+    const transactionSpy = vi.spyOn(prisma, "$transaction");
+    const branchPrintMetadata = {
+      ...metadata,
+      requestId: `${metadata.requestId}-branch-print`,
+    };
+    try {
+      const printable = await getPayrollPrintData(gm, periodId, liveId, metadata);
+      expect(printable.entry?.staff.id).toBe(liveId);
+      expect(printable.period.entries.length).toBeGreaterThan(0);
+
+      const branchPrintable = await getPayrollPrintData(
+        gm,
+        periodId,
+        undefined,
+        branchPrintMetadata,
+      );
+      expect(branchPrintable.entry).toBeNull();
+      expect(branchPrintable.period.entries.length).toBeGreaterThan(0);
+
+      await expect(getPayrollPrintData(manager, periodId, liveId, metadata)).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      } satisfies Partial<DomainError>);
+      await expect(getPayrollPrintData(outsider, periodId, liveId, metadata)).rejects.toMatchObject(
+        {
+          code: "NOT_FOUND",
+        } satisfies Partial<DomainError>,
+      );
+      expect(transactionSpy).not.toHaveBeenCalled();
+    } finally {
+      transactionSpy.mockRestore();
+    }
     await expect(
       prisma.auditLog.findFirst({
         where: {
@@ -911,6 +933,19 @@ describe("payroll lifecycle, snapshot và authorization", () => {
         },
       }),
     ).resolves.toMatchObject({ reason: "SYSTEM:PAYROLL_PAYSLIP_PRINT" });
+    const branchAudit = await prisma.auditLog.findFirst({
+      where: {
+        companyId,
+        entityId: periodId,
+        action: "PAYROLL_BRANCH_PRINT",
+        requestId: branchPrintMetadata.requestId,
+      },
+    });
+    expect(branchAudit).toMatchObject({
+      branchId,
+      reason: "SYSTEM:PAYROLL_BRANCH_PRINT",
+    });
+    expect(branchAudit?.after).toMatchObject({ staffId: null });
   });
 
   it("tính kỳ nghỉ việc cuối cùng nhưng loại nhân viên khỏi kỳ tháng kế tiếp", async () => {
