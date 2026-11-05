@@ -54,6 +54,15 @@ function payrollFixture(
           staffCode: "LIVE01",
           fullName: "Nhân viên kiểm thử",
           streamingAlias: "live-test",
+          attendanceMachineCode: "00033",
+          attendanceMachineCodeIntervals: [
+            {
+              assignmentId: "55555555-5555-4555-8555-555555555555",
+              attendanceMachineCode: "00033",
+              effectiveFrom: "2026-07-01",
+              effectiveTo: null,
+            },
+          ],
         },
         workUnits: "1",
         workedDayCount: 1,
@@ -202,7 +211,12 @@ test("Payroll lọc theo tháng, cơ sở, nhân viên và lưu ô chỉnh sửa
 
   await expect(page.getByRole("heading", { name: "Payroll", exact: true })).toBeVisible();
   await expect(page.getByText("Kỳ lương theo tháng", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("1. Kỳ lương")).toHaveValue("2026-07");
+  await expect(
+    page.getByText("CS01 — Cơ sở kiểm thử · 1 nhân viên", { exact: true }),
+  ).toBeVisible();
+  const monthInput = page.getByLabel("1. Kỳ lương");
+  await monthInput.fill("2026-07");
+  await expect(monthInput).toHaveValue("2026-07");
   await page
     .getByLabel("Chọn nhân viên Payroll")
     .selectOption("44444444-4444-4444-8444-444444444444");

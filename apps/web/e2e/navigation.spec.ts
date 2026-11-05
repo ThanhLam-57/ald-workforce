@@ -115,15 +115,33 @@ test("GM nhập và sửa ngày gia nhập, ngày chính thức trong hồ sơ n
     staffCode: "UI-DATE-01",
     fullName: "Nhân viên kiểm thử ngày",
     streamingAlias: null,
+    tiktokChannelId: null,
     email: null,
     phone: null,
+    dateOfBirth: null,
+    citizenIdNumber: null,
+    bankAccountNumber: null,
+    bankName: null,
+    permanentAddress: null,
+    temporaryAddress: null,
+    facebookUrl: null,
+    university: null,
     jobTitle: "Nhân viên Live",
     baseSalaryAmount: "7000000",
     joinedDate: "2026-07-01",
     officialDate: "2026-07-15",
+    terminationDate: null,
     employmentCategory: "OFFICIAL",
     employmentStatus: "ACTIVE",
+    archivedAt: null,
     currentAssignments: [],
+    assignmentHistory: [],
+    currentSchedule: null,
+    scheduleHistory: [],
+    identityDocumentStatus: { front: null, back: null },
+    bankQrStatus: null,
+    identityDocuments: [],
+    bankQrDocument: null,
     user: null,
     level: null,
     version: 1,
@@ -178,14 +196,14 @@ test("GM nhập và sửa ngày gia nhập, ngày chính thức trong hồ sơ n
   await createDialog.getByLabel("Mã nhân viên").fill("UI-DATE-02");
   await createDialog.getByLabel("Họ và tên").fill("Nhân viên tạo mới");
   await createDialog.getByLabel("Vị trí công việc").fill("Nhân viên Live");
-  await createDialog.getByLabel("Ngày gia nhập công ty").fill("2026-07-10");
-  await createDialog.getByLabel("Ngày lên chính thức").fill("2026-07-01");
+  await createDialog.getByLabel("Ngày gia nhập", { exact: true }).fill("2026-07-10");
+  await createDialog.getByLabel("Ngày chính thức", { exact: true }).fill("2026-07-01");
   expect(
     await createDialog
-      .getByLabel("Ngày lên chính thức")
+      .getByLabel("Ngày chính thức", { exact: true })
       .evaluate((element) => (element as HTMLInputElement).validity.valid),
   ).toBe(false);
-  await createDialog.getByLabel("Ngày lên chính thức").fill("2026-07-15");
+  await createDialog.getByLabel("Ngày chính thức", { exact: true }).fill("2026-07-15");
   await createDialog.getByRole("button", { name: "Lưu dữ liệu" }).click();
   await expect.poll(() => createdBody).not.toBeNull();
   expect(createdBody).toMatchObject({
@@ -196,10 +214,10 @@ test("GM nhập và sửa ngày gia nhập, ngày chính thức trong hồ sơ n
 
   await page.getByRole("button", { name: "Sửa", exact: true }).click();
   const editDialog = page.getByRole("dialog", { name: "Sửa hồ sơ nhân viên" });
-  await expect(editDialog.getByLabel("Ngày gia nhập công ty")).toHaveValue("2026-07-01");
-  await expect(editDialog.getByLabel("Ngày lên chính thức")).toHaveValue("2026-07-15");
-  await editDialog.getByLabel("Ngày gia nhập công ty").fill("2026-07-02");
-  await editDialog.getByLabel("Ngày lên chính thức").fill("2026-07-20");
+  await expect(editDialog.getByLabel("Ngày gia nhập", { exact: true })).toHaveValue("2026-07-01");
+  await expect(editDialog.getByLabel("Ngày chính thức", { exact: true })).toHaveValue("2026-07-15");
+  await editDialog.getByLabel("Ngày gia nhập", { exact: true }).fill("2026-07-02");
+  await editDialog.getByLabel("Ngày chính thức", { exact: true }).fill("2026-07-20");
   await editDialog.getByRole("button", { name: "Xác nhận và lưu" }).click();
   await expect.poll(() => updatedBody).not.toBeNull();
   expect(updatedBody).toMatchObject({
@@ -210,8 +228,8 @@ test("GM nhập và sửa ngày gia nhập, ngày chính thức trong hồ sơ n
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Thêm nhân viên" }).click();
   const mobileDialog = page.getByRole("dialog", { name: "Thêm nhân viên" });
-  await expect(mobileDialog.getByLabel("Ngày gia nhập công ty")).toBeVisible();
-  await expect(mobileDialog.getByLabel("Ngày lên chính thức")).toBeVisible();
+  await expect(mobileDialog.getByLabel("Ngày gia nhập", { exact: true })).toBeVisible();
+  await expect(mobileDialog.getByLabel("Ngày chính thức", { exact: true })).toBeVisible();
   const mobileDialogBox = await mobileDialog.boundingBox();
   expect(mobileDialogBox).not.toBeNull();
   expect(mobileDialogBox!.x).toBeGreaterThanOrEqual(0);
