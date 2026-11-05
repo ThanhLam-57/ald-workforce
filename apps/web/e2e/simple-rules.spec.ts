@@ -146,6 +146,7 @@ test("GM thiết lập thưởng theo xu, thưởng tháng và ngày áp dụng 
   const penaltyDate = page.getByLabel("Ngày áp dụng phạt");
   expect(await penaltyDate.getAttribute("min")).toBeNull();
   await page.getByLabel("Cách ghi nhận lỗi 1").selectOption("CHECK_IN_LATE");
+  await page.getByLabel("Nguồn giờ chuẩn lỗi 1").selectOption("RULE_FIXED");
   await page.getByLabel("Giờ bắt đầu ca 1").fill("09:00");
   await page.getByLabel("Số phút du di 1").fill("15");
   await expect(page.getByText(/Check-in đến.*09:15.*không bị phạt/)).toBeVisible();
@@ -155,6 +156,7 @@ test("GM thiết lập thưởng theo xu, thưởng tháng và ngày áp dụng 
       {
         automaticCondition: {
           type: "CHECK_IN_LATE",
+          thresholdSource: "RULE_FIXED",
           scheduledStartMinutes: 540,
           graceMinutes: 15,
           branchId: null,

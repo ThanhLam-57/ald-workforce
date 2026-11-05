@@ -274,15 +274,17 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
   });
   expect(staffResponse.ok(), await staffResponse.text()).toBe(true);
   const staff = (await staffResponse.json()) as { data: { id: string } };
-  await page.request.post("/api/assignments", {
+  const assignmentResponse = await page.request.post("/api/assignments", {
     data: {
       staffId: staff.data.id,
       branchId: branch.data.id,
       assignmentType: "MEMBER",
+      attendanceMachineCode: `PMC${suffix}`,
       effectiveFrom: `${month}-01`,
       effectiveTo: null,
     },
   });
+  expect(assignmentResponse.ok(), await assignmentResponse.text()).toBe(true);
   const attendanceResponse = await page.request.post("/api/attendance", {
     data: {
       staffId: staff.data.id,
@@ -333,11 +335,10 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
     await expect(page.getByLabel("Lý do thay đổi attendance")).toHaveCount(0);
     const [year, monthNumber, day] = businessDate.split("-");
     const row = page.getByRole("row").filter({ hasText: `${day}/${monthNumber}/${year}` });
-    await row
-      .getByRole("button", {
-        name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
-      })
-      .click();
+    const evidenceButton = row.getByRole("button", {
+      name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
+    });
+    await evidenceButton.press("Enter");
     const dialog = page.getByRole("dialog", { name: `Lỗi và evidence ngày ${businessDate}` });
     await dialog.getByRole("button", { name: "Thêm lỗi" }).click();
     await dialog.getByLabel(`Loại lỗi ${businessDate}`).selectOption(penaltyItem!.id);
@@ -356,14 +357,14 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
     await expect(page.getByText(/tổng phạt tháng 50\.000/)).toBeVisible();
     await expect.poll(() => createRequestCount).toBe(1);
     expect(createReason).toBeUndefined();
-    await dialog.getByRole("button", { name: "Đóng" }).click();
+    await expect(dialog).toHaveCount(0);
     const activeViolationButton = row.getByRole("button", {
       name: `Mở lỗi và evidence ngày ${businessDate}, 1 lỗi hiện hành`,
     });
     await expect(
       activeViolationButton.getByTitle(`Đi muộn E2E ${suffix}`, { exact: true }),
     ).toBeVisible();
-    await activeViolationButton.click();
+    await activeViolationButton.press("Enter");
     const refreshedDialog = page.getByRole("dialog", {
       name: `Lỗi và evidence ngày ${businessDate}`,
     });
@@ -381,8 +382,7 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
     await refreshedDialog.getByRole("button", { name: "Hủy lỗi" }).click();
     await expect.poll(() => cancelRequestCount).toBe(1);
     expect(cancelReason).toBeUndefined();
-    await expect(refreshedDialog.getByText("Đã hủy", { exact: true })).toBeVisible();
-    await refreshedDialog.getByRole("button", { name: "Đóng" }).click();
+    await expect(refreshedDialog).toHaveCount(0);
     await expect(
       row.getByRole("button", {
         name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
@@ -393,7 +393,7 @@ test("GM publish rule và ghi nhiều lỗi từ hồ sơ nhân viên", async ({
       .getByRole("button", {
         name: `Mở lỗi và evidence ngày ${businessDate}, 0 lỗi hiện hành`,
       })
-      .click();
+      .press("Enter");
     const historyDialog = page.getByRole("dialog", {
       name: `Lỗi và evidence ngày ${businessDate}`,
     });
@@ -450,6 +450,7 @@ test("GM sửa branch overview và dữ liệu phản ánh về employee sheet",
       staffId: staff.data.id,
       branchId: branch.data.id,
       assignmentType: "MEMBER",
+      attendanceMachineCode: `OVM${suffix}`,
       effectiveFrom: businessDate,
       effectiveTo: null,
     },
