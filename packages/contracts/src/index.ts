@@ -1,6 +1,8 @@
 import { AUTH_ROLES } from "@ald/domain";
 import { z } from "zod";
 
+export * from "./revenue-leaderboard.js";
+
 const trimmedText = (label: string, max: number) =>
   z.string().trim().min(1, `${label} là bắt buộc.`).max(max);
 
